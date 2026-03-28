@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏦 TradingAgents - Repository Structure</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        h1 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            text-align: center;
+            color: #888;
+            font-size: 1.1rem;
+            margin-bottom: 40px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        /* Agent Flow Section */
+        .flow-section {
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 40px;
+            margin-bottom: 40px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .flow-section h2 {
+            font-size: 1.8rem;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        /* Flow Diagram */
+        .flow-diagram {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+        .flow-row {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .flow-node {
+            background: rgba(255,255,255,0.08);
+            border: 2px solid;
+            border-radius: 16px;
+            padding: 16px 24px;
+            text-align: center;
+            min-width: 180px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: default;
+        }
+        .flow-node:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+        }
+        .flow-node .emoji { font-size: 2rem; display: block; margin-bottom: 6px; }
+        .flow-node .label { font-weight: 700; font-size: 0.95rem; }
+        .flow-node .desc { font-size: 0.78rem; color: #aaa; margin-top: 4px; }
+
+        /* Node Colors */
+        .node-start { border-color: #00e676; background: rgba(0,230,118,0.1); }
+        .node-analyst { border-color: #42a5f5; background: rgba(66,165,245,0.1); }
+        .node-researcher { border-color: #ab47bc; background: rgba(171,71,188,0.1); }
+        .node-manager { border-color: #ff7043; background: rgba(255,112,67,0.1); }
+        .node-trader { border-color: #fdd835; background: rgba(253,216,53,0.1); }
+        .node-risk { border-color: #ef5350; background: rgba(239,83,80,0.1); }
+        .node-final { border-color: #26c6da; background: rgba(38,198,218,0.15); }
+        .node-data { border-color: #66bb6a; background: rgba(102,187,106,0.1); }
+        .node-llm { border-color: #ffab40; background: rgba(255,171,64,0.1); }
+        .node-memory { border-color: #ce93d8; background: rgba(206,147,216,0.1); }
+
+        .arrow {
+            font-size: 1.8rem;
+            color: #666;
+            text-align: center;
+            line-height: 1;
+        }
+        .arrow-side { font-size: 1.4rem; color: #666; align-self: center; }
+
+        /* Repo Tree Section */
+        .tree-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+        @media (max-width: 900px) { .tree-section { grid-template-columns: 1fr; } }
+
+        .tree-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .tree-card h3 {
+            font-size: 1.2rem;
+            margin-bottom: 16px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .tree-item {
+            padding: 6px 0 6px 20px;
+            font-size: 0.9rem;
+            border-left: 2px solid rgba(255,255,255,0.1);
+            margin-left: 10px;
+        }
+        .tree-item .file-emoji { margin-right: 6px; }
+        .tree-item .filename { color: #90caf9; }
+        .tree-item .filedesc { color: #777; font-size: 0.8rem; margin-left: 4px; }
+
+        /* Legend */
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85rem;
+        }
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid;
+        }
+
+        /* Rating Scale */
+        .rating-section {
+            background: rgba(255,255,255,0.05);
+            border-radius: 20px;
+            padding: 30px 40px;
+            margin-bottom: 40px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .rating-scale {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+        .rating-badge {
+            padding: 10px 22px;
+            border-radius: 30px;
+            font-weight: 700;
+            font-size: 0.95rem;
+        }
+        .r-buy { background: #1b5e20; color: #a5d6a7; }
+        .r-over { background: #33691e; color: #c5e1a5; }
+        .r-hold { background: #e65100; color: #ffcc80; }
+        .r-under { background: #bf360c; color: #ffab91; }
+        .r-sell { background: #b71c1c; color: #ef9a9a; }
+
+        /* Info box */
+        .info-box {
+            background: rgba(255,193,7,0.1);
+            border: 1px solid rgba(255,193,7,0.3);
+            border-radius: 12px;
+            padding: 20px 28px;
+            margin: 20px 0;
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+        .info-box strong { color: #ffd54f; }
+
+        /* Phase labels */
+        .phase-label {
+            background: rgba(255,255,255,0.08);
+            border-radius: 8px;
+            padding: 6px 18px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #aaa;
+        }
+        .divider {
+            width: 80%;
+            height: 1px;
+            background: rgba(255,255,255,0.1);
+            margin: 8px 0;
+        }
+
+        /* Crypto section */
+        .crypto-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            margin-top: 16px;
+        }
+        .crypto-badge {
+            padding: 10px 20px;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏦 TradingAgents Framework</h1>
+        <p class="subtitle">Multi-Agent LLM Financial Trading System &mdash; Complete Architecture Overview</p>
+
+        <!-- ======================== AGENT PIPELINE FLOW ======================== -->
+        <div class="flow-section">
+            <h2>🔄 Agent Pipeline Flow</h2>
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot" style="border-color:#00e676;background:rgba(0,230,118,0.3)"></div> Start</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#42a5f5;background:rgba(66,165,245,0.3)"></div> Analysts</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#ab47bc;background:rgba(171,71,188,0.3)"></div> Researchers</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#ff7043;background:rgba(255,112,67,0.3)"></div> Manager</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#fdd835;background:rgba(253,216,53,0.3)"></div> Trader</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#ef5350;background:rgba(239,83,80,0.3)"></div> Risk Team</div>
+                <div class="legend-item"><div class="legend-dot" style="border-color:#26c6da;background:rgba(38,198,218,0.3)"></div> Final Decision</div>
+            </div>
+
+            <div class="flow-diagram">
+                <!-- Phase 1: Input -->
+                <div class="phase-label">📥 Phase 1 &mdash; Input</div>
+                <div class="flow-row">
+                    <div class="flow-node node-start">
+                        <span class="emoji">🚀</span>
+                        <span class="label">START</span>
+                        <span class="desc">Ticker + Trade Date</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 2: Data Gathering Analysts -->
+                <div class="phase-label">📊 Phase 2 &mdash; Data Gathering (Parallel-Ready Analysts)</div>
+                <div class="flow-row">
+                    <div class="flow-node node-analyst">
+                        <span class="emoji">📈</span>
+                        <span class="label">Market Analyst</span>
+                        <span class="desc">Technical indicators, SMA, EMA, MACD, RSI, Bollinger, ATR</span>
+                    </div>
+                    <div class="flow-node node-analyst">
+                        <span class="emoji">💬</span>
+                        <span class="label">Social Media Analyst</span>
+                        <span class="desc">Sentiment analysis from social feeds</span>
+                    </div>
+                    <div class="flow-node node-analyst">
+                        <span class="emoji">📰</span>
+                        <span class="label">News Analyst</span>
+                        <span class="desc">Global news, insider transactions</span>
+                    </div>
+                    <div class="flow-node node-analyst">
+                        <span class="emoji">🏢</span>
+                        <span class="label">Fundamentals Analyst</span>
+                        <span class="desc">Balance sheet, cash flow, income, P/E, ROE</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 3: Investment Debate -->
+                <div class="phase-label">⚔️ Phase 3 &mdash; Investment Debate</div>
+                <div class="flow-row">
+                    <div class="flow-node node-researcher">
+                        <span class="emoji">🐂</span>
+                        <span class="label">Bull Researcher</span>
+                        <span class="desc">Argues FOR investing, highlights upside</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;justify-content:center;align-items:center;">
+                        <span style="font-size:2rem;">🔁</span>
+                        <span style="font-size:0.75rem;color:#888;">N rounds</span>
+                    </div>
+                    <div class="flow-node node-researcher">
+                        <span class="emoji">🐻</span>
+                        <span class="label">Bear Researcher</span>
+                        <span class="desc">Argues AGAINST investing, highlights risks</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 4: Research Manager -->
+                <div class="phase-label">🧑‍⚖️ Phase 4 &mdash; Judgment</div>
+                <div class="flow-row">
+                    <div class="flow-node node-manager">
+                        <span class="emoji">👨‍💼</span>
+                        <span class="label">Research Manager</span>
+                        <span class="desc">Judges debate → Buy / Sell / Hold decision + investment plan</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 5: Trader -->
+                <div class="phase-label">💰 Phase 5 &mdash; Trade Planning</div>
+                <div class="flow-row">
+                    <div class="flow-node node-trader">
+                        <span class="emoji">🤖</span>
+                        <span class="label">Trader Agent</span>
+                        <span class="desc">Creates actionable trade plan with entry/exit strategy</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 6: Risk Debate -->
+                <div class="phase-label">🛡️ Phase 6 &mdash; Risk Analysis Debate</div>
+                <div class="flow-row">
+                    <div class="flow-node node-risk">
+                        <span class="emoji">🔥</span>
+                        <span class="label">Aggressive Analyst</span>
+                        <span class="desc">Pushes for higher risk/reward</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;justify-content:center;align-items:center;">
+                        <span style="font-size:2rem;">🔁</span>
+                        <span style="font-size:0.75rem;color:#888;">N rounds</span>
+                    </div>
+                    <div class="flow-node node-risk">
+                        <span class="emoji">⚖️</span>
+                        <span class="label">Neutral Analyst</span>
+                        <span class="desc">Balanced risk perspective</span>
+                    </div>
+                    <div style="display:flex;flex-direction:column;justify-content:center;align-items:center;">
+                        <span style="font-size:2rem;">🔁</span>
+                        <span style="font-size:0.75rem;color:#888;">N rounds</span>
+                    </div>
+                    <div class="flow-node node-risk">
+                        <span class="emoji">🛡️</span>
+                        <span class="label">Conservative Analyst</span>
+                        <span class="desc">Prioritizes capital preservation</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+
+                <!-- Phase 7: Final Decision -->
+                <div class="phase-label">🏁 Phase 7 &mdash; Final Decision</div>
+                <div class="flow-row">
+                    <div class="flow-node node-final">
+                        <span class="emoji">👔</span>
+                        <span class="label">Portfolio Manager</span>
+                        <span class="desc">Synthesizes everything → FINAL RATING</span>
+                    </div>
+                </div>
+
+                <div class="arrow">⬇️</div>
+                <div class="flow-row">
+                    <div class="flow-node node-final" style="border-color:#00e676;">
+                        <span class="emoji">✅</span>
+                        <span class="label">Signal Processor</span>
+                        <span class="desc">Extracts clean rating: BUY / OVERWEIGHT / HOLD / UNDERWEIGHT / SELL</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================== RATING SCALE ======================== -->
+        <div class="rating-section">
+            <h2 style="text-align:center;margin-bottom:4px;">📋 Output Rating Scale</h2>
+            <p style="text-align:center;color:#888;font-size:0.9rem;margin-bottom:16px;">The Portfolio Manager outputs exactly one of these ratings</p>
+            <div class="rating-scale">
+                <div class="rating-badge r-buy">🟢 BUY</div>
+                <div class="rating-badge r-over">🟩 OVERWEIGHT</div>
+                <div class="rating-badge r-hold">🟡 HOLD</div>
+                <div class="rating-badge r-under">🟧 UNDERWEIGHT</div>
+                <div class="rating-badge r-sell">🔴 SELL</div>
+            </div>
+            <div class="info-box" style="margin-top:20px;">
+                <strong>⚠️ Shorting Analysis:</strong> The current framework does <strong>not</strong> include an explicit SHORT recommendation.
+                The rating scale goes from BUY → SELL. The Bear Researcher argues <em>against</em> investing (highlighting risks &amp; downsides),
+                but the system is designed around <strong>long-only positions</strong>. A SELL means "exit/avoid" — not "short the asset."
+                To add true shorting, the Trader and Portfolio Manager prompts would need to be extended with SHORT as an additional action.
+            </div>
+        </div>
+
+        <!-- ======================== SUPPORTED ASSETS ======================== -->
+        <div class="flow-section">
+            <h2>🪙 Supported Assets</h2>
+            <p style="text-align:center;color:#888;margin-bottom:20px;">Uses yfinance tickers — supports stocks, ETFs, and crypto</p>
+            <h3 style="text-align:center;margin-bottom:10px;">🏦 Stocks</h3>
+            <div class="crypto-grid">
+                <div class="crypto-badge">NVDA</div>
+                <div class="crypto-badge">AAPL</div>
+                <div class="crypto-badge">TSLA</div>
+                <div class="crypto-badge">MSFT</div>
+                <div class="crypto-badge">AMZN</div>
+                <div class="crypto-badge">GOOG</div>
+                <div class="crypto-badge">META</div>
+                <div class="crypto-badge">Any ticker...</div>
+            </div>
+            <h3 style="text-align:center;margin:20px 0 10px;">🪙 Crypto (use yfinance format)</h3>
+            <div class="crypto-grid">
+                <div class="crypto-badge" style="border-color:#f7931a;">₿ BTC-USD</div>
+                <div class="crypto-badge" style="border-color:#627eea;">Ξ ETH-USD</div>
+                <div class="crypto-badge" style="border-color:#00ffa3;">◎ SOL-USD</div>
+                <div class="crypto-badge" style="border-color:#2775ca;">💲 USDC-USD</div>
+                <div class="crypto-badge" style="border-color:#c3a634;">🐕 DOGE-USD</div>
+                <div class="crypto-badge" style="border-color:#e6007a;">● DOT-USD</div>
+                <div class="crypto-badge" style="border-color:#0033ad;">🔗 LINK-USD</div>
+                <div class="crypto-badge" style="border-color:#346d9c;">❄️ AVAX-USD</div>
+                <div class="crypto-badge" style="border-color:#26a17b;">₮ XRP-USD</div>
+                <div class="crypto-badge" style="border-color:#2b6cb0;">🌙 ADA-USD</div>
+            </div>
+            <div class="info-box" style="margin-top:20px;">
+                <strong>📝 Note on Crypto:</strong> Crypto assets use the <code>-USD</code> suffix in yfinance.
+                Price data &amp; technical indicators work perfectly. However, fundamental data (balance sheets, income statements)
+                is <strong>not available</strong> for crypto — the agents will gracefully handle this and focus on technical &amp; sentiment analysis instead.
+            </div>
+        </div>
+
+        <!-- ======================== REPO STRUCTURE ======================== -->
+        <div class="flow-section">
+            <h2>📁 Repository Structure</h2>
+        </div>
+
+        <div class="tree-section">
+            <!-- Core Entry Points -->
+            <div class="tree-card">
+                <h3>🚪 Entry Points</h3>
+                <div class="tree-item"><span class="file-emoji">🐍</span><span class="filename">main.py</span><span class="filedesc"> — Main script to run analysis</span></div>
+                <div class="tree-item"><span class="file-emoji">🧪</span><span class="filename">test.py</span><span class="filedesc"> — Test runner</span></div>
+                <div class="tree-item"><span class="file-emoji">📦</span><span class="filename">pyproject.toml</span><span class="filedesc"> — Dependencies &amp; project config</span></div>
+                <div class="tree-item"><span class="file-emoji">🔒</span><span class="filename">.env</span><span class="filedesc"> — API keys (gitignored)</span></div>
+                <div class="tree-item"><span class="file-emoji">📋</span><span class="filename">.env.example</span><span class="filedesc"> — Template for API keys</span></div>
+            </div>
+
+            <!-- Graph (Orchestration) -->
+            <div class="tree-card">
+                <h3>🔄 tradingagents/graph/ <span style="color:#666">— Orchestration</span></h3>
+                <div class="tree-item"><span class="file-emoji">🕸️</span><span class="filename">trading_graph.py</span><span class="filedesc"> — Main TradingAgentsGraph class</span></div>
+                <div class="tree-item"><span class="file-emoji">🏗️</span><span class="filename">setup.py</span><span class="filedesc"> — Builds the LangGraph workflow</span></div>
+                <div class="tree-item"><span class="file-emoji">🚦</span><span class="filename">conditional_logic.py</span><span class="filedesc"> — Routing: when to loop/continue</span></div>
+                <div class="tree-item"><span class="file-emoji">📡</span><span class="filename">propagation.py</span><span class="filedesc"> — State init &amp; graph execution</span></div>
+                <div class="tree-item"><span class="file-emoji">🪞</span><span class="filename">reflection.py</span><span class="filedesc"> — Post-trade reflection &amp; learning</span></div>
+                <div class="tree-item"><span class="file-emoji">📊</span><span class="filename">signal_processing.py</span><span class="filedesc"> — Extracts final BUY/HOLD/SELL</span></div>
+            </div>
+
+            <!-- Agents: Analysts -->
+            <div class="tree-card">
+                <h3>📊 tradingagents/agents/analysts/ <span style="color:#666">— Data Gatherers</span></h3>
+                <div class="tree-item"><span class="file-emoji">📈</span><span class="filename">market_analyst.py</span><span class="filedesc"> — Technical indicators analysis</span></div>
+                <div class="tree-item"><span class="file-emoji">💬</span><span class="filename">social_media_analyst.py</span><span class="filedesc"> — Social sentiment analysis</span></div>
+                <div class="tree-item"><span class="file-emoji">📰</span><span class="filename">news_analyst.py</span><span class="filedesc"> — News &amp; world events</span></div>
+                <div class="tree-item"><span class="file-emoji">🏢</span><span class="filename">fundamentals_analyst.py</span><span class="filedesc"> — Financial statements</span></div>
+            </div>
+
+            <!-- Agents: Researchers -->
+            <div class="tree-card">
+                <h3>⚔️ tradingagents/agents/researchers/ <span style="color:#666">— Debate</span></h3>
+                <div class="tree-item"><span class="file-emoji">🐂</span><span class="filename">bull_researcher.py</span><span class="filedesc"> — Makes the case FOR buying</span></div>
+                <div class="tree-item"><span class="file-emoji">🐻</span><span class="filename">bear_researcher.py</span><span class="filedesc"> — Makes the case AGAINST buying</span></div>
+            </div>
+
+            <!-- Agents: Risk Management -->
+            <div class="tree-card">
+                <h3>🛡️ tradingagents/agents/risk_mgmt/ <span style="color:#666">— Risk Debate</span></h3>
+                <div class="tree-item"><span class="file-emoji">🔥</span><span class="filename">aggressive_debator.py</span><span class="filedesc"> — High risk, high reward stance</span></div>
+                <div class="tree-item"><span class="file-emoji">⚖️</span><span class="filename">neutral_debator.py</span><span class="filedesc"> — Balanced risk perspective</span></div>
+                <div class="tree-item"><span class="file-emoji">🛡️</span><span class="filename">conservative_debator.py</span><span class="filedesc"> — Capital preservation focus</span></div>
+            </div>
+
+            <!-- Agents: Managers & Trader -->
+            <div class="tree-card">
+                <h3>👔 tradingagents/agents/managers/ <span style="color:#666">— Decision Makers</span></h3>
+                <div class="tree-item"><span class="file-emoji">👨‍💼</span><span class="filename">research_manager.py</span><span class="filedesc"> — Judges bull/bear debate</span></div>
+                <div class="tree-item"><span class="file-emoji">👔</span><span class="filename">portfolio_manager.py</span><span class="filedesc"> — Final decision maker</span></div>
+                <div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.1);">
+                    <h4 style="font-size:0.95rem;margin-bottom:8px;">💰 tradingagents/agents/trader/</h4>
+                    <div class="tree-item"><span class="file-emoji">🤖</span><span class="filename">trader.py</span><span class="filedesc"> — Creates actionable trade plan</span></div>
+                </div>
+            </div>
+
+            <!-- Agents: Utils -->
+            <div class="tree-card">
+                <h3>🔧 tradingagents/agents/utils/ <span style="color:#666">— Tools &amp; State</span></h3>
+                <div class="tree-item"><span class="file-emoji">📋</span><span class="filename">agent_states.py</span><span class="filedesc"> — TypedDict state schemas</span></div>
+                <div class="tree-item"><span class="file-emoji">🔧</span><span class="filename">agent_utils.py</span><span class="filedesc"> — Instrument context builder</span></div>
+                <div class="tree-item"><span class="file-emoji">📈</span><span class="filename">core_stock_tools.py</span><span class="filedesc"> — OHLCV price data tool</span></div>
+                <div class="tree-item"><span class="file-emoji">📉</span><span class="filename">technical_indicators_tools.py</span><span class="filedesc"> — SMA, EMA, MACD etc. tool</span></div>
+                <div class="tree-item"><span class="file-emoji">🏢</span><span class="filename">fundamental_data_tools.py</span><span class="filedesc"> — Balance sheet, P&amp;L tools</span></div>
+                <div class="tree-item"><span class="file-emoji">📰</span><span class="filename">news_data_tools.py</span><span class="filedesc"> — News &amp; insider tools</span></div>
+                <div class="tree-item"><span class="file-emoji">🧠</span><span class="filename">memory.py</span><span class="filedesc"> — BM25-based reflection memory</span></div>
+            </div>
+
+            <!-- Dataflows -->
+            <div class="tree-card">
+                <h3>📡 tradingagents/dataflows/ <span style="color:#666">— Data Layer</span></h3>
+                <div class="tree-item"><span class="file-emoji">🔀</span><span class="filename">interface.py</span><span class="filedesc"> — Vendor routing &amp; fallback logic</span></div>
+                <div class="tree-item"><span class="file-emoji">⚙️</span><span class="filename">config.py</span><span class="filedesc"> — Runtime config store</span></div>
+                <div class="tree-item"><span class="file-emoji">📊</span><span class="filename">y_finance.py</span><span class="filedesc"> — yfinance: prices, fundamentals</span></div>
+                <div class="tree-item"><span class="file-emoji">📰</span><span class="filename">yfinance_news.py</span><span class="filedesc"> — yfinance: news scraping</span></div>
+                <div class="tree-item"><span class="file-emoji">📈</span><span class="filename">stockstats_utils.py</span><span class="filedesc"> — Technical indicator calculations</span></div>
+                <div class="tree-item"><span class="file-emoji">🔑</span><span class="filename">alpha_vantage*.py</span><span class="filedesc"> — Alpha Vantage vendor (5 files)</span></div>
+                <div class="tree-item"><span class="file-emoji">🗄️</span><span class="filename">data_cache/</span><span class="filedesc"> — Cached CSV data files</span></div>
+            </div>
+
+            <!-- LLM Clients -->
+            <div class="tree-card">
+                <h3>🤖 tradingagents/llm_clients/ <span style="color:#666">— LLM Providers</span></h3>
+                <div class="tree-item"><span class="file-emoji">🏭</span><span class="filename">factory.py</span><span class="filedesc"> — Provider router (create_llm_client)</span></div>
+                <div class="tree-item"><span class="file-emoji">📝</span><span class="filename">base_client.py</span><span class="filedesc"> — Abstract base + content normalizer</span></div>
+                <div class="tree-item"><span class="file-emoji">🟢</span><span class="filename">openai_client.py</span><span class="filedesc"> — OpenAI, DeepSeek, xAI, Ollama, OpenRouter</span></div>
+                <div class="tree-item"><span class="file-emoji">🟣</span><span class="filename">anthropic_client.py</span><span class="filedesc"> — Claude models</span></div>
+                <div class="tree-item"><span class="file-emoji">🔵</span><span class="filename">google_client.py</span><span class="filedesc"> — Gemini models</span></div>
+                <div class="tree-item"><span class="file-emoji">✅</span><span class="filename">validators.py</span><span class="filedesc"> — Model name validation</span></div>
+            </div>
+
+            <!-- CLI -->
+            <div class="tree-card">
+                <h3>⌨️ cli/ <span style="color:#666">— Command Line Interface</span></h3>
+                <div class="tree-item"><span class="file-emoji">🖥️</span><span class="filename">main.py</span><span class="filedesc"> — Typer CLI app (interactive mode)</span></div>
+                <div class="tree-item"><span class="file-emoji">⚙️</span><span class="filename">config.py</span><span class="filedesc"> — CLI configuration</span></div>
+                <div class="tree-item"><span class="file-emoji">📊</span><span class="filename">stats_handler.py</span><span class="filedesc"> — LLM usage stats tracking</span></div>
+                <div class="tree-item"><span class="file-emoji">🔧</span><span class="filename">utils.py</span><span class="filedesc"> — CLI utilities &amp; display helpers</span></div>
+                <div class="tree-item"><span class="file-emoji">📦</span><span class="filename">models.py</span><span class="filedesc"> — Data models</span></div>
+            </div>
+        </div>
+
+        <!-- ======================== KEY INFRASTRUCTURE ======================== -->
+        <div class="flow-section">
+            <h2>⚡ Key Infrastructure</h2>
+            <div class="flow-row" style="margin-top:20px;">
+                <div class="flow-node node-llm">
+                    <span class="emoji">🧠</span>
+                    <span class="label">LLM Layer</span>
+                    <span class="desc">DeepSeek, OpenAI, Anthropic, Google, xAI, Ollama, OpenRouter</span>
+                </div>
+                <div class="flow-node node-data">
+                    <span class="emoji">📡</span>
+                    <span class="label">Data Layer</span>
+                    <span class="desc">yfinance (free) or Alpha Vantage with auto-fallback</span>
+                </div>
+                <div class="flow-node node-memory">
+                    <span class="emoji">🧠</span>
+                    <span class="label">Memory System</span>
+                    <span class="desc">BM25 retrieval — agents learn from past mistakes</span>
+                </div>
+            </div>
+            <div class="flow-row" style="margin-top:16px;">
+                <div class="flow-node node-start">
+                    <span class="emoji">🔄</span>
+                    <span class="label">LangGraph</span>
+                    <span class="desc">StateGraph orchestration with conditional edges</span>
+                </div>
+                <div class="flow-node node-analyst">
+                    <span class="emoji">🔧</span>
+                    <span class="label">LangChain Tools</span>
+                    <span class="desc">@tool decorated functions for data access</span>
+                </div>
+                <div class="flow-node node-trader">
+                    <span class="emoji">🔐</span>
+                    <span class="label">dotenv</span>
+                    <span class="desc">API keys via .env file (gitignored)</span>
+                </div>
+            </div>
+        </div>
+
+        <p style="text-align:center;color:#555;font-size:0.8rem;padding:20px;">
+            Generated for TradingAgents v0.2.2 &mdash; Multi-Agent LLM Financial Trading Framework
+        </p>
+    </div>
+</body>
+</html>

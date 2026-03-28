@@ -1,31 +1,46 @@
+import argparse
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
+from datetime import date
 
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Create a custom config
-config = DEFAULT_CONFIG.copy()
-config["deep_think_llm"] = "gpt-5-mini"  # Use a different model
-config["quick_think_llm"] = "gpt-5-mini"  # Use a different model
-config["max_debate_rounds"] = 1  # Increase debate rounds
+def main():
+    parser = argparse.ArgumentParser(description="Run TradingAgents analysis on a single ticker.")
+    parser.add_argument("--ticker", required=True, help="Ticker symbol, e.g. BTC-USD, NVDA")
+    parser.add_argument("--date", default=date.today().strftime("%Y-%m-%d"),
+                        help="Analysis date in YYYY-MM-DD (default: today)")
+    args = parser.parse_args()
 
-# Configure data vendors (default uses yfinance, no extra API keys needed)
-config["data_vendors"] = {
-    "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
-    "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
-    "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
-    "news_data": "yfinance",                 # Options: alpha_vantage, yfinance
-}
+    # Create a custom config
+    config = DEFAULT_CONFIG.copy()
+    config["llm_provider"] = "deepseek"  # Use DeepSeek provider
+    config["deep_think_llm"] = "deepseek-reasoner"  # DeepSeek reasoning model
+    config["quick_think_llm"] = "deepseek-chat"  # DeepSeek chat model
+    config["max_debate_rounds"] = 1  # Debate rounds
 
-# Initialize with custom config
-ta = TradingAgentsGraph(debug=True, config=config)
+    # Configure data vendors (default uses yfinance, no extra API keys needed)
+    config["data_vendors"] = {
+        "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
+        "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
+        "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
+        "news_data": "yfinance",                 # Options: alpha_vantage, yfinance
+    }
 
-# forward propagate
-_, decision = ta.propagate("NVDA", "2024-05-10")
-print(decision)
+    # ── Run analysis ──────────────────────────────────────────────────
+    ta = TradingAgentsGraph(debug=True, config=config)
 
-# Memorize mistakes and reflect
-# ta.reflect_and_remember(1000) # parameter is the position returns
+    ticker = args.ticker.upper()
+    trade_date = args.date
+
+    print(f"\n{'='*60}")
+    print(f"  Analyzing {ticker} on {trade_date}")
+    print(f"{'='*60}\n")
+    _, decision = ta.propagate(ticker, trade_date)
+    print(f"\n>>> {ticker} Decision: {decision}\n")
+
+if __name__ == "__main__":
+    main()

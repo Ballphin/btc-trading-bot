@@ -27,5 +27,25 @@ def get_config() -> Dict:
     return _config.copy()
 
 
+def get_vendor_for_asset(category: str, ticker: str) -> str:
+    """Get the configured vendor, accounting for asset type.
+
+    For crypto tickers, uses crypto_vendors config. For equities, uses data_vendors.
+    """
+    from tradingagents.dataflows.asset_detection import detect_asset_type
+
+    config = get_config()
+    asset_type = config.get("asset_type", "auto")
+    if asset_type == "auto":
+        asset_type = detect_asset_type(ticker)
+
+    if asset_type == "crypto":
+        crypto_vendors = config.get("crypto_vendors", {})
+        if category in crypto_vendors:
+            return crypto_vendors[category]
+
+    return config.get("data_vendors", {}).get(category, "yfinance")
+
+
 # Initialize with default config
 initialize_config()

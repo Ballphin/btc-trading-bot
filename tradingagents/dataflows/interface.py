@@ -23,6 +23,18 @@ from .alpha_vantage import (
     get_global_news as get_alpha_vantage_global_news,
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
+from .crypto_data import (
+    get_crypto_price_data as get_crypto_price,
+    get_crypto_indicators as get_crypto_ind,
+    get_derivatives_data as get_crypto_derivatives,
+    get_onchain_data as get_crypto_onchain,
+    get_macro_context as get_fred_macro,
+    get_crypto_sentiment as get_crypto_sent,
+)
+from .crypto_news_scraper import (
+    get_crypto_news as get_crypto_rss_news,
+    get_crypto_global_news as get_crypto_rss_global_news,
+)
 
 # Configuration and routing logic
 from .config import get_config
@@ -57,12 +69,27 @@ TOOLS_CATEGORIES = {
             "get_global_news",
             "get_insider_transactions",
         ]
-    }
+    },
+    "derivatives_data": {
+        "description": "Crypto derivatives: Binance funding/OI/taker ratio + Deribit perp funding",
+        "tools": ["get_derivatives_data"]
+    },
+    "macro_data": {
+        "description": "Macro indicators via FRED: M2, DXY, 2Y/10Y yields",
+        "tools": ["get_macro_indicators"]
+    },
+    "sentiment_data": {
+        "description": "Crypto sentiment: Alternative.me Fear & Greed index",
+        "tools": ["get_sentiment_data"]
+    },
 }
 
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",
+    "crypto",
+    "crypto_news",
+    "fred",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -71,16 +98,19 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "crypto": get_crypto_price,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "crypto": get_crypto_ind,
     },
     # fundamental_data
     "get_fundamentals": {
         "alpha_vantage": get_alpha_vantage_fundamentals,
         "yfinance": get_yfinance_fundamentals,
+        "crypto": get_crypto_onchain,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
@@ -98,15 +128,21 @@ VENDOR_METHODS = {
     "get_news": {
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
+        "crypto_news": get_crypto_rss_news,
     },
     "get_global_news": {
         "yfinance": get_global_news_yfinance,
         "alpha_vantage": get_alpha_vantage_global_news,
+        "crypto_news": get_crypto_rss_global_news,
     },
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
     },
+    # Crypto-specific methods (Binance + Deribit + FRED + Fear & Greed)
+    "get_derivatives_data": {"crypto": get_crypto_derivatives},
+    "get_macro_indicators": {"fred": get_fred_macro},
+    "get_sentiment_data": {"crypto": get_crypto_sent},
 }
 
 def get_category_for_method(method: str) -> str:

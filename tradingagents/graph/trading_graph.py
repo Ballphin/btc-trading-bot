@@ -30,8 +30,15 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_news,
     get_insider_transactions,
-    get_global_news
+    get_global_news,
+    get_derivatives_data,
+    get_macro_indicators,
+    get_sentiment_data,
+    get_crypto_news,
+    get_crypto_global_news,
+    get_onchain_data,
 )
+from tradingagents.dataflows.asset_detection import is_crypto
 
 from .conditional_logic import ConditionalLogic
 from .setup import GraphSetup
@@ -157,6 +164,10 @@ class TradingAgentsGraph:
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
         """Create tool nodes for different data sources using abstract methods."""
+        return self._create_equity_tool_nodes()
+
+    def _create_equity_tool_nodes(self) -> Dict[str, ToolNode]:
+        """Standard equity tool nodes."""
         return {
             "market": ToolNode(
                 [
@@ -190,6 +201,59 @@ class TradingAgentsGraph:
                 ]
             ),
         }
+
+    def _create_crypto_tool_nodes(self) -> Dict[str, ToolNode]:
+        """Crypto-specific tool nodes with derivatives, on-chain, macro, and sentiment."""
+        return {
+            "market": ToolNode(
+                [
+                    get_stock_data,
+                    get_indicators,
+                    get_derivatives_data,
+                ]
+            ),
+            "social": ToolNode(
+                [
+                    get_crypto_news,
+                    get_sentiment_data,
+                ]
+            ),
+            "news": ToolNode(
+                [
+                    get_crypto_news,
+                    get_crypto_global_news,
+                    get_macro_indicators,
+                ]
+            ),
+            "fundamentals": ToolNode(
+                [
+                    get_fundamentals,
+                    get_onchain_data,
+                    get_macro_indicators,
+                    get_derivatives_data,
+                ]
+            ),
+        }
+
+    def _rebuild_graph_for_asset(self, ticker: str, selected_analysts):
+        """Rebuild tool nodes and graph if asset type requires different tools."""
+        if is_crypto(ticker):
+            self.tool_nodes = self._create_crypto_tool_nodes()
+        else:
+            self.tool_nodes = self._create_equity_tool_nodes()
+
+        self.graph_setup = GraphSetup(
+            self.quick_thinking_llm,
+            self.deep_thinking_llm,
+            self.tool_nodes,
+            self.bull_memory,
+            self.bear_memory,
+            self.trader_memory,
+            self.invest_judge_memory,
+            self.portfolio_manager_memory,
+            self.conditional_logic,
+        )
+        self.graph = self.graph_setup.setup_graph(selected_analysts)
 
     def propagate(self, company_name, trade_date):
         """Run the trading agents graph for a company on a specific date."""
@@ -290,3 +354,20 @@ class TradingAgentsGraph:
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""
         return self.signal_processor.process_signal(full_signal)
+
+    def backtest(self, ticker: str, start_date: str, end_date: str,
+                 frequency: str = "weekly", initial_capital: float = 100_000,
+                 position_size_pct: float = 0.25) -> dict:
+        """Run a decision-replay backtest. Convenience wrapper around BacktestEngine."""
+        from tradingagents.backtesting import BacktestEngine
+        engine = BacktestEngine(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            config=self.config,
+            initial_capital=initial_capital,
+            position_size_pct=position_size_pct,
+            trading_frequency=frequency,
+            debug=self.debug,
+        )
+        return engine.run()

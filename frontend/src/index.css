@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy-950: #050816;
+  --color-navy-900: #0a0e1a;
+  --color-navy-800: #0f1629;
+  --color-navy-700: #162038;
+  --color-navy-600: #1e2d4a;
+  --color-glass: rgba(15, 22, 41, 0.6);
+  --color-glass-border: rgba(255, 255, 255, 0.08);
+  --color-glass-hover: rgba(255, 255, 255, 0.04);
+  --color-accent-cyan: #06d6a0;
+  --color-accent-teal: #0ea5e9;
+  --color-accent-red: #ef4444;
+  --color-accent-amber: #f59e0b;
+  --color-accent-purple: #a855f7;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-navy-950);
+  color: #e2e8f0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+.glass {
+  background: var(--color-glass);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 12px;
+}
+
+.glass:hover {
+  background: rgba(15, 22, 41, 0.7);
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+.markdown-content h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+.markdown-content h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; color: #94a3b8; }
+.markdown-content h3 { font-size: 1.1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; color: #cbd5e1; }
+.markdown-content p { margin: 0.5rem 0; line-height: 1.7; color: #94a3b8; }
+.markdown-content ul, .markdown-content ol { padding-left: 1.5rem; color: #94a3b8; }
+.markdown-content li { margin: 0.25rem 0; }
+.markdown-content strong { color: #e2e8f0; }
+.markdown-content a { color: #0ea5e9; text-decoration: underline; }

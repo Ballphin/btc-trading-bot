@@ -33,13 +33,15 @@ def create_portfolio_manager(llm, memory):
 - **Hold**: Maintain current position, no action needed
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
+- **Short**: Strong conviction to enter a short position. Supported by derivatives over-leverage, on-chain weakness, or deteriorating macro liquidity.
+- **Cover**: Close an existing short position. The risk/reward no longer favors the short thesis, or a trend reversal is confirmed.
 
 **Context:**
 - Trader's proposed plan: **{trader_plan}**
 - Lessons from past decisions: **{past_memory_str}**
 
 **Required Output Structure:**
-1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell.
+1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell / Short / Cover.
 2. **Executive Summary**: A concise action plan covering entry strategy, position sizing, key risk levels, and time horizon.
 3. **Investment Thesis**: Detailed reasoning anchored in the analysts' debate and past reflections.
 

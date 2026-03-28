@@ -18,6 +18,14 @@ from tradingagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_global_news
 )
+from tradingagents.agents.utils.crypto_tools import (
+    get_derivatives_data,
+    get_macro_indicators,
+    get_sentiment_data,
+    get_crypto_news,
+    get_crypto_global_news,
+    get_onchain_data,
+)
 
 
 def build_instrument_context(ticker: str) -> str:

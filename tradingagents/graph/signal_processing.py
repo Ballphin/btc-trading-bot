@@ -18,13 +18,13 @@ class SignalProcessor:
             full_signal: Complete trading signal text
 
         Returns:
-            Extracted rating (BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, or SELL)
+            Extracted rating (BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, SELL, SHORT, or COVER)
         """
         messages = [
             (
                 "system",
                 "You are an efficient assistant that extracts the trading decision from analyst reports. "
-                "Extract the rating as exactly one of: BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, SELL. "
+                "Extract the rating as exactly one of: BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, SELL, SHORT, COVER. "
                 "Output only the single rating word, nothing else.",
             ),
             ("human", full_signal),

@@ -29,6 +29,7 @@ Key points to focus on:
 - Risks and Challenges: Highlight factors like market saturation, financial instability, or macroeconomic threats that could hinder the stock's performance.
 - Competitive Weaknesses: Emphasize vulnerabilities such as weaker market positioning, declining innovation, or threats from competitors.
 - Negative Indicators: Use evidence from financial data, market trends, or recent adverse news to support your position.
+- Short Thesis: When the evidence strongly supports downside, argue for a SHORT position. Reference derivatives over-leverage (elevated funding rates, high open interest), on-chain weakness (exchange inflows, declining MVRV), or deteriorating macro liquidity (rising DXY, contracting M2) as supporting factors.
 - Bull Counterpoints: Critically analyze the bull argument with specific data and sound reasoning, exposing weaknesses or over-optimistic assumptions.
 - Engagement: Present your argument in a conversational style, directly engaging with the bull analyst's points and debating effectively rather than simply listing facts.
 

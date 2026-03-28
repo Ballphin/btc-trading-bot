@@ -32,4 +32,17 @@ DEFAULT_CONFIG = {
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Asset type: "auto" detects from ticker, or force "equity" / "crypto"
+    "asset_type": "auto",
+    # Per-asset-type vendor configuration for crypto assets
+    # "crypto" = Coinbase OHLCV + Binance derivatives + Deribit funding + BGeometrics on-chain
+    "crypto_vendors": {
+        "core_stock_apis": "crypto",             # Coinbase OHLCV
+        "technical_indicators": "crypto",        # stockstats on Coinbase OHLCV
+        "fundamental_data": "crypto",            # BGeometrics on-chain metrics
+        "derivatives_data": "crypto",            # Binance Futures + Deribit
+        "macro_data": "fred",                    # FRED API (M2, DXY, yields)
+        "sentiment_data": "crypto",              # Alternative.me Fear & Greed
+        "news_data": "yfinance",                 # yfinance news (works for crypto)
+    },
 }
