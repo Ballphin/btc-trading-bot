@@ -611,11 +611,64 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
         # Check if analysis logs exist for replay mode
         if mode == "replay":
             logs_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
+            
+            # Discover ALL available log dates for this ticker
+            all_log_dates = sorted([
+                f.stem.replace("full_states_log_", "")
+                for f in logs_dir.glob("full_states_log_*.json")
+            ]) if logs_dir.exists() else []
+            
+            if not all_log_dates:
+                # No logs at all for this ticker — find which tickers DO have logs
+                available_tickers = []
+                for ticker_dir in EVAL_RESULTS_DIR.iterdir():
+                    if ticker_dir.is_dir():
+                        tk_logs = list((ticker_dir / "TradingAgentsStrategy_logs").glob("full_states_log_*.json")) if (ticker_dir / "TradingAgentsStrategy_logs").exists() else []
+                        if tk_logs:
+                            dates_for_tk = sorted([f.stem.replace("full_states_log_", "") for f in tk_logs])
+                            available_tickers.append(f"{ticker_dir.name} ({dates_for_tk[0]} to {dates_for_tk[-1]}, {len(dates_for_tk)} days)")
+                
+                ticker_list = ", ".join(available_tickers) if available_tickers else "none"
+                raise ValueError(
+                    f"No analysis logs found for {ticker}. "
+                    f"Quick Replay backtesting requires previously-run LLM analysis. "
+                    f"Go to Home → Analyze to run analysis for {ticker} first, or use Full Simulation mode. "
+                    f"Tickers with available logs: {ticker_list}"
+                )
+            
+            # Check which requested dates have logs
             base_dates = set([d.split(' ')[0] for d in trade_dates])
-            available_logs = sum(1 for bd in base_dates if (logs_dir / f"full_states_log_{bd}.json").exists())
-            log(f"Found {available_logs}/{len(base_dates)} analysis logs for {total_dates} tick intervals")
-            if available_logs == 0:
-                raise ValueError(f"No analysis logs found for {ticker} in date range. Run analysis first.")
+            matching_dates = [bd for bd in base_dates if bd in all_log_dates]
+            
+            if not matching_dates:
+                # None of the requested dates have logs — auto-adjust to available range
+                log(f"No logs in requested range ({start_date} to {end_date}). Available logs: {all_log_dates[0]} to {all_log_dates[-1]}")
+                log(f"Auto-adjusting date range to available analysis logs...")
+                
+                # Regenerate trade dates using the full available log range
+                trade_dates = _generate_trade_dates(all_log_dates[0], all_log_dates[-1], frequency, ticker=ticker)
+                total_dates = len(trade_dates)
+                
+                if total_dates == 0:
+                    raise ValueError(f"Could not generate trade dates from available logs ({all_log_dates[0]} to {all_log_dates[-1]})")
+                
+                # Update the config to reflect actual dates used
+                start_date = all_log_dates[0]
+                end_date = all_log_dates[-1]
+                
+                eq.put({
+                    "event": "status",
+                    "step": 2,
+                    "total_steps": 5,
+                    "status": "Date range auto-adjusted",
+                    "details": f"Using available logs: {start_date} to {end_date} ({len(all_log_dates)} analysis days)"
+                })
+            
+            # Recount after potential adjustment
+            base_dates_final = set([d.split(' ')[0] for d in trade_dates])
+            available_logs = sum(1 for bd in base_dates_final if bd in all_log_dates)
+            log(f"Found {available_logs}/{len(base_dates_final)} analysis logs for {total_dates} tick intervals")
+            log(f"Available analysis dates: {', '.join(all_log_dates)}")
         
         # Update progress tracking
         backtest_jobs[job_id]["progress"] = {"current": 0, "total": total_dates}
