@@ -15,6 +15,8 @@ def compute_metrics(
     total_funding: float = 0.0,
     liquidations: int = 0,
     leverage: float = 1.0,
+    stops_hit: int = 0,
+    takes_hit: int = 0,
 ) -> Dict[str, Any]:
     """
     Compute comprehensive backtest performance metrics with crypto enhancements.
@@ -192,6 +194,45 @@ def compute_metrics(
     # Leverage-adjusted metrics
     leverage_adjusted_return = total_return * leverage if leverage > 0 else total_return
 
+    # Risk management metrics
+    positions_with_hold_days = [p for p in closed_positions if hasattr(p, 'entry_date') and hasattr(p, 'exit_date') and p.exit_date]
+    if positions_with_hold_days:
+        from datetime import datetime
+        total_hold_days = 0
+        for p in positions_with_hold_days:
+            try:
+                entry_fmt = "%Y-%m-%d %H:%M:%S" if " " in p.entry_date else "%Y-%m-%d"
+                exit_fmt = "%Y-%m-%d %H:%M:%S" if " " in p.exit_date else "%Y-%m-%d"
+                entry_dt = datetime.strptime(p.entry_date, entry_fmt)
+                exit_dt = datetime.strptime(p.exit_date, exit_fmt)
+                hold_days = (exit_dt - entry_dt).days
+                total_hold_days += hold_days
+            except:
+                pass
+        avg_hold_days = total_hold_days / len(positions_with_hold_days) if positions_with_hold_days else 0
+    else:
+        avg_hold_days = 0
+
+    # Average Risk:Reward ratio (for positions with stop/take defined)
+    positions_with_rr = [p for p in closed_positions if hasattr(p, 'stop_loss_price') and hasattr(p, 'take_profit_price') and p.stop_loss_price and p.take_profit_price]
+    if positions_with_rr:
+        rr_ratios = []
+        for p in positions_with_rr:
+            if hasattr(p, 'side'):
+                if p.side.value == 'LONG':
+                    risk = abs(p.entry_price - p.stop_loss_price)
+                    reward = abs(p.take_profit_price - p.entry_price)
+                elif p.side.value == 'SHORT':
+                    risk = abs(p.stop_loss_price - p.entry_price)
+                    reward = abs(p.entry_price - p.take_profit_price)
+                else:
+                    continue
+                if risk > 0:
+                    rr_ratios.append(reward / risk)
+        avg_rr_ratio = sum(rr_ratios) / len(rr_ratios) if rr_ratios else 0
+    else:
+        avg_rr_ratio = 0
+
     return {
         "initial_capital": initial_capital,
         "final_value": final_value,
@@ -232,6 +273,11 @@ def compute_metrics(
         "start_date": dates[0],
         "end_date": dates[-1],
         "n_periods": n_periods,
+        # Risk management
+        "stops_hit": stops_hit,
+        "takes_hit": takes_hit,
+        "avg_hold_days": avg_hold_days,
+        "avg_rr_ratio": avg_rr_ratio,
     }
 
 
@@ -277,4 +323,9 @@ def _empty_metrics(initial_capital: float) -> Dict[str, Any]:
         "start_date": "",
         "end_date": "",
         "n_periods": 0,
+        # Risk management
+        "stops_hit": 0,
+        "takes_hit": 0,
+        "avg_hold_days": 0,
+        "avg_rr_ratio": 0,
     }

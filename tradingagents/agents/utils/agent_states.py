@@ -74,3 +74,11 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+    
+    # structured signal fields (optional, for new JSON-based signals)
+    signal: Annotated[Optional[str], "Trading signal: BUY/SELL/SHORT/COVER/HOLD/OVERWEIGHT/UNDERWEIGHT"]
+    stop_loss_price: Annotated[Optional[float], "Stop loss price level"]
+    take_profit_price: Annotated[Optional[float], "Take profit price level"]
+    confidence: Annotated[Optional[float], "Confidence level 0.0-1.0"]
+    max_hold_days: Annotated[Optional[int], "Maximum days to hold position"]
+    reasoning: Annotated[Optional[str], "Brief reasoning for the decision"]

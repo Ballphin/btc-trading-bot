@@ -11,13 +11,33 @@ const SIGNAL_STYLES: Record<string, string> = {
   UNKNOWN: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
 };
 
-export default function SignalBadge({ signal, size = 'md' }: { signal: string; size?: 'sm' | 'md' | 'lg' }) {
+interface SignalBadgeProps {
+  signal: string;
+  size?: 'sm' | 'md' | 'lg';
+  confidence?: number;
+}
+
+export default function SignalBadge({ signal, size = 'md', confidence }: SignalBadgeProps) {
   const s = signal?.toUpperCase() || 'UNKNOWN';
   const style = SIGNAL_STYLES[s] || SIGNAL_STYLES.UNKNOWN;
   const sizeClass = size === 'lg' ? 'text-2xl px-6 py-2' : size === 'sm' ? 'text-xs px-2 py-0.5' : 'text-sm px-3 py-1';
+  
   return (
-    <span className={clsx('inline-flex items-center font-bold rounded-full border', style, sizeClass)}>
-      {s}
-    </span>
+    <div className="inline-flex flex-col items-center gap-1">
+      <span className={clsx('inline-flex items-center font-bold rounded-full border', style, sizeClass)}>
+        {s}
+      </span>
+      {confidence !== undefined && (
+        <div className="flex items-center gap-1">
+          <div className="w-16 h-1 bg-slate-700 rounded-full overflow-hidden">
+            <div 
+              className="h-full bg-accent-teal transition-all"
+              style={{ width: `${confidence * 100}%` }}
+            />
+          </div>
+          <span className="text-xs text-slate-400">{(confidence * 100).toFixed(0)}%</span>
+        </div>
+      )}
+    </div>
   );
 }

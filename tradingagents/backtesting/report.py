@@ -66,6 +66,32 @@ def generate_report(
     lines.append(f"| **Expectancy** | ${metrics.get('expectancy', 0):+,.2f} |")
     lines.append("")
 
+    # Risk Management
+    if metrics.get('stops_hit', 0) > 0 or metrics.get('takes_hit', 0) > 0:
+        lines.append("## Risk Management")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| **Stops Hit** | {metrics.get('stops_hit', 0)} |")
+        lines.append(f"| **Targets Hit** | {metrics.get('takes_hit', 0)} |")
+        lines.append(f"| **Avg Hold Days** | {metrics.get('avg_hold_days', 0):.1f} |")
+        lines.append(f"| **Avg R:R Ratio** | {metrics.get('avg_rr_ratio', 0):.2f} |")
+        lines.append("")
+
+    # Crypto-specific metrics
+    if metrics.get('total_fees', 0) > 0 or metrics.get('avg_leverage', 1.0) > 1.0:
+        lines.append("## Crypto Trading Metrics")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| **Leverage** | {metrics.get('avg_leverage', 1.0):.1f}x |")
+        lines.append(f"| **Total Fees** | ${metrics.get('total_fees', 0):,.2f} |")
+        lines.append(f"| **Total Funding** | ${metrics.get('total_funding', 0):+,.2f} |")
+        lines.append(f"| **Fee Impact** | {metrics.get('fee_impact_pct', 0):.2f}% |")
+        lines.append(f"| **Liquidations** | {metrics.get('liquidations', 0)} |")
+        lines.append(f"| **Omega Ratio** | {metrics.get('omega_ratio', 0):.3f} |")
+        lines.append("")
+
     # Drawdown Details
     if metrics.get("max_drawdown_pct", 0) > 0:
         lines.append("## Maximum Drawdown")

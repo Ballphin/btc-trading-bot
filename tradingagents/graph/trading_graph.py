@@ -287,8 +287,24 @@ class TradingAgentsGraph:
         # Log state
         self._log_state(trade_date, final_state)
 
+        # Process signal (returns dict if structured, string if fallback)
+        processed_signal = self.process_signal(final_state["final_trade_decision"])
+        
+        # If structured signal, extract the signal word for backward compatibility
+        if isinstance(processed_signal, dict):
+            signal_word = processed_signal["signal"]
+            # Store structured fields in final_state for logging
+            final_state["signal"] = processed_signal.get("signal")
+            final_state["stop_loss_price"] = processed_signal.get("stop_loss_price")
+            final_state["take_profit_price"] = processed_signal.get("take_profit_price")
+            final_state["confidence"] = processed_signal.get("confidence")
+            final_state["max_hold_days"] = processed_signal.get("max_hold_days")
+            final_state["reasoning"] = processed_signal.get("reasoning")
+        else:
+            signal_word = processed_signal
+        
         # Return decision and processed signal
-        return final_state, self.process_signal(final_state["final_trade_decision"])
+        return final_state, signal_word
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""
@@ -321,6 +337,15 @@ class TradingAgentsGraph:
             "investment_plan": final_state["investment_plan"],
             "final_trade_decision": final_state["final_trade_decision"],
         }
+        
+        # Add structured signal fields if present
+        if "signal" in final_state:
+            self.log_states_dict[str(trade_date)]["signal"] = final_state.get("signal")
+            self.log_states_dict[str(trade_date)]["stop_loss_price"] = final_state.get("stop_loss_price")
+            self.log_states_dict[str(trade_date)]["take_profit_price"] = final_state.get("take_profit_price")
+            self.log_states_dict[str(trade_date)]["confidence"] = final_state.get("confidence")
+            self.log_states_dict[str(trade_date)]["max_hold_days"] = final_state.get("max_hold_days")
+            self.log_states_dict[str(trade_date)]["reasoning"] = final_state.get("reasoning")
 
         # Save to file
         directory = Path(f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/")

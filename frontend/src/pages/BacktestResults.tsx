@@ -474,11 +474,36 @@ export default function BacktestResults() {
             <div className="text-xl font-semibold text-white">{metrics?.omega_ratio?.toFixed(2)}</div>
           </div>
           <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Calmar Ratio</div>
-            <div className="text-xl font-semibold text-white">{metrics?.calmar_ratio?.toFixed(2)}</div>
+            <div className="text-slate-400 text-sm mb-1">Omega Ratio</div>
+            <div className="text-xl font-semibold text-white">{metrics?.omega_ratio?.toFixed(2)}</div>
           </div>
         </div>
       </div>
+
+      {/* Risk Management Metrics */}
+      {(metrics?.stops_hit !== undefined || metrics?.takes_hit !== undefined) && (
+        <div className="mb-8">
+          <h3 className="text-lg font-semibold text-white mb-4">Risk Management</h3>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-sm mb-1">Stops Hit</div>
+              <div className="text-xl font-semibold text-red-400">{metrics?.stops_hit || 0}</div>
+            </div>
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-sm mb-1">Targets Hit</div>
+              <div className="text-xl font-semibold text-green-400">{metrics?.takes_hit || 0}</div>
+            </div>
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-sm mb-1">Avg Hold Days</div>
+              <div className="text-xl font-semibold text-white">{metrics?.avg_hold_days?.toFixed(1) || 'N/A'}</div>
+            </div>
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-sm mb-1">Avg R:R Ratio</div>
+              <div className="text-xl font-semibold text-cyan-400">{metrics?.avg_rr_ratio?.toFixed(2) || 'N/A'}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Charts */}
       <div className="grid lg:grid-cols-2 gap-6 mb-8">

@@ -15,6 +15,7 @@ import yfinance as yf
 from tradingagents.backtesting.portfolio import Portfolio
 from tradingagents.backtesting.metrics import compute_metrics
 from tradingagents.backtesting.report import generate_report
+from tradingagents.backtesting.indicators import calculate_atr, calculate_volatility
 from tradingagents.dataflows.asset_detection import is_crypto
 
 logger = logging.getLogger(__name__)
@@ -232,7 +233,24 @@ class BacktestEngine:
         ]
         self.debug = debug
 
-        self.portfolio = Portfolio(initial_capital, position_size_pct)
+        # Extract portfolio config with defaults
+        leverage = config.get("leverage", 1.0) if config else 1.0
+        maker_fee = config.get("maker_fee", 0.0002) if config else 0.0002
+        taker_fee = config.get("taker_fee", 0.0005) if config else 0.0005
+        use_funding = config.get("use_funding", True) if config else True
+        position_sizing = config.get("position_sizing", "fixed") if config else "fixed"
+        risk_per_trade = config.get("risk_per_trade", 0.01) if config else 0.01
+        
+        self.portfolio = Portfolio(
+            initial_capital=initial_capital,
+            position_size_pct=position_size_pct,
+            leverage=leverage,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            use_funding=use_funding,
+            position_sizing=position_sizing,
+            risk_per_trade=risk_per_trade,
+        )
         self.decisions: List[Dict] = []
         self.errors: List[Dict] = []
 
@@ -285,11 +303,37 @@ class BacktestEngine:
                 # Run the full agent pipeline
                 final_state, signal = graph.propagate(self.ticker, trade_date)
 
-                # Process signal through portfolio
+                # Extract structured signal fields if available
+                stop_loss_price = final_state.get("stop_loss_price")
+                take_profit_price = final_state.get("take_profit_price")
+                max_hold_days = final_state.get("max_hold_days")
+                confidence = final_state.get("confidence")
+                
+                # Calculate dynamic ATR and volatility for advanced position sizing
+                atr = None
+                volatility = None
+                if self.portfolio.position_sizing in ("atr_risk", "volatility"):
+                    atr = calculate_atr(self.ticker, trade_date, period=14)
+                    volatility = calculate_volatility(self.ticker, trade_date, period=20)
+                    if atr:
+                        logger.debug(f"ATR for {self.ticker} on {trade_date}: {atr:.2f}")
+                    if volatility:
+                        logger.debug(f"Volatility for {self.ticker} on {trade_date}: {volatility:.4f}")
+                
+                # Process signal through portfolio with risk parameters
                 funding_rate = _get_funding_on_date(self.ticker, trade_date)
-                action = self.portfolio.process_signal(signal, price, trade_date, funding_rate=funding_rate)
+                action = self.portfolio.process_signal(
+                    signal, 
+                    price, 
+                    trade_date, 
+                    funding_rate=funding_rate,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    max_hold_days=max_hold_days,
+                    atr=atr,
+                )
 
-                # Record the decision
+                # Record the decision with structured fields
                 decision = {
                     "date": trade_date,
                     "price": price,
@@ -297,6 +341,10 @@ class BacktestEngine:
                     "action": action,
                     "portfolio_value": self.portfolio.portfolio_value(price),
                     "position": self.portfolio.position_side.value,
+                    "stop_loss_price": stop_loss_price,
+                    "take_profit_price": take_profit_price,
+                    "confidence": confidence,
+                    "max_hold_days": max_hold_days,
                 }
                 self.decisions.append(decision)
 
@@ -331,6 +379,12 @@ class BacktestEngine:
             equity_curve=self.portfolio.equity_curve,
             closed_positions=self.portfolio.closed_positions,
             initial_capital=self.initial_capital,
+            total_fees=self.portfolio.total_fees_paid,
+            total_funding=self.portfolio.total_funding_paid,
+            liquidations=self.portfolio.liquidations,
+            leverage=self.portfolio.leverage,
+            stops_hit=self.portfolio.stops_hit,
+            takes_hit=self.portfolio.takes_hit,
         )
 
         # Generate report
@@ -378,6 +432,15 @@ class BacktestEngine:
                     "portfolio_value": t.portfolio_value,
                     "unrealized_pnl": t.unrealized_pnl,
                     "realized_pnl": t.realized_pnl,
+                    "fees_paid": t.fees_paid,
+                    "funding_paid": t.funding_paid,
+                    "leverage": t.leverage,
+                    "liquidation_price": t.liquidation_price,
+                    "stop_loss": t.stop_loss,
+                    "take_profit": t.take_profit,
+                    "hold_days": t.hold_days,
+                    "exit_reason": t.exit_reason,
+                    "atr_at_entry": t.atr_at_entry,
                 }
                 for t in self.portfolio.trade_history
             ],

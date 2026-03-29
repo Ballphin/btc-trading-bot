@@ -30,6 +30,11 @@ class Position:
     exit_fees: float = 0.0
     funding_costs: float = 0.0
     liquidation_price: Optional[float] = None
+    # Risk management fields
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    max_hold_days: Optional[int] = None
+    exit_reason: str = ""  # stopped_out, take_profit, time_exit, signal, liquidation
 
     @property
     def is_open(self) -> bool:
@@ -91,6 +96,12 @@ class TradeRecord:
     funding_paid: float = 0.0
     leverage: float = 1.0
     liquidation_price: Optional[float] = None
+    # Risk management fields
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    hold_days: Optional[int] = None
+    exit_reason: str = ""
+    atr_at_entry: Optional[float] = None
 
 
 class Portfolio:
@@ -105,7 +116,8 @@ class Portfolio:
         taker_fee: float = 0.0005,   # 0.05%
         funding_interval_hours: float = 8.0,
         use_funding: bool = True,
-        position_sizing: str = "fixed",  # fixed, kelly, volatility
+        position_sizing: str = "fixed",  # fixed, kelly, volatility, atr_risk
+        risk_per_trade: float = 0.01,  # 1% risk per trade for ATR sizing
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
@@ -116,6 +128,7 @@ class Portfolio:
         self.funding_interval_hours = funding_interval_hours
         self.use_funding = use_funding
         self.position_sizing = position_sizing
+        self.risk_per_trade = risk_per_trade
         
         self.current_position: Optional[Position] = None
         self.closed_positions: List[Position] = []
@@ -127,6 +140,8 @@ class Portfolio:
         self.total_funding_paid: float = 0.0
         self.liquidations: int = 0
         self.last_funding_date: Optional[str] = None
+        self.stops_hit: int = 0
+        self.takes_hit: int = 0
 
     @property
     def position_side(self) -> PositionSide:
@@ -134,11 +149,22 @@ class Portfolio:
             return self.current_position.side
         return PositionSide.FLAT
 
-    def _position_size_units(self, price: float, volatility: Optional[float] = None) -> float:
+    def _position_size_units(self, price: float, volatility: Optional[float] = None, stop_loss_price: Optional[float] = None) -> float:
         """Calculate position size with crypto enhancements."""
         portfolio_val = self.portfolio_value(price)
         
-        if self.position_sizing == "fixed":
+        if self.position_sizing == "atr_risk" and stop_loss_price is not None:
+            # ATR-based risk sizing: risk exactly risk_per_trade % of portfolio
+            risk_amount = portfolio_val * self.risk_per_trade
+            stop_distance = abs(price - stop_loss_price)
+            if stop_distance > 0:
+                size = risk_amount / stop_distance
+                # Apply leverage to size
+                return size * self.leverage
+            else:
+                # Fallback to fixed if no valid stop
+                allocation = portfolio_val * self.position_size_pct
+        elif self.position_sizing == "fixed":
             allocation = portfolio_val * self.position_size_pct
         elif self.position_sizing == "kelly":
             win_rate = self._estimate_win_rate()
@@ -204,7 +230,7 @@ class Portfolio:
         return sum(p.pnl for p in self.closed_positions)
 
     def _calculate_funding(self, date: str, price: float, actual_rate: Optional[float] = None) -> float:
-        """Calculate funding cost for shorts (paid) or longs (received)."""
+        """Calculate funding cost for shorts (paid) or longs (received). Now charges EVERY period."""
         if not self.use_funding or not self.current_position:
             return 0.0
         
@@ -218,6 +244,7 @@ class Portfolio:
         current_dt = datetime.strptime(date, curr_fmt)
         hours_passed = (current_dt - last_dt).total_seconds() / 3600
         
+        # Charge funding every interval, not just on signal changes
         if hours_passed >= self.funding_interval_hours:
             self.last_funding_date = date
             # If API found dynamic rate, use it, else default fallback
@@ -270,7 +297,18 @@ class Portfolio:
         logger.error(f"[{date}] LIQUIDATION at ${price:,.2f}! Margin ${margin:,.2f} lost.")
         return f"LIQUIDATED: ${margin:,.2f} margin lost"
 
-    def process_signal(self, signal: str, price: float, date: str, use_limit_order: bool = False, funding_rate: Optional[float] = None) -> str:
+    def process_signal(
+        self,
+        signal: str,
+        price: float,
+        date: str,
+        use_limit_order: bool = False,
+        funding_rate: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
+        take_profit_price: Optional[float] = None,
+        max_hold_days: Optional[int] = None,
+        atr: Optional[float] = None,
+    ) -> str:
         """
         Process a trading signal with crypto enhancements.
 
@@ -288,15 +326,124 @@ class Portfolio:
         action = "HOLD — no action"
         current_side = self.position_side
         
-        # Calculate funding costs first
+        # Calculate funding costs first (continuous funding)
         funding_cost = self._calculate_funding(date, price, funding_rate)
         if self.current_position and funding_cost != 0:
             self.current_position.add_funding(funding_cost)
             self.total_funding_paid += funding_cost
         
+        # Check for stop loss hit BEFORE processing new signal
+        if self.current_position and self.current_position.stop_loss_price is not None:
+            pos = self.current_position
+            if (pos.side == PositionSide.LONG and price <= pos.stop_loss_price) or \
+               (pos.side == PositionSide.SHORT and price >= pos.stop_loss_price):
+                exit_fees = self._close_position(price, date, self.taker_fee)
+                pos.exit_reason = "stopped_out"
+                self.stops_hit += 1
+                action = f"STOPPED OUT @ ${price:,.2f} (stop was ${pos.stop_loss_price:,.2f}, fees ${exit_fees:,.2f})"
+                
+                record = TradeRecord(
+                    date=date,
+                    signal=signal,
+                    price=price,
+                    action_taken=action,
+                    position_side=self.position_side.value,
+                    portfolio_value=self.portfolio_value(price),
+                    cash=self.cash,
+                    realized_pnl=self.total_realized_pnl(),
+                    funding_paid=funding_cost,
+                    leverage=self.leverage,
+                    exit_reason="stopped_out",
+                )
+                self.trade_history.append(record)
+                self.equity_curve.append({
+                    "date": date,
+                    "portfolio_value": self.portfolio_value(price),
+                    "cash": self.cash,
+                    "position_side": self.position_side.value,
+                    "fees": self.total_fees_paid,
+                    "funding": self.total_funding_paid,
+                })
+                return action
+        
+        # Check for take profit hit BEFORE processing new signal
+        if self.current_position and self.current_position.take_profit_price is not None:
+            pos = self.current_position
+            if (pos.side == PositionSide.LONG and price >= pos.take_profit_price) or \
+               (pos.side == PositionSide.SHORT and price <= pos.take_profit_price):
+                exit_fees = self._close_position(price, date, self.maker_fee)
+                pos.exit_reason = "take_profit"
+                self.takes_hit += 1
+                action = f"TAKE PROFIT @ ${price:,.2f} (target was ${pos.take_profit_price:,.2f}, fees ${exit_fees:,.2f})"
+                
+                record = TradeRecord(
+                    date=date,
+                    signal=signal,
+                    price=price,
+                    action_taken=action,
+                    position_side=self.position_side.value,
+                    portfolio_value=self.portfolio_value(price),
+                    cash=self.cash,
+                    realized_pnl=self.total_realized_pnl(),
+                    funding_paid=funding_cost,
+                    leverage=self.leverage,
+                    exit_reason="take_profit",
+                )
+                self.trade_history.append(record)
+                self.equity_curve.append({
+                    "date": date,
+                    "portfolio_value": self.portfolio_value(price),
+                    "cash": self.cash,
+                    "position_side": self.position_side.value,
+                    "fees": self.total_fees_paid,
+                    "funding": self.total_funding_paid,
+                })
+                return action
+        
+        # Check for time-based exit BEFORE processing new signal
+        if self.current_position and self.current_position.max_hold_days is not None:
+            pos = self.current_position
+            entry_fmt = "%Y-%m-%d %H:%M:%S" if " " in pos.entry_date else "%Y-%m-%d"
+            curr_fmt = "%Y-%m-%d %H:%M:%S" if " " in date else "%Y-%m-%d"
+            entry_dt = datetime.strptime(pos.entry_date, entry_fmt)
+            current_dt = datetime.strptime(date, curr_fmt)
+            days_held = (current_dt - entry_dt).days
+            
+            if days_held >= pos.max_hold_days:
+                exit_fees = self._close_position(price, date, self.taker_fee)
+                pos.exit_reason = "time_exit"
+                action = f"TIME EXIT @ ${price:,.2f} (held {days_held} days, max was {pos.max_hold_days}, fees ${exit_fees:,.2f})"
+                
+                record = TradeRecord(
+                    date=date,
+                    signal=signal,
+                    price=price,
+                    action_taken=action,
+                    position_side=self.position_side.value,
+                    portfolio_value=self.portfolio_value(price),
+                    cash=self.cash,
+                    realized_pnl=self.total_realized_pnl(),
+                    funding_paid=funding_cost,
+                    leverage=self.leverage,
+                    exit_reason="time_exit",
+                    hold_days=days_held,
+                )
+                self.trade_history.append(record)
+                self.equity_curve.append({
+                    "date": date,
+                    "portfolio_value": self.portfolio_value(price),
+                    "cash": self.cash,
+                    "position_side": self.position_side.value,
+                    "fees": self.total_fees_paid,
+                    "funding": self.total_funding_paid,
+                })
+                return action
+        
         # Check for liquidation
         if self._check_liquidation(price):
             action = self._liquidate_position(price, date)
+            if self.current_position:
+                self.current_position.exit_reason = "liquidation"
             
             record = TradeRecord(
                 date=date,
@@ -327,7 +474,7 @@ class Portfolio:
         if signal in ("BUY", "OVERWEIGHT"):
             if current_side == PositionSide.FLAT:
                 # Enter long with leverage and fees
-                size = self._position_size_units(price)
+                size = self._position_size_units(price, stop_loss_price=stop_loss_price)
                 entry_fees = size * price * fee_rate
                 
                 self.current_position = Position(
@@ -337,6 +484,9 @@ class Portfolio:
                     size=size,
                     leverage=self.leverage,
                     entry_fees=entry_fees,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    max_hold_days=max_hold_days,
                 )
                 self.current_position.liquidation_price = self.current_position.calculate_liquidation_price()
                 
@@ -345,13 +495,17 @@ class Portfolio:
                 self.total_fees_paid += entry_fees
                 
                 action = f"ENTERED LONG: {size:.6f} units @ ${price:,.2f} (leverage {self.leverage}x, fees ${entry_fees:,.2f})"
+                if stop_loss_price:
+                    action += f" [Stop: ${stop_loss_price:,.2f}]"
+                if take_profit_price:
+                    action += f" [Target: ${take_profit_price:,.2f}]"
                 
             elif current_side == PositionSide.SHORT:
                 # Cover short first
                 cover_fees = self._close_position(price, date, fee_rate)
                 
                 # Then go long
-                size = self._position_size_units(price)
+                size = self._position_size_units(price, stop_loss_price=stop_loss_price)
                 entry_fees = size * price * fee_rate
                 
                 self.current_position = Position(
@@ -361,6 +515,9 @@ class Portfolio:
                     size=size,
                     leverage=self.leverage,
                     entry_fees=entry_fees,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    max_hold_days=max_hold_days,
                 )
                 self.current_position.liquidation_price = self.current_position.calculate_liquidation_price()
                 
@@ -369,6 +526,10 @@ class Portfolio:
                 self.total_fees_paid += entry_fees
                 
                 action = f"COVERED SHORT + ENTERED LONG: {size:.6f} units @ ${price:,.2f} (fees ${entry_fees + cover_fees:,.2f})"
+                if stop_loss_price:
+                    action += f" [Stop: ${stop_loss_price:,.2f}]"
+                if take_profit_price:
+                    action += f" [Target: ${take_profit_price:,.2f}]"
             else:
                 action = "HOLD — already long"
 
@@ -385,7 +546,7 @@ class Portfolio:
 
         elif signal == "SHORT":
             if current_side == PositionSide.FLAT:
-                size = self._position_size_units(price)
+                size = self._position_size_units(price, stop_loss_price=stop_loss_price)
                 entry_fees = size * price * fee_rate
                 
                 self.current_position = Position(
@@ -395,6 +556,9 @@ class Portfolio:
                     size=size,
                     leverage=self.leverage,
                     entry_fees=entry_fees,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    max_hold_days=max_hold_days,
                 )
                 self.current_position.liquidation_price = self.current_position.calculate_liquidation_price()
                 
@@ -405,13 +569,17 @@ class Portfolio:
                 
                 liq_str = f"${self.current_position.liquidation_price:,.2f}" if self.current_position.liquidation_price is not None else "N/A"
                 action = f"ENTERED SHORT: {size:.6f} units @ ${price:,.2f} (leverage {self.leverage}x, liq @ {liq_str})"
+                if stop_loss_price:
+                    action += f" [Stop: ${stop_loss_price:,.2f}]"
+                if take_profit_price:
+                    action += f" [Target: ${take_profit_price:,.2f}]"
                 
             elif current_side == PositionSide.LONG:
                 # Close long first
                 close_fees = self._close_position(price, date, fee_rate)
                 
                 # Then short
-                size = self._position_size_units(price)
+                size = self._position_size_units(price, stop_loss_price=stop_loss_price)
                 entry_fees = size * price * fee_rate
                 
                 self.current_position = Position(
@@ -421,6 +589,9 @@ class Portfolio:
                     size=size,
                     leverage=self.leverage,
                     entry_fees=entry_fees,
+                    stop_loss_price=stop_loss_price,
+                    take_profit_price=take_profit_price,
+                    max_hold_days=max_hold_days,
                 )
                 self.current_position.liquidation_price = self.current_position.calculate_liquidation_price()
                 
@@ -430,6 +601,10 @@ class Portfolio:
                 
                 liq_str = f"${self.current_position.liquidation_price:,.2f}" if self.current_position.liquidation_price is not None else "N/A"
                 action = f"CLOSED LONG + ENTERED SHORT: {size:.6f} units @ ${price:,.2f} (liq @ {liq_str}, fees ${entry_fees + close_fees:,.2f})"
+                if stop_loss_price:
+                    action += f" [Stop: ${stop_loss_price:,.2f}]"
+                if take_profit_price:
+                    action += f" [Target: ${take_profit_price:,.2f}]"
             else:
                 action = "HOLD — already short"
 
@@ -454,7 +629,7 @@ class Portfolio:
             else:
                 action = "HOLD — no long position to reduce"
 
-        # Record the trade
+        # Record the trade with risk management fields
         record = TradeRecord(
             date=date,
             signal=signal,
@@ -469,6 +644,11 @@ class Portfolio:
             funding_paid=self.total_funding_paid,
             leverage=self.leverage,
             liquidation_price=self.current_position.liquidation_price if self.current_position else None,
+            stop_loss=self.current_position.stop_loss_price if self.current_position else None,
+            take_profit=self.current_position.take_profit_price if self.current_position else None,
+            hold_days=None,  # Will be calculated in metrics
+            exit_reason="",  # Set on exit
+            atr_at_entry=atr,
         )
         self.trade_history.append(record)
 
@@ -517,6 +697,95 @@ class Portfolio:
             exit_fees = self._close_position(price, date, fee_rate)
             logger.info(f"[{date}] FORCE CLOSED at end of backtest @ ${price:,.2f} (fees ${exit_fees:,.2f})")
 
+    def scale_position(self, price: float, date: str, scale_factor: float = 0.5, fee_rate: float = 0.0005) -> str:
+        """Scale into existing position (pyramiding).
+        
+        Args:
+            price: Current price
+            date: Current date
+            scale_factor: Fraction of original position to add (default 0.5 = 50%)
+            fee_rate: Fee rate for the additional entry
+            
+        Returns:
+            Action description
+        """
+        if not self.current_position or not self.current_position.is_open:
+            return "No position to scale"
+        
+        pos = self.current_position
+        additional_size = pos.size * scale_factor
+        entry_fees = additional_size * price * fee_rate
+        
+        # Add to position
+        margin = (additional_size * price) / self.leverage
+        self.cash -= margin + entry_fees
+        self.total_fees_paid += entry_fees
+        
+        # Update position (weighted average entry price)
+        total_size = pos.size + additional_size
+        pos.entry_price = (pos.entry_price * pos.size + price * additional_size) / total_size
+        pos.size = total_size
+        pos.entry_fees += entry_fees
+        
+        logger.info(f"[{date}] SCALED {pos.side.value} by {scale_factor*100:.0f}% @ ${price:,.2f}")
+        return f"SCALED {pos.side.value}: added {additional_size:.6f} units @ ${price:,.2f} (fees ${entry_fees:,.2f})"
+    
+    def rebalance_position(self, price: float, date: str, target_pct: float = 0.5, fee_rate: float = 0.0005) -> str:
+        """Rebalance position to target percentage of portfolio.
+        
+        Args:
+            price: Current price
+            date: Current date
+            target_pct: Target position size as % of portfolio (default 0.5 = 50%)
+            fee_rate: Fee rate for rebalancing
+            
+        Returns:
+            Action description
+        """
+        if not self.current_position or not self.current_position.is_open:
+            return "No position to rebalance"
+        
+        pos = self.current_position
+        portfolio_val = self.portfolio_value(price)
+        target_value = portfolio_val * target_pct
+        current_value = pos.size * price
+        
+        if abs(current_value - target_value) / portfolio_val < 0.05:  # Within 5% tolerance
+            return "Position already balanced"
+        
+        if current_value > target_value:
+            # Reduce position
+            reduce_size = (current_value - target_value) / price
+            exit_fees = reduce_size * price * fee_rate
+            
+            # Partial close
+            margin_return = (reduce_size * pos.entry_price) / pos.leverage
+            pnl = (price - pos.entry_price) * reduce_size if pos.side == PositionSide.LONG else (pos.entry_price - price) * reduce_size
+            
+            self.cash += margin_return + pnl - exit_fees
+            self.total_fees_paid += exit_fees
+            pos.size -= reduce_size
+            
+            logger.info(f"[{date}] REBALANCED (reduced) {pos.side.value} by {reduce_size:.6f} units")
+            return f"REBALANCED: reduced {pos.side.value} by {reduce_size:.6f} units @ ${price:,.2f}"
+        else:
+            # Increase position
+            add_size = (target_value - current_value) / price
+            entry_fees = add_size * price * fee_rate
+            
+            margin = (add_size * price) / self.leverage
+            self.cash -= margin + entry_fees
+            self.total_fees_paid += entry_fees
+            
+            # Update weighted average entry
+            total_size = pos.size + add_size
+            pos.entry_price = (pos.entry_price * pos.size + price * add_size) / total_size
+            pos.size = total_size
+            pos.entry_fees += entry_fees
+            
+            logger.info(f"[{date}] REBALANCED (increased) {pos.side.value} by {add_size:.6f} units")
+            return f"REBALANCED: increased {pos.side.value} by {add_size:.6f} units @ ${price:,.2f}"
+
     def get_stats(self) -> Dict[str, Any]:
         """Get portfolio statistics."""
         return {
@@ -528,4 +797,6 @@ class Portfolio:
             "losing_trades": sum(1 for p in self.closed_positions if p.pnl < 0),
             "avg_leverage": self.leverage,
             "position_sizing": self.position_sizing,
+            "stops_hit": self.stops_hit,
+            "takes_hit": self.takes_hit,
         }

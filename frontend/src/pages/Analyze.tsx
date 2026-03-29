@@ -33,6 +33,12 @@ interface State {
   decision: string;
   finalReport: string;
   error: string;
+  // Structured signal fields
+  stopLoss?: number;
+  takeProfit?: number;
+  confidence?: number;
+  maxHoldDays?: number;
+  reasoning?: string;
 }
 
 type Action =
@@ -105,6 +111,11 @@ function reducer(state: State, action: Action): State {
           },
         },
         decision: (result.decision as string) || state.decision,
+        stopLoss: result.stop_loss_price as number | undefined,
+        takeProfit: result.take_profit_price as number | undefined,
+        confidence: result.confidence as number | undefined,
+        maxHoldDays: result.max_hold_days as number | undefined,
+        reasoning: result.reasoning as string | undefined,
       };
     }
     case 'ERROR':
@@ -126,6 +137,11 @@ const initialState: State = {
   decision: '',
   finalReport: '',
   error: '',
+  stopLoss: undefined,
+  takeProfit: undefined,
+  confidence: undefined,
+  maxHoldDays: undefined,
+  reasoning: undefined,
 };
 
 export default function Analyze() {
@@ -196,7 +212,7 @@ export default function Analyze() {
         </div>
         {state.decision && (
           <div className="ml-auto">
-            <SignalBadge signal={state.decision} size="lg" />
+            <SignalBadge signal={state.decision} size="lg" confidence={state.confidence} />
           </div>
         )}
       </div>
@@ -250,10 +266,61 @@ export default function Analyze() {
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-bold text-white">Final Decision</h3>
-                <SignalBadge signal={state.decision} size="lg" />
+                <SignalBadge signal={state.decision} size="lg" confidence={state.confidence} />
               </div>
               <div className="markdown-content text-sm max-h-96 overflow-y-auto">
                 <ReactMarkdown>{state.finalReport}</ReactMarkdown>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Trade Parameters (if structured signal available) */}
+          {state.stopLoss !== undefined && state.takeProfit !== undefined && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="glass p-6"
+            >
+              <h3 className="text-lg font-bold text-white mb-4">Trade Parameters</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">Stop Loss</p>
+                  <p className="text-lg font-semibold text-red-400">
+                    ${state.stopLoss?.toLocaleString() || 'N/A'}
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">Take Profit</p>
+                  <p className="text-lg font-semibold text-green-400">
+                    ${state.takeProfit?.toLocaleString() || 'N/A'}
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">Confidence</p>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-accent-teal transition-all"
+                        style={{ width: `${(state.confidence || 0) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-sm font-semibold text-white">
+                      {((state.confidence || 0) * 100).toFixed(0)}%
+                    </p>
+                  </div>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">Max Hold Days</p>
+                  <p className="text-lg font-semibold text-white">
+                    {state.maxHoldDays || 'N/A'} days
+                  </p>
+                </div>
+                {state.reasoning && (
+                  <div className="bg-slate-800/50 rounded-lg p-4 col-span-2">
+                    <p className="text-xs text-slate-400 mb-1">Reasoning</p>
+                    <p className="text-sm text-slate-300">{state.reasoning}</p>
+                  </div>
+                )}
               </div>
             </motion.div>
           )}

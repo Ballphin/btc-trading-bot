@@ -170,6 +170,39 @@ export default function AnalysisDetail() {
               </div>
             ))}
           </div>
+
+          {/* Risk Parameters (if structured signal available) */}
+          {(analysis.stop_loss_price !== undefined || analysis.take_profit_price !== undefined) && (
+            <div>
+              <h3 className="text-sm font-medium text-slate-400 mb-3">Risk Parameters</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {analysis.stop_loss_price !== undefined && analysis.stop_loss_price > 0 && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">Stop Loss</p>
+                    <p className="text-sm font-medium text-red-400">${analysis.stop_loss_price.toLocaleString()}</p>
+                  </div>
+                )}
+                {analysis.take_profit_price !== undefined && analysis.take_profit_price > 0 && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">Take Profit</p>
+                    <p className="text-sm font-medium text-green-400">${analysis.take_profit_price.toLocaleString()}</p>
+                  </div>
+                )}
+                {analysis.confidence !== undefined && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">Confidence</p>
+                    <p className="text-sm font-medium text-white">{(analysis.confidence * 100).toFixed(0)}%</p>
+                  </div>
+                )}
+                {analysis.max_hold_days !== undefined && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">Max Hold Days</p>
+                    <p className="text-sm font-medium text-white">{analysis.max_hold_days} days</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </motion.div>
       )}
 
