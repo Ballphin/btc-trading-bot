@@ -517,6 +517,7 @@ export default function BacktestResults() {
                 <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Price</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Action</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Portfolio Value</th>
+                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Open PnL</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Position</th>
               </tr>
             </thead>
@@ -545,6 +546,9 @@ export default function BacktestResults() {
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-300 text-right">
                     ${trade.portfolio_value?.toLocaleString()}
+                  </td>
+                  <td className={`px-4 py-3 text-sm text-right font-medium ${trade.unrealized_pnl > 0 ? 'text-green-400' : trade.unrealized_pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                    ${trade.unrealized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) || '0.00'}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-400">{trade.position}</td>
                 </tr>

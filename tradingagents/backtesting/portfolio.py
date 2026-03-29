@@ -180,8 +180,13 @@ class Portfolio:
         return sum(losses) / len(losses) if losses else 500.0
 
     def portfolio_value(self, current_price: float) -> float:
-        """Total portfolio value = cash + unrealized P&L."""
-        return self.cash + self.unrealized_pnl(current_price)
+        """Total portfolio value = cash + locked margin + unrealized P&L."""
+        locked_margin = 0.0
+        if self.current_position and self.current_position.is_open:
+            pos = self.current_position
+            locked_margin = (pos.size * pos.entry_price) / pos.leverage if pos.leverage > 0 else pos.size * pos.entry_price
+            
+        return self.cash + locked_margin + self.unrealized_pnl(current_price)
 
     def unrealized_pnl(self, current_price: float) -> float:
         """Unrealized P&L of the current open position."""
@@ -198,7 +203,7 @@ class Portfolio:
         """Sum of all closed position P&Ls."""
         return sum(p.pnl for p in self.closed_positions)
 
-    def _calculate_funding(self, date: str, price: float) -> float:
+    def _calculate_funding(self, date: str, price: float, actual_rate: Optional[float] = None) -> float:
         """Calculate funding cost for shorts (paid) or longs (received)."""
         if not self.use_funding or not self.current_position:
             return 0.0
@@ -207,19 +212,24 @@ class Portfolio:
             self.last_funding_date = date
             return 0.0
         
-        last_dt = datetime.strptime(self.last_funding_date, "%Y-%m-%d")
-        current_dt = datetime.strptime(date, "%Y-%m-%d")
+        last_fmt = "%Y-%m-%d %H:%M:%S" if " " in self.last_funding_date else "%Y-%m-%d"
+        curr_fmt = "%Y-%m-%d %H:%M:%S" if " " in date else "%Y-%m-%d"
+        last_dt = datetime.strptime(self.last_funding_date, last_fmt)
+        current_dt = datetime.strptime(date, curr_fmt)
         hours_passed = (current_dt - last_dt).total_seconds() / 3600
         
         if hours_passed >= self.funding_interval_hours:
             self.last_funding_date = date
-            funding_rate = 0.0001  # 0.01% per interval
+            # If API found dynamic rate, use it, else default fallback
+            funding_rate = actual_rate if actual_rate is not None else 0.0001
             notional = self.current_position.size * price
             funding_cost = notional * funding_rate
             
             if self.current_position.side == PositionSide.SHORT:
                 return funding_cost
             elif self.current_position.side == PositionSide.LONG:
+                # Longs historically receive funding if funding is positive
+                # Hyperliquid pays out the actual fundingRate
                 return -funding_cost * 0.5
         
         return 0.0
@@ -260,7 +270,7 @@ class Portfolio:
         logger.error(f"[{date}] LIQUIDATION at ${price:,.2f}! Margin ${margin:,.2f} lost.")
         return f"LIQUIDATED: ${margin:,.2f} margin lost"
 
-    def process_signal(self, signal: str, price: float, date: str, use_limit_order: bool = False) -> str:
+    def process_signal(self, signal: str, price: float, date: str, use_limit_order: bool = False, funding_rate: Optional[float] = None) -> str:
         """
         Process a trading signal with crypto enhancements.
 
@@ -269,6 +279,7 @@ class Portfolio:
             price: Current market price
             date: Current date string
             use_limit_order: If True, use maker fees (lower)
+            funding_rate: Fetched actual funding rate (historically dynamic)
 
         Returns:
             Description of the action taken.
@@ -278,7 +289,7 @@ class Portfolio:
         current_side = self.position_side
         
         # Calculate funding costs first
-        funding_cost = self._calculate_funding(date, price)
+        funding_cost = self._calculate_funding(date, price, funding_rate)
         if self.current_position and funding_cost != 0:
             self.current_position.add_funding(funding_cost)
             self.total_funding_paid += funding_cost
@@ -368,7 +379,9 @@ class Portfolio:
             elif current_side == PositionSide.FLAT:
                 action = "HOLD — no position to sell"
             elif current_side == PositionSide.SHORT:
-                action = "HOLD — already short (use COVER to close)"
+                # SELL on a short = COVER (LLM uses SELL to mean exit position)
+                exit_fees = self._close_position(price, date, fee_rate)
+                action = f"COVERED SHORT (via SELL) @ ${price:,.2f} (fees ${exit_fees:,.2f})"
 
         elif signal == "SHORT":
             if current_side == PositionSide.FLAT:

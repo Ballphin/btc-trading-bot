@@ -10,6 +10,7 @@ const PRESETS = [
 ];
 
 const FREQUENCIES = [
+  { value: '4h', label: '4-Hour' },
   { value: 'daily', label: 'Daily' },
   { value: 'weekly', label: 'Weekly' },
   { value: 'biweekly', label: 'Bi-weekly' },

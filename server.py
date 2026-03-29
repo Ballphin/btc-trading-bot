@@ -530,63 +530,7 @@ def _sanitize_json(obj):
     return obj
 
 
-def _generate_trade_dates(start_date: str, end_date: str, frequency: str = "weekly", ticker: str = "") -> List[str]:
-    """Generate a list of trading dates between start and end."""
-    from datetime import timedelta
-    from tradingagents.dataflows.asset_detection import is_crypto
-    
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    
-    dates = []
-    current = start
-    
-    if frequency == "daily":
-        step = timedelta(days=1)
-    elif frequency == "weekly":
-        step = timedelta(weeks=1)
-    elif frequency == "biweekly":
-        step = timedelta(weeks=2)
-    elif frequency == "monthly":
-        step = timedelta(days=30)
-    else:
-        step = timedelta(weeks=1)
-    
-    while current <= end:
-        # For crypto, include all days. For stocks, only weekdays
-        if is_crypto(ticker):
-            dates.append(current.strftime("%Y-%m-%d"))
-        elif current.weekday() < 5:
-            dates.append(current.strftime("%Y-%m-%d"))
-        current += step
-    
-    return dates
-
-
-def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
-    """Fetch closing price for a ticker on a specific date."""
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        start = dt - timedelta(days=5)
-        end = dt + timedelta(days=1)
-        data = yf.download(
-            ticker,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            progress=False,
-            auto_adjust=True,
-        )
-        if data.empty:
-            return None
-        data.index = data.index.tz_localize(None) if data.index.tz else data.index
-        mask = data.index <= dt
-        if mask.any():
-            close = data.loc[mask, "Close"].iloc[-1]
-            return float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
-        return float(data["Close"].iloc[-1].iloc[0]) if hasattr(data["Close"].iloc[-1], 'iloc') else float(data["Close"].iloc[-1])
-    except Exception as e:
-        logger.warning(f"Could not fetch price for {ticker} on {date_str}: {e}")
-        return None
+from tradingagents.backtesting.engine import _generate_trade_dates, _get_price_on_date, _get_funding_on_date
 
 
 def _extract_signal_from_text(text: str) -> str:
@@ -667,8 +611,9 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
         # Check if analysis logs exist for replay mode
         if mode == "replay":
             logs_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
-            available_logs = sum(1 for d in trade_dates if (logs_dir / f"full_states_log_{d}.json").exists())
-            log(f"Found {available_logs}/{total_dates} analysis logs")
+            base_dates = set([d.split(' ')[0] for d in trade_dates])
+            available_logs = sum(1 for bd in base_dates if (logs_dir / f"full_states_log_{bd}.json").exists())
+            log(f"Found {available_logs}/{len(base_dates)} analysis logs for {total_dates} tick intervals")
             if available_logs == 0:
                 raise ValueError(f"No analysis logs found for {ticker} in date range. Run analysis first.")
         
@@ -745,7 +690,7 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
         elapsed = (datetime.now() - start_time).total_seconds()
         log(f"=== BACKTEST COMPLETE in {elapsed:.1f}s ===")
         
-        eq.put({"event": "complete", "result": result})
+        eq.put({"event": "complete", "result": _sanitize_json(result)})
         
     except Exception as e:
         elapsed = (datetime.now() - start_time).total_seconds()
@@ -787,16 +732,17 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             "date": trade_date,
         })
         
-        log_file = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{trade_date}.json"
+        base_date = trade_date.split(" ")[0]
+        log_file = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{base_date}.json"
         
         if not log_file.exists():
-            errors.append({"date": trade_date, "error": "No analysis log found"})
-            log(f"  Warning: No analysis log for {trade_date}")
+            errors.append({"date": trade_date, "error": f"No analysis log found for {base_date}"})
+            log(f"  Warning: No analysis log for {base_date}")
             continue
         
         try:
             data = json.loads(log_file.read_text())
-            date_data = data.get(trade_date, data)
+            date_data = data.get(base_date, data)
             decision_text = date_data.get("final_trade_decision", "")
             signal = _extract_signal_from_text(decision_text)
             
@@ -806,7 +752,8 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
                 log(f"  Warning: No price data for {trade_date}")
                 continue
             
-            action = portfolio.process_signal(signal, price, trade_date)
+            funding_rate = _get_funding_on_date(ticker, trade_date)
+            action = portfolio.process_signal(signal, price, trade_date, funding_rate=funding_rate)
             log(f"  {trade_date}: {signal} @ ${price:,.2f} → {action}")
             
             decisions.append({
@@ -915,8 +862,8 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
     # Patch engine to emit progress events
     original_process = engine.portfolio.process_signal
     
-    def patched_process(signal: str, price: float, date: str) -> str:
-        result = original_process(signal, price, date)
+    def patched_process(signal: str, price: float, date: str, **kwargs) -> str:
+        result = original_process(signal, price, date, **kwargs)
         current_idx = trade_dates.index(date) if date in trade_dates else 0
         eq.put({
             "event": "progress",
@@ -939,11 +886,49 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
     
     # Run the backtest
     log("Starting engine.run() - this may take several minutes...")
-    result = engine.run()
+    raw_result = engine.run()
     log("Engine run complete")
     
-    # Add crypto stats to result
-    result["portfolio_stats"] = engine.portfolio.get_stats()
+    # Re-compute metrics with crypto parameters (engine.run() uses basic compute_metrics)
+    from tradingagents.backtesting.metrics import compute_metrics
+    crypto_metrics = compute_metrics(
+        equity_curve=engine.portfolio.equity_curve,
+        closed_positions=engine.portfolio.closed_positions,
+        initial_capital=initial_capital,
+        total_fees=engine.portfolio.total_fees_paid,
+        total_funding=engine.portfolio.total_funding_paid,
+        liquidations=engine.portfolio.liquidations,
+        leverage=leverage,
+    )
+    
+    # Build trade_history from engine's portfolio (engine.run() doesn't include this)
+    trade_history = [
+        {
+            "date": t.date,
+            "signal": t.signal,
+            "price": t.price,
+            "action": t.action_taken,
+            "position": t.position_side,
+            "portfolio_value": t.portfolio_value,
+            "unrealized_pnl": t.unrealized_pnl,
+            "realized_pnl": t.realized_pnl,
+            "fees_paid": t.fees_paid,
+            "funding_paid": t.funding_paid,
+            "leverage": t.leverage,
+        }
+        for t in engine.portfolio.trade_history
+    ]
+    
+    result = {
+        "metrics": crypto_metrics,
+        "portfolio_stats": engine.portfolio.get_stats(),
+        "decisions": raw_result.get("decisions", []),
+        "equity_curve": engine.portfolio.equity_curve,
+        "trade_history": trade_history,
+        "errors": raw_result.get("errors", []),
+    }
+    
+    log(f"Simulation result: {len(trade_history)} trade log entries, {crypto_metrics.get('total_trades', 0)} closed trades")
     
     return result
 
@@ -1020,7 +1005,8 @@ async def stream_backtest(job_id: str):
         while True:
             try:
                 event = await asyncio.wait_for(eq.get(), timeout=120)
-                yield {"event": event.get("event", "message"), "data": json.dumps(event)}
+                safe_event = _sanitize_json(event)
+                yield {"event": safe_event.get("event", "message"), "data": json.dumps(safe_event, default=str)}
                 if event.get("event") in ("complete", "error"):
                     break
             except asyncio.TimeoutError:
@@ -1100,7 +1086,7 @@ async def get_backtest_result(job_id: str):
         return {
             "job_id": job_id,
             "status": job["status"],
-            "result": job.get("result"),
+            "result": _sanitize_json(job.get("result")),
             "error": job.get("error"),
         }
     

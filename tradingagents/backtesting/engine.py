@@ -20,47 +20,164 @@ from tradingagents.dataflows.asset_detection import is_crypto
 logger = logging.getLogger(__name__)
 
 
-def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
-    """Fetch closing price for a ticker on a specific date."""
+_PRICE_CACHE = {}
+_FUNDING_CACHE = {}
+
+def _preload_chunk_if_needed(ticker: str, date_str: str):
+    global _PRICE_CACHE
+    import requests
+    from tradingagents.dataflows.asset_detection import is_crypto
+    
+    if ticker not in _PRICE_CACHE:
+        _PRICE_CACHE[ticker] = {}
+        
+    date_fmt = "%Y-%m-%d %H:%M:%S" if " " in date_str else "%Y-%m-%d"
+    dt = datetime.strptime(date_str, date_fmt)
+    
+    # Check if we have data within 3 days of target
+    closest_distance = float('inf')
+    for d_str in _PRICE_CACHE[ticker].keys():
+        d_fmt = "%Y-%m-%d %H:%M:%S" if " " in d_str else "%Y-%m-%d"
+        d_dt = datetime.strptime(d_str, d_fmt)
+        diff = abs((d_dt - dt).days)
+        if diff < closest_distance:
+            closest_distance = diff
+            
+    if closest_distance <= 3:
+        return # Cache hit within acceptable range (no need to fetch chunk)
+        
+    # Cache miss or entirely out of bounds -> fetch next chunk (~1 year API max)
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        start = dt - timedelta(days=5)
-        end = dt + timedelta(days=1)
-        data = yf.download(
-            ticker,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
-            progress=False,
-            auto_adjust=True,
-        )
-        if data.empty:
-            return None
-        # Get the closest date <= target
-        data.index = data.index.tz_localize(None) if data.index.tz else data.index
-        mask = data.index <= dt
-        if mask.any():
-            close = data.loc[mask, "Close"].iloc[-1]
-            return float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
-        return float(data["Close"].iloc[-1].iloc[0]) if hasattr(data["Close"].iloc[-1], 'iloc') else float(data["Close"].iloc[-1])
+        is_c = is_crypto(ticker)
+        if is_c:
+            base_asset = ticker.replace("-USD", "").upper()
+            start_ts = int((dt - timedelta(days=5)).timestamp() * 1000)
+            end_ts = int((dt + timedelta(days=120)).timestamp() * 1000) # 120 days to stay under 5k candle limit
+            
+            interval = "4h" if " " in date_str else "1d"
+            url = "https://api.hyperliquid.xyz/info"
+            payload = {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": base_asset,
+                    "interval": interval,
+                    "startTime": start_ts,
+                    "endTime": end_ts
+                }
+            }
+            resp = requests.post(url, json=payload)
+            candles = resp.json()
+            if isinstance(candles, list):
+                for c in candles:
+                    c_dt = datetime.fromtimestamp(c["t"] / 1000.0)
+                    c_str = c_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else c_dt.strftime("%Y-%m-%d")
+                    _PRICE_CACHE[ticker][c_str] = float(c["c"])
+                    
+            # Also fetch funding history chunk
+            fund_payload = {
+                "type": "fundingHistory",
+                "coin": base_asset,
+                "startTime": start_ts,
+                "endTime": end_ts
+            }
+            f_resp = requests.post(url, json=fund_payload)
+            funding_data = f_resp.json()
+            if ticker not in _FUNDING_CACHE:
+                _FUNDING_CACHE[ticker] = {}
+            if isinstance(funding_data, list):
+                for f in funding_data:
+                    f_dt = datetime.fromtimestamp(f["time"] / 1000.0)
+                    f_str = f_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else f_dt.strftime("%Y-%m-%d")
+                    _FUNDING_CACHE[ticker][f_str] = float(f["fundingRate"])
+                
+        else:
+            fetch_start = dt - timedelta(days=5)
+            fetch_end = dt + timedelta(days=365)
+            try:
+                data = yf.download(
+                    ticker,
+                    start=fetch_start.strftime("%Y-%m-%d"),
+                    end=fetch_end.strftime("%Y-%m-%d"),
+                    progress=False,
+                    auto_adjust=True,
+                )
+                if not data.empty:
+                    data.index = data.index.tz_localize(None) if data.index.tz else data.index
+                    for index, row in data.iterrows():
+                        d_str = index.strftime("%Y-%m-%d")
+                        close = row["Close"]
+                        price = float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
+                        _PRICE_CACHE[ticker][d_str] = price
+            except Exception as e:
+                logger.warning(f"yf.download failed: {e}")
+                
     except Exception as e:
-        logger.warning(f"Could not fetch price for {ticker} on {date_str}: {e}")
-        return None
+        logger.warning(f"chunk fetch failed for {ticker}: {e}")
+
+def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
+    """Fetch closing price for a ticker on a specific date (powered by robust Hyperliquid/YF Cache)."""
+    _preload_chunk_if_needed(ticker, date_str)
+    
+    if date_str in _PRICE_CACHE.get(ticker, {}):
+        return _PRICE_CACHE[ticker][date_str]
+        
+    # Resolve closest prior date
+    date_fmt = "%Y-%m-%d %H:%M:%S" if " " in date_str else "%Y-%m-%d"
+    dt = datetime.strptime(date_str, date_fmt)
+    closest_price = None
+    closest_dt = None
+    
+    for d_str, price in _PRICE_CACHE.get(ticker, {}).items():
+        d_fmt = "%Y-%m-%d %H:%M:%S" if " " in d_str else "%Y-%m-%d"
+        d_dt = datetime.strptime(d_str, d_fmt)
+        if d_dt <= dt:
+            if closest_dt is None or d_dt > closest_dt:
+                closest_dt = d_dt
+                closest_price = price
+                
+    if closest_price is not None and (dt - closest_dt).days <= 5:
+        return closest_price
+    return None
+
+def _get_funding_on_date(ticker: str, date_str: str) -> Optional[float]:
+    """Fetch exact historical funding rate from Hyperliquid Cache if available."""
+    if ticker in _FUNDING_CACHE:
+        # Resolve closest prior date within 12 hours
+        date_fmt = "%Y-%m-%d %H:%M:%S" if " " in date_str else "%Y-%m-%d"
+        dt = datetime.strptime(date_str, date_fmt)
+        closest_rate = None
+        closest_dt = None
+        
+        for d_str, rate in _FUNDING_CACHE[ticker].items():
+            d_fmt = "%Y-%m-%d %H:%M:%S" if " " in d_str else "%Y-%m-%d"
+            d_dt = datetime.strptime(d_str, d_fmt)
+            if d_dt <= dt:
+                if closest_dt is None or d_dt > closest_dt:
+                    closest_dt = d_dt
+                    closest_rate = rate
+                    
+        if closest_rate is not None and (dt - closest_dt).total_seconds() <= 12 * 3600:
+            return closest_rate
+    return None
 
 
 def _generate_trade_dates(
     start_date: str,
     end_date: str,
     frequency: str = "weekly",
+    ticker: str = "",
 ) -> List[str]:
     """Generate a list of trading dates between start and end."""
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
+    start = datetime.strptime(start_date.split(" ")[0], "%Y-%m-%d")
+    end = datetime.strptime(end_date.split(" ")[0], "%Y-%m-%d")
 
     dates = []
     current = start
 
     if frequency == "daily":
         step = timedelta(days=1)
+    elif frequency == "4h":
+        step = timedelta(hours=4)
     elif frequency == "weekly":
         step = timedelta(weeks=1)
     elif frequency == "biweekly":
@@ -72,11 +189,12 @@ def _generate_trade_dates(
 
     while current <= end:
         # Skip weekends for equity (crypto trades 24/7)
-        if current.weekday() < 5:
-            dates.append(current.strftime("%Y-%m-%d"))
-        elif is_crypto(start_date):
-            # For crypto, this doesn't apply — but we need a ticker, not a date
-            dates.append(current.strftime("%Y-%m-%d"))
+        date_str = current.strftime("%Y-%m-%d %H:%M:%S") if frequency == "4h" else current.strftime("%Y-%m-%d")
+        
+        if is_crypto(ticker):
+            dates.append(date_str)
+        elif current.weekday() < 5:
+            dates.append(date_str)
         current += step
 
     return dates
@@ -134,7 +252,7 @@ class BacktestEngine:
 
         # Generate trade dates
         trade_dates = _generate_trade_dates(
-            self.start_date, self.end_date, self.trading_frequency
+            self.start_date, self.end_date, self.trading_frequency, self.ticker
         )
         logger.info(f"Generated {len(trade_dates)} trading dates")
 
@@ -168,7 +286,8 @@ class BacktestEngine:
                 final_state, signal = graph.propagate(self.ticker, trade_date)
 
                 # Process signal through portfolio
-                action = self.portfolio.process_signal(signal, price, trade_date)
+                funding_rate = _get_funding_on_date(self.ticker, trade_date)
+                action = self.portfolio.process_signal(signal, price, trade_date, funding_rate=funding_rate)
 
                 # Record the decision
                 decision = {
@@ -257,6 +376,8 @@ class BacktestEngine:
                     "action": t.action_taken,
                     "position": t.position_side,
                     "portfolio_value": t.portfolio_value,
+                    "unrealized_pnl": t.unrealized_pnl,
+                    "realized_pnl": t.realized_pnl,
                 }
                 for t in self.portfolio.trade_history
             ],

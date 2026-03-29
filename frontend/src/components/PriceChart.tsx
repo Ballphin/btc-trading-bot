@@ -85,7 +85,7 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
   return (
     <div className="glass p-4">
       <ResponsiveContainer width="100%" height={height}>
-        <ComposedChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <ComposedChart data={data} margin={{ top: 80, right: 10, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3} />
@@ -158,38 +158,41 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
             connectNulls
           />
 
-          {/* Signal markers */}
+          {/* Signal Reference Lines */}
           {signals.map((s, i) => (
-            <g key={i}>
-              {/* Horizontal reference line at price level */}
-              <ReferenceLine
-                yAxisId="price"
-                y={s.price}
-                stroke={SIGNAL_COLORS[s.signal] || '#94a3b8'}
-                strokeDasharray="3 3"
-                strokeWidth={1}
-                opacity={0.6}
-                ifOverflow="extendDomain"
-              />
-              {/* Dot marker at decision date and price */}
-              <ReferenceDot
-                yAxisId="price"
-                x={s.date}
-                y={s.price}
-                r={6}
-                fill={SIGNAL_COLORS[s.signal] || '#94a3b8'}
-                stroke="white"
-                strokeWidth={2}
-              />
-              {/* Label annotation */}
+            <ReferenceLine
+              key={`line-${i}`}
+              yAxisId="price"
+              y={s.price}
+              stroke={SIGNAL_COLORS[s.signal] || '#94a3b8'}
+              strokeDasharray="3 3"
+              strokeWidth={1}
+              opacity={0.6}
+              ifOverflow="extendDomain"
+            />
+          ))}
+
+          {/* Signal Dot Markers with Labels */}
+          {signals.map((s, i) => (
+            <ReferenceDot
+              key={`dot-${i}`}
+              yAxisId="price"
+              x={s.date}
+              y={s.price}
+              r={6}
+              fill={SIGNAL_COLORS[s.signal] || '#94a3b8'}
+              stroke="white"
+              strokeWidth={2}
+            >
               <Label
                 value={`${s.signal} @ $${s.price.toLocaleString()}`}
                 position="top"
+                dy={i % 2 === 0 ? -10 : -25}
                 fill={SIGNAL_COLORS[s.signal] || '#94a3b8'}
                 fontSize={12}
                 fontWeight={600}
               />
-            </g>
+            </ReferenceDot>
           ))}
         </ComposedChart>
       </ResponsiveContainer>

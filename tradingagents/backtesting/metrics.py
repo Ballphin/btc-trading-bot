@@ -122,7 +122,7 @@ def compute_metrics(
     # Profit factor
     gross_profit = sum(p.pnl for p in winning_trades)
     gross_loss = abs(sum(p.pnl for p in losing_trades))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
     # Expectancy
     expectancy = (win_rate * avg_win + (1 - win_rate) * avg_loss) if total_trades > 0 else 0
@@ -137,9 +137,9 @@ def compute_metrics(
         negative_returns = [r for r in returns if r < 0]
         
         if positive_returns and negative_returns:
-            omega = sum(positive_returns) / abs(sum(negative_returns)) if sum(negative_returns) != 0 else float("inf")
+            omega = sum(positive_returns) / abs(sum(negative_returns)) if sum(negative_returns) != 0 else 0.0
         else:
-            omega = float("inf") if positive_returns else 0.0
+            omega = 0.0 if positive_returns else 0.0
     else:
         omega = 0.0
 
