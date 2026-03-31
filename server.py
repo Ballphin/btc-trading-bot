@@ -54,17 +54,40 @@ EVAL_RESULTS_DIR = Path("eval_results")
 jobs: Dict[str, Dict[str, Any]] = {}
 backtest_jobs: Dict[str, Dict[str, Any]] = {}
 
+# ── Background eviction of stale completed backtest jobs (HIGH 8) ─────
+_BACKTEST_JOB_TTL_HOURS = 1
+
+async def _evict_old_backtest_jobs():
+    """Periodically remove completed/failed backtest jobs older than TTL to prevent memory leak."""
+    while True:
+        await asyncio.sleep(300)  # run every 5 minutes
+        cutoff = datetime.now() - timedelta(hours=_BACKTEST_JOB_TTL_HOURS)
+        expired = [
+            jid for jid, j in list(backtest_jobs.items())
+            if j.get("status") in ("completed", "failed")
+            and datetime.fromisoformat(j.get("created_at", datetime.now().isoformat())) < cutoff
+        ]
+        for jid in expired:
+            backtest_jobs.pop(jid, None)
+        if expired:
+            logger.info(f"Evicted {len(expired)} stale backtest job(s)")
+
+@app.on_event("startup")
+async def _start_background_tasks():
+    asyncio.create_task(_evict_old_backtest_jobs())
+
 
 class AnalyzeRequest(BaseModel):
     ticker: str
     date: Optional[str] = None
+    force_refresh: bool = False
 
 
 class BacktestRequest(BaseModel):
     ticker: str
     start_date: str
     end_date: str
-    mode: str = "replay"  # "replay" or "simulation"
+    mode: str = "replay"  # "replay", "simulation", or "hybrid"
     config: Optional[Dict[str, Any]] = None
     # Crypto-specific fields
     leverage: float = 1.0
@@ -165,7 +188,7 @@ def _detect_step_from_chunk(chunk: dict, seen_steps: set) -> Optional[dict]:
     return None
 
 
-def _run_analysis(job_id: str, ticker: str, trade_date: str):
+def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool = False):
     """Run the TradingAgents analysis in a background thread."""
     eq: JobEventQueue = jobs[job_id]["queue"]
     
@@ -173,8 +196,22 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str):
     eq.put({"event": "agent_start", "agent": "Starting Analysis", "step": 0, "total": 9})
     
     import sys
-    print(f"[Analysis {job_id}] Starting analysis for {ticker} on {trade_date}", flush=True)
+    print(f"[Analysis {job_id}] Starting analysis for {ticker} on {trade_date} (force_refresh={force_refresh})", flush=True)
     sys.stdout.flush()
+
+    # Cache-bust: clear data_cache subdirs for fresh data (HIGH 6)
+    if force_refresh:
+        import shutil
+        cache_base = Path("tradingagents/dataflows/data_cache")
+        if cache_base.exists():
+            cleared = 0
+            for subdir in cache_base.iterdir():
+                if subdir.is_dir():
+                    for cache_file in subdir.glob("*.json"):
+                        cache_file.unlink(missing_ok=True)
+                        cleared += 1
+            print(f"[Analysis {job_id}] Force refresh: cleared {cleared} cache files", flush=True)
+            eq.put({"event": "agent_start", "agent": f"Cache cleared ({cleared} files)", "step": 0, "total": 9})
 
     try:
         from tradingagents.default_config import DEFAULT_CONFIG
@@ -399,7 +436,7 @@ async def start_analysis(req: AnalyzeRequest):
     }
 
     # Start analysis in background thread
-    thread = threading.Thread(target=_run_analysis, args=(job_id, ticker, trade_date), daemon=True)
+    thread = threading.Thread(target=_run_analysis, args=(job_id, ticker, trade_date, req.force_refresh), daemon=True)
     thread.start()
 
     return {"job_id": job_id, "ticker": ticker, "date": trade_date}
@@ -705,25 +742,30 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
             
             if not matching_dates:
                 # None of the requested dates have logs — auto-adjust to available range
+                original_start = start_date
+                original_end = end_date
                 log(f"No logs in requested range ({start_date} to {end_date}). Available logs: {all_log_dates[0]} to {all_log_dates[-1]}")
                 log(f"Auto-adjusting date range to available analysis logs...")
-                
+
                 # Regenerate trade dates using the full available log range
                 trade_dates = _generate_trade_dates(all_log_dates[0], all_log_dates[-1], frequency, ticker=ticker)
                 total_dates = len(trade_dates)
-                
+
                 if total_dates == 0:
                     raise ValueError(f"Could not generate trade dates from available logs ({all_log_dates[0]} to {all_log_dates[-1]})")
-                
+
                 # Update the config to reflect actual dates used
                 start_date = all_log_dates[0]
                 end_date = all_log_dates[-1]
                 
                 eq.put({
-                    "event": "status",
+                    "event": "warning",
+                    "type": "date_range_adjusted",
                     "step": 2,
                     "total_steps": 5,
-                    "status": "Date range auto-adjusted",
+                    "status": "Date range auto-adjusted — no logs in requested range",
+                    "requested": f"{original_start} to {original_end}",
+                    "actual": f"{start_date} to {end_date}",
                     "details": f"Using available logs: {start_date} to {end_date} ({len(all_log_dates)} analysis days)"
                 })
             
@@ -733,6 +775,22 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
             log(f"Found {available_logs}/{len(base_dates_final)} analysis logs for {total_dates} tick intervals")
             log(f"Available analysis dates: {', '.join(all_log_dates)}")
         
+        # Emit sample-size warnings (HIGH 5)
+        if total_dates < 10:
+            eq.put({
+                "event": "warning",
+                "type": "sample_size_unreliable",
+                "count": total_dates,
+                "message": f"Only {total_dates} trading periods — metrics will be statistically unreliable (SE(Sharpe) > 0.39). Consider a wider date range."
+            })
+        elif total_dates < 30:
+            eq.put({
+                "event": "warning",
+                "type": "sample_size_limited",
+                "count": total_dates,
+                "message": f"{total_dates} trading periods — metrics have limited statistical significance (SE(Sharpe) ≈ 0.22–0.39). 30+ periods recommended."
+            })
+
         # Update progress tracking
         backtest_jobs[job_id]["progress"] = {"current": 0, "total": total_dates}
         
@@ -748,6 +806,9 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
         
         if mode == "replay":
             result = _replay_backtest(ticker, trade_dates, initial_capital, position_size_pct, eq, leverage, maker_fee, taker_fee, use_funding, position_sizing, log)
+        elif mode == "hybrid":
+            log("Step 3/5: Starting hybrid backtest (replay + simulation for missing dates)...")
+            result = _hybrid_backtest(job_id, ticker, trade_dates, initial_capital, position_size_pct, frequency, eq, leverage, maker_fee, taker_fee, use_funding, position_sizing, log)
         else:
             log("Step 3/5: Starting full simulation with LLM pipeline...")
             result = _simulate_backtest(job_id, ticker, trade_dates, initial_capital, position_size_pct, frequency, eq, leverage, maker_fee, taker_fee, use_funding, position_sizing, log)
@@ -861,15 +922,42 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             date_data = data.get(base_date, data)
             decision_text = date_data.get("final_trade_decision", "")
             signal = _extract_signal_from_text(decision_text)
-            
+
+            # Extract structured risk params from stored signal if available
+            stop_loss_price = date_data.get("stop_loss_price")
+            take_profit_price = date_data.get("take_profit_price")
+            max_hold_days = date_data.get("max_hold_days")
+
             price = _get_price_on_date(ticker, trade_date)
             if price is None:
                 errors.append({"date": trade_date, "error": "No price data available"})
                 log(f"  Warning: No price data for {trade_date}")
                 continue
-            
+
+            # BLOCKER 3: Validate stale stop/take prices from old analyses
+            # Threshold: 15% for crypto, 25% for equity
+            from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_asset
+            _stale_threshold = 0.15 if _is_crypto_asset(ticker) else 0.25
+            _DEFAULT_STOP_PCT = 0.07
+            _DEFAULT_TAKE_PCT = 0.20
+            if stop_loss_price is not None and price > 0:
+                if abs(stop_loss_price - price) / price > _stale_threshold:
+                    if signal in ("SHORT", "SELL"):
+                        stop_loss_price = price * (1 + _DEFAULT_STOP_PCT)
+                        take_profit_price = price * (1 - _DEFAULT_TAKE_PCT)
+                    else:
+                        stop_loss_price = price * (1 - _DEFAULT_STOP_PCT)
+                        take_profit_price = price * (1 + _DEFAULT_TAKE_PCT)
+                    log(f"  {trade_date}: Stale stop recalculated (>{_stale_threshold*100:.0f}% from current price)")
+
             funding_rate = _get_funding_on_date(ticker, trade_date)
-            action = portfolio.process_signal(signal, price, trade_date, funding_rate=funding_rate)
+            action = portfolio.process_signal(
+                signal, price, trade_date,
+                funding_rate=funding_rate,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                max_hold_days=max_hold_days,
+            )
             log(f"  {trade_date}: {signal} @ ${price:,.2f} → {action}")
             
             decisions.append({
@@ -879,6 +967,8 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
                 "action": action,
                 "portfolio_value": portfolio.portfolio_value(price),
                 "position": portfolio.position_side.value,
+                "stop_loss_price": stop_loss_price,
+                "take_profit_price": take_profit_price,
             })
             
             eq.put({
@@ -902,10 +992,22 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             log(f"  Final close: {trade_dates[-1]} @ ${final_price:,.2f}")
     
     log(f"Processed {len(decisions)} dates with {len(errors)} errors")
-    
+
     # Get portfolio stats
     portfolio_stats = portfolio.get_stats()
-    
+
+    # Compute benchmark (buy & hold) return for alpha (HIGH 7)
+    benchmark_return_pct = None
+    try:
+        if trade_dates:
+            start_price = _get_price_on_date(ticker, trade_dates[0])
+            end_price = _get_price_on_date(ticker, trade_dates[-1])
+            if start_price and end_price and start_price > 0:
+                benchmark_return_pct = (end_price - start_price) / start_price * 100
+    except Exception:
+        pass
+
+    from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_replay
     metrics = compute_metrics(
         equity_curve=portfolio.equity_curve,
         closed_positions=portfolio.closed_positions,
@@ -914,6 +1016,8 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
         total_funding=portfolio.total_funding_paid,
         liquidations=portfolio.liquidations,
         leverage=leverage,
+        is_crypto=_is_crypto_replay(ticker),
+        benchmark_return_pct=benchmark_return_pct,
     )
     
     return {
@@ -938,6 +1042,277 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             for t in portfolio.trade_history
         ],
         "errors": errors,
+    }
+
+
+def _hybrid_backtest(job_id: str, ticker: str, trade_dates: List[str], initial_capital: float, position_size_pct: float, frequency: str, eq: JobEventQueue, leverage: float = 1.0, maker_fee: float = 0.0002, taker_fee: float = 0.0005, use_funding: bool = True, position_sizing: str = "fixed", log_func = None) -> Dict[str, Any]:
+    """Hybrid backtest: replay existing logs, simulate missing dates with live LLM."""
+    from tradingagents.backtesting.portfolio import Portfolio
+    from tradingagents.backtesting.metrics import compute_metrics
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_hybrid
+
+    def log(msg: str):
+        if log_func:
+            log_func(msg)
+
+    # Discover available replay logs
+    logs_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
+    available_log_dates = set()
+    if logs_dir.exists():
+        available_log_dates = {
+            f.stem.replace("full_states_log_", "")
+            for f in logs_dir.glob("full_states_log_*.json")
+        }
+
+    # Count missing dates and estimate time
+    missing_dates = []
+    replay_dates = []
+    for td in trade_dates:
+        base_date = td.split(" ")[0]
+        if base_date in available_log_dates:
+            replay_dates.append(td)
+        else:
+            missing_dates.append(td)
+
+    n_missing = len(missing_dates)
+    n_replay = len(replay_dates)
+    estimated_seconds = n_missing * 75
+
+    log(f"Hybrid mode: {n_replay} replay dates, {n_missing} simulation dates")
+    log(f"Estimated time for simulations: {estimated_seconds // 60}m {estimated_seconds % 60}s")
+
+    # Emit time estimate warning if > 30 minutes
+    if estimated_seconds > 1800:
+        eq.put({
+            "event": "warning",
+            "type": "hybrid_time_estimate",
+            "replay_count": n_replay,
+            "simulation_count": n_missing,
+            "estimated_minutes": round(estimated_seconds / 60),
+            "message": f"Hybrid backtest will simulate {n_missing} dates (~{estimated_seconds // 60} min). "
+                       f"{n_replay} dates have existing analysis logs for fast replay."
+        })
+
+    # Initialize portfolio
+    portfolio = Portfolio(
+        initial_capital=initial_capital,
+        position_size_pct=position_size_pct,
+        leverage=leverage,
+        maker_fee=maker_fee,
+        taker_fee=taker_fee,
+        use_funding=use_funding,
+        position_sizing=position_sizing,
+    )
+    decisions = []
+    errors = []
+    replay_count = 0
+    simulation_count = 0
+
+    # Create a dedicated TradingAgentsGraph for simulation dates (thread-safe: one per job)
+    graph = None
+    if n_missing > 0:
+        sim_config = DEFAULT_CONFIG.copy()
+        sim_config["backtest_mode"] = True
+        graph = TradingAgentsGraph(
+            selected_analysts=["market", "social", "news", "fundamentals"],
+            debug=False,
+            config=sim_config,
+        )
+        if _is_crypto_hybrid(ticker):
+            graph._rebuild_graph_for_asset(ticker, ["market", "social", "news", "fundamentals"])
+
+    for i, trade_date in enumerate(trade_dates):
+        eq.put({
+            "event": "progress",
+            "current": i + 1,
+            "total": len(trade_dates),
+            "date": trade_date,
+        })
+
+        base_date = trade_date.split(" ")[0]
+        price = _get_price_on_date(ticker, trade_date)
+        if price is None:
+            errors.append({"date": trade_date, "error": "No price data available"})
+            log(f"  Warning: No price data for {trade_date}")
+            continue
+
+        signal = None
+        source = None
+        stop_loss_price = None
+        take_profit_price = None
+        max_hold_days = None
+        decision_text = ""
+
+        # Try replay first
+        log_file = logs_dir / f"full_states_log_{base_date}.json"
+        if log_file.exists():
+            try:
+                data = json.loads(log_file.read_text())
+                date_data = data.get(base_date, data)
+                decision_text = date_data.get("final_trade_decision", "")
+                signal = _extract_signal_from_text(decision_text)
+                stop_loss_price = date_data.get("stop_loss_price")
+                take_profit_price = date_data.get("take_profit_price")
+                max_hold_days = date_data.get("max_hold_days")
+                source = "replay"
+                replay_count += 1
+
+                # Validate stale stop/take prices
+                from tradingagents.dataflows.asset_detection import is_crypto as _is_c
+                _stale_threshold = 0.15 if _is_c(ticker) else 0.25
+                _DEFAULT_STOP_PCT = 0.07
+                _DEFAULT_TAKE_PCT = 0.20
+                if stop_loss_price is not None and price > 0:
+                    if abs(stop_loss_price - price) / price > _stale_threshold:
+                        if signal in ("SHORT", "SELL"):
+                            stop_loss_price = price * (1 + _DEFAULT_STOP_PCT)
+                            take_profit_price = price * (1 - _DEFAULT_TAKE_PCT)
+                        else:
+                            stop_loss_price = price * (1 - _DEFAULT_STOP_PCT)
+                            take_profit_price = price * (1 + _DEFAULT_TAKE_PCT)
+
+            except Exception as e:
+                log(f"  Replay failed for {base_date}: {e}, falling back to simulation")
+
+        # Fall back to live LLM simulation for missing dates
+        if signal is None and graph is not None:
+            try:
+                log(f"  Simulating {trade_date} via LLM pipeline...")
+                final_state, proc_signal = graph.propagate(ticker, trade_date)
+                signal = proc_signal.get("signal", "HOLD") if isinstance(proc_signal, dict) else str(proc_signal)
+                stop_loss_price = final_state.get("stop_loss_price")
+                take_profit_price = final_state.get("take_profit_price")
+                max_hold_days = final_state.get("max_hold_days")
+                decision_text = final_state.get("final_trade_decision", "")
+                source = "simulation"
+                simulation_count += 1
+
+                # Save the simulation result as a log for future replay
+                log_save_dir = logs_dir
+                log_save_dir.mkdir(parents=True, exist_ok=True)
+                log_save_file = log_save_dir / f"full_states_log_{base_date}.json"
+                if not log_save_file.exists():
+                    save_data = {
+                        base_date: {
+                            "company_of_interest": ticker,
+                            "trade_date": base_date,
+                            "final_trade_decision": decision_text,
+                            "stop_loss_price": stop_loss_price,
+                            "take_profit_price": take_profit_price,
+                            "max_hold_days": max_hold_days,
+                            "source": "hybrid_simulation",
+                        }
+                    }
+                    log_save_file.write_text(json.dumps(save_data, indent=2, default=str))
+                    log(f"    Saved simulation log for future replay")
+
+            except Exception as e:
+                errors.append({"date": trade_date, "error": f"Simulation failed: {e}"})
+                log(f"  Simulation failed for {trade_date}: {e}")
+                continue
+
+        if signal is None:
+            errors.append({"date": trade_date, "error": "No signal from replay or simulation"})
+            continue
+
+        # Process signal through portfolio
+        funding_rate = _get_funding_on_date(ticker, trade_date)
+        action = portfolio.process_signal(
+            signal, price, trade_date,
+            funding_rate=funding_rate,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            max_hold_days=max_hold_days,
+        )
+        log(f"  {trade_date}: [{source}] {signal} @ ${price:,.2f} → {action}")
+
+        decision = {
+            "date": trade_date,
+            "signal": signal,
+            "price": price,
+            "action": action,
+            "portfolio_value": portfolio.portfolio_value(price),
+            "position": portfolio.position_side.value,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
+            "source": source,
+        }
+        if source == "simulation":
+            decision["look_ahead_caveat"] = True
+        decisions.append(decision)
+
+        eq.put({
+            "event": "decision",
+            "date": trade_date,
+            "signal": signal,
+            "price": price,
+            "action": action,
+            "portfolio_value": portfolio.portfolio_value(price),
+            "source": source,
+        })
+
+    # Force close any open position
+    if trade_dates:
+        final_price = _get_price_on_date(ticker, trade_dates[-1])
+        if final_price and portfolio.current_position:
+            portfolio.force_close(final_price, trade_dates[-1], taker_fee)
+            log(f"  Final close: {trade_dates[-1]} @ ${final_price:,.2f}")
+
+    log(f"Hybrid complete: {replay_count} replayed, {simulation_count} simulated, {len(errors)} errors")
+
+    # Compute metrics
+    portfolio_stats = portfolio.get_stats()
+    benchmark_return_pct = None
+    try:
+        if trade_dates:
+            start_price = _get_price_on_date(ticker, trade_dates[0])
+            end_price = _get_price_on_date(ticker, trade_dates[-1])
+            if start_price and end_price and start_price > 0:
+                benchmark_return_pct = (end_price - start_price) / start_price * 100
+    except Exception:
+        pass
+
+    metrics = compute_metrics(
+        equity_curve=portfolio.equity_curve,
+        closed_positions=portfolio.closed_positions,
+        initial_capital=initial_capital,
+        total_fees=portfolio.total_fees_paid,
+        total_funding=portfolio.total_funding_paid,
+        liquidations=portfolio.liquidations,
+        leverage=leverage,
+        is_crypto=_is_crypto_hybrid(ticker),
+        benchmark_return_pct=benchmark_return_pct,
+    )
+
+    return {
+        "metrics": metrics,
+        "portfolio_stats": portfolio_stats,
+        "decisions": decisions,
+        "equity_curve": portfolio.equity_curve,
+        "trade_history": [
+            {
+                "date": t.date,
+                "signal": t.signal,
+                "price": t.price,
+                "action": t.action_taken,
+                "position": t.position_side,
+                "portfolio_value": t.portfolio_value,
+                "unrealized_pnl": t.unrealized_pnl,
+                "realized_pnl": t.realized_pnl,
+                "fees_paid": t.fees_paid,
+                "funding_paid": t.funding_paid,
+                "leverage": t.leverage,
+            }
+            for t in portfolio.trade_history
+        ],
+        "errors": errors,
+        "hybrid_stats": {
+            "replay_count": replay_count,
+            "simulation_count": simulation_count,
+            "total_dates": len(trade_dates),
+        },
     }
 
 
@@ -1005,8 +1380,11 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
     raw_result = engine.run()
     log("Engine run complete")
     
-    # Re-compute metrics with crypto parameters (engine.run() uses basic compute_metrics)
+    # Re-compute metrics with crypto parameters (engine.run() already uses is_crypto)
+    # engine.run() now returns metrics with correct is_crypto, just use them
     from tradingagents.backtesting.metrics import compute_metrics
+    from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_sim
+    _benchmark_pct = raw_result.get("metrics", {}).get("benchmark_return_pct")
     crypto_metrics = compute_metrics(
         equity_curve=engine.portfolio.equity_curve,
         closed_positions=engine.portfolio.closed_positions,
@@ -1015,6 +1393,8 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
         total_funding=engine.portfolio.total_funding_paid,
         liquidations=engine.portfolio.liquidations,
         leverage=leverage,
+        is_crypto=_is_crypto_sim(ticker),
+        benchmark_return_pct=_benchmark_pct,
     )
     
     # Build trade_history from engine's portfolio (engine.run() doesn't include this)
@@ -1067,6 +1447,14 @@ async def start_backtest(req: BacktestRequest):
             raise HTTPException(status_code=400, detail="Date range cannot exceed 2 years")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    # HIGH 10: Block 4h frequency in full-simulation mode
+    req_frequency = (req.config or {}).get("frequency", "weekly")
+    if req_frequency == "4h" and req.mode not in ("replay", "hybrid"):
+        raise HTTPException(
+            status_code=400,
+            detail="4h frequency is only supported in replay/hybrid mode. Use weekly/daily for simulation."
+        )
     
     job_id = str(uuid.uuid4())[:8]
     eq = JobEventQueue()

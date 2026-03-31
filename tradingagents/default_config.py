@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    "llm_temperature": 0.4,             # 0.0=deterministic, 0.4=modest diversity
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -34,6 +35,8 @@ DEFAULT_CONFIG = {
     },
     # Asset type: "auto" detects from ticker, or force "equity" / "crypto"
     "asset_type": "auto",
+    # Backtest mode: disables realtime/zero-cache tools to prevent look-ahead bias
+    "backtest_mode": False,
     # Per-asset-type vendor configuration for crypto assets
     # "crypto" = Coinbase OHLCV + Binance derivatives + Deribit funding + BGeometrics on-chain
     "crypto_vendors": {

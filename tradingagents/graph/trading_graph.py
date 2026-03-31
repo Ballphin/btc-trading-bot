@@ -39,6 +39,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_crypto_global_news,
     get_onchain_data,
 )
+from tradingagents.agents.utils.intraday_tools import (
+    get_intraday_data,
+    get_realtime_snapshot,
+)
 from tradingagents.dataflows.asset_detection import is_crypto
 
 from .conditional_logic import ConditionalLogic
@@ -151,6 +155,11 @@ class TradingAgentsGraph:
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
 
+        # Temperature (applies to all providers)
+        temperature = self.config.get("llm_temperature")
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")
             if thinking_level:
@@ -174,15 +183,15 @@ class TradingAgentsGraph:
 
     def _create_equity_tool_nodes(self) -> Dict[str, ToolNode]:
         """Standard equity tool nodes."""
+        market_tools = [
+            get_stock_data,
+            get_indicators,
+            get_intraday_data,
+        ]
+        if not self.config.get("backtest_mode", False):
+            market_tools.append(get_realtime_snapshot)
         return {
-            "market": ToolNode(
-                [
-                    # Core stock data tools
-                    get_stock_data,
-                    # Technical indicators
-                    get_indicators,
-                ]
-            ),
+            "market": ToolNode(market_tools),
             "social": ToolNode(
                 [
                     # News tools for social media analysis
@@ -210,14 +219,16 @@ class TradingAgentsGraph:
 
     def _create_crypto_tool_nodes(self) -> Dict[str, ToolNode]:
         """Crypto-specific tool nodes with derivatives, on-chain, macro, and sentiment."""
+        market_tools = [
+            get_stock_data,
+            get_indicators,
+            get_derivatives_data,
+            get_intraday_data,
+        ]
+        if not self.config.get("backtest_mode", False):
+            market_tools.append(get_realtime_snapshot)
         return {
-            "market": ToolNode(
-                [
-                    get_stock_data,
-                    get_indicators,
-                    get_derivatives_data,
-                ]
-            ),
+            "market": ToolNode(market_tools),
             "social": ToolNode(
                 [
                     get_crypto_news,
@@ -383,24 +394,26 @@ class TradingAgentsGraph:
             self.curr_state, returns_losses, self.portfolio_manager_memory
         )
 
-    def load_memories_for_ticker(self, ticker: str):
+    def load_memories_for_ticker(self, ticker: str, before_date: str = None):
         """Load persisted agent memories from disk for a specific ticker.
         
         Args:
             ticker: Ticker symbol to load memories for
+            before_date: If set (YYYY-MM-DD), only load memories saved before this date
+                         to prevent look-ahead bias in backtests.
         """
         results_dir = self.config.get("results_dir", "./eval_results")
         
         loaded = []
-        if self.bull_memory.load_from_disk(ticker, results_dir):
+        if self.bull_memory.load_from_disk(ticker, results_dir, before_date=before_date):
             loaded.append("bull_memory")
-        if self.bear_memory.load_from_disk(ticker, results_dir):
+        if self.bear_memory.load_from_disk(ticker, results_dir, before_date=before_date):
             loaded.append("bear_memory")
-        if self.trader_memory.load_from_disk(ticker, results_dir):
+        if self.trader_memory.load_from_disk(ticker, results_dir, before_date=before_date):
             loaded.append("trader_memory")
-        if self.invest_judge_memory.load_from_disk(ticker, results_dir):
+        if self.invest_judge_memory.load_from_disk(ticker, results_dir, before_date=before_date):
             loaded.append("invest_judge_memory")
-        if self.portfolio_manager_memory.load_from_disk(ticker, results_dir):
+        if self.portfolio_manager_memory.load_from_disk(ticker, results_dir, before_date=before_date):
             loaded.append("portfolio_manager_memory")
         
         if loaded:

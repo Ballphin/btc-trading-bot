@@ -6,6 +6,7 @@ logs each day's decision, and computes performance metrics.
 
 import logging
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -21,23 +22,41 @@ from tradingagents.dataflows.asset_detection import is_crypto
 logger = logging.getLogger(__name__)
 
 
-_PRICE_CACHE = {}
-_FUNDING_CACHE = {}
+_PRICE_CACHE: Dict[str, Dict] = {}
+_FUNDING_CACHE: Dict[str, Dict] = {}
+_INTRADAY_CACHE: Dict[str, Dict] = {}  # ticker -> {date_str -> [{t, o, h, l, c, v}, ...]}
+_CACHE_LOCK = threading.RLock()
+_CACHE_TTL: Dict[str, datetime] = {}
+_CACHE_MAX_AGE_HOURS = 24
 
 def _preload_chunk_if_needed(ticker: str, date_str: str):
-    global _PRICE_CACHE
-    import requests
+    global _PRICE_CACHE, _FUNDING_CACHE, _INTRADAY_CACHE, _CACHE_TTL
     from tradingagents.dataflows.asset_detection import is_crypto
-    
-    if ticker not in _PRICE_CACHE:
-        _PRICE_CACHE[ticker] = {}
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+
+    with _CACHE_LOCK:
+        # Evict stale cache entries older than 24 hours
+        if ticker in _CACHE_TTL:
+            age = (datetime.now() - _CACHE_TTL[ticker]).total_seconds() / 3600
+            if age > _CACHE_MAX_AGE_HOURS:
+                _PRICE_CACHE.pop(ticker, None)
+                _FUNDING_CACHE.pop(ticker, None)
+                _INTRADAY_CACHE.pop(ticker, None)
+                del _CACHE_TTL[ticker]
+                logger.debug(f"Evicted stale price cache for {ticker} ({age:.1f}h old)")
+
+        if ticker not in _PRICE_CACHE:
+            _PRICE_CACHE[ticker] = {}
         
     date_fmt = "%Y-%m-%d %H:%M:%S" if " " in date_str else "%Y-%m-%d"
     dt = datetime.strptime(date_str, date_fmt)
-    
+
+    with _CACHE_LOCK:
+        _CACHE_TTL.setdefault(ticker, datetime.now())
+
     # Check if we have data within 3 days of target
     closest_distance = float('inf')
-    for d_str in _PRICE_CACHE[ticker].keys():
+    for d_str in _PRICE_CACHE.get(ticker, {}).keys():
         d_fmt = "%Y-%m-%d %H:%M:%S" if " " in d_str else "%Y-%m-%d"
         d_dt = datetime.strptime(d_str, d_fmt)
         diff = abs((d_dt - dt).days)
@@ -45,52 +64,59 @@ def _preload_chunk_if_needed(ticker: str, date_str: str):
             closest_distance = diff
             
     if closest_distance <= 3:
-        return # Cache hit within acceptable range (no need to fetch chunk)
+        return  # Cache hit within acceptable range (no need to fetch chunk)
         
-    # Cache miss or entirely out of bounds -> fetch next chunk (~1 year API max)
+    # Cache miss or entirely out of bounds -> fetch next chunk
     try:
         is_c = is_crypto(ticker)
         if is_c:
             base_asset = ticker.replace("-USD", "").upper()
-            start_ts = int((dt - timedelta(days=5)).timestamp() * 1000)
-            end_ts = int((dt + timedelta(days=120)).timestamp() * 1000) # 120 days to stay under 5k candle limit
-            
             interval = "4h" if " " in date_str else "1d"
-            url = "https://api.hyperliquid.xyz/info"
-            payload = {
-                "type": "candleSnapshot",
-                "req": {
-                    "coin": base_asset,
-                    "interval": interval,
-                    "startTime": start_ts,
-                    "endTime": end_ts
-                }
-            }
-            resp = requests.post(url, json=payload)
-            candles = resp.json()
-            if isinstance(candles, list):
-                for c in candles:
-                    c_dt = datetime.fromtimestamp(c["t"] / 1000.0)
-                    c_str = c_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else c_dt.strftime("%Y-%m-%d")
-                    _PRICE_CACHE[ticker][c_str] = float(c["c"])
-                    
+            fetch_start = (dt - timedelta(days=5)).strftime("%Y-%m-%d")
+            fetch_end = (dt + timedelta(days=120)).strftime("%Y-%m-%d")
+
+            hl = HyperliquidClient()
+            df = hl.get_ohlcv(base_asset, interval, fetch_start, fetch_end)
+            if not df.empty:
+                with _CACHE_LOCK:
+                    for _, row in df.iterrows():
+                        c_dt = row["timestamp"].to_pydatetime()
+                        c_str = c_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else c_dt.strftime("%Y-%m-%d")
+                        _PRICE_CACHE[ticker][c_str] = float(row["close"])
+
+            # Also fetch 1H candles for intraday context (MEDIUM 9)
+            try:
+                intraday_df = hl.get_ohlcv(base_asset, "1h", fetch_start, fetch_end)
+                if not intraday_df.empty:
+                    with _CACHE_LOCK:
+                        if ticker not in _INTRADAY_CACHE:
+                            _INTRADAY_CACHE[ticker] = {}
+                        for _, row in intraday_df.iterrows():
+                            day_key = row["timestamp"].strftime("%Y-%m-%d")
+                            if day_key not in _INTRADAY_CACHE[ticker]:
+                                _INTRADAY_CACHE[ticker][day_key] = []
+                            _INTRADAY_CACHE[ticker][day_key].append({
+                                "t": row["timestamp"].isoformat(),
+                                "o": float(row["open"]),
+                                "h": float(row["high"]),
+                                "l": float(row["low"]),
+                                "c": float(row["close"]),
+                                "v": float(row["volume"]),
+                            })
+            except Exception as e:
+                logger.debug(f"Intraday cache preload failed for {ticker}: {e}")
+
             # Also fetch funding history chunk
-            fund_payload = {
-                "type": "fundingHistory",
-                "coin": base_asset,
-                "startTime": start_ts,
-                "endTime": end_ts
-            }
-            f_resp = requests.post(url, json=fund_payload)
-            funding_data = f_resp.json()
+            fund_df = hl.get_funding_history(base_asset, fetch_start, fetch_end)
             if ticker not in _FUNDING_CACHE:
                 _FUNDING_CACHE[ticker] = {}
-            if isinstance(funding_data, list):
-                for f in funding_data:
-                    f_dt = datetime.fromtimestamp(f["time"] / 1000.0)
-                    f_str = f_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else f_dt.strftime("%Y-%m-%d")
-                    _FUNDING_CACHE[ticker][f_str] = float(f["fundingRate"])
-                
+            if not fund_df.empty:
+                with _CACHE_LOCK:
+                    for _, row in fund_df.iterrows():
+                        f_dt = row["timestamp"].to_pydatetime()
+                        f_str = f_dt.strftime("%Y-%m-%d %H:%M:%S") if " " in date_str else f_dt.strftime("%Y-%m-%d")
+                        _FUNDING_CACHE[ticker][f_str] = float(row["funding_rate"])
+
         else:
             fetch_start = dt - timedelta(days=5)
             fetch_end = dt + timedelta(days=365)
@@ -104,11 +130,12 @@ def _preload_chunk_if_needed(ticker: str, date_str: str):
                 )
                 if not data.empty:
                     data.index = data.index.tz_localize(None) if data.index.tz else data.index
-                    for index, row in data.iterrows():
-                        d_str = index.strftime("%Y-%m-%d")
-                        close = row["Close"]
-                        price = float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
-                        _PRICE_CACHE[ticker][d_str] = price
+                    with _CACHE_LOCK:
+                        for index, row in data.iterrows():
+                            d_str = index.strftime("%Y-%m-%d")
+                            close = row["Close"]
+                            price = float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
+                            _PRICE_CACHE[ticker][d_str] = price
             except Exception as e:
                 logger.warning(f"yf.download failed: {e}")
                 
@@ -139,6 +166,14 @@ def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
     if closest_price is not None and (dt - closest_dt).days <= 5:
         return closest_price
     return None
+
+def get_intraday_candles(ticker: str, date_str: str) -> List[dict]:
+    """Return cached 1H candles for a given date. Used by simulation context."""
+    _preload_chunk_if_needed(ticker, date_str)
+    base_date = date_str.split(" ")[0]
+    with _CACHE_LOCK:
+        return _INTRADAY_CACHE.get(ticker, {}).get(base_date, [])
+
 
 def _get_funding_on_date(ticker: str, date_str: str) -> Optional[float]:
     """Fetch exact historical funding rate from Hyperliquid Cache if available."""
@@ -178,7 +213,7 @@ def _generate_trade_dates(
     if frequency == "daily":
         step = timedelta(days=1)
     elif frequency == "4h":
-        step = timedelta(hours=4)
+        step = timedelta(hours=4)  # Only valid in replay mode; capped to 90 dates by caller
     elif frequency == "weekly":
         step = timedelta(weeks=1)
     elif frequency == "biweekly":
@@ -272,21 +307,31 @@ class BacktestEngine:
         trade_dates = _generate_trade_dates(
             self.start_date, self.end_date, self.trading_frequency, self.ticker
         )
+
+        # HIGH 10: 4h in full-simulation = too many LLM calls; enforce hard cap of 90 dates
+        if self.trading_frequency == "4h" and len(trade_dates) > 90:
+            logger.warning(
+                f"4h frequency generated {len(trade_dates)} dates — capping at 90 to prevent excessive LLM calls"
+            )
+            trade_dates = trade_dates[:90]
+
         logger.info(f"Generated {len(trade_dates)} trading dates")
 
         if not trade_dates:
             logger.error("No trading dates generated")
             return {"metrics": {}, "decisions": [], "equity_curve": []}
 
-        # Initialize the agent graph
+        # Initialize the agent graph with backtest_mode to disable realtime tools
+        self.config["backtest_mode"] = True
         graph = TradingAgentsGraph(
             selected_analysts=self.selected_analysts,
             debug=self.debug,
             config=self.config,
         )
 
-        # Load persisted memories for cross-session learning
-        graph.load_memories_for_ticker(self.ticker)
+        # Load persisted memories — filter to only memories saved before start_date
+        # to prevent look-ahead bias (BLOCKER 5)
+        graph.load_memories_for_ticker(self.ticker, before_date=self.start_date)
 
         # Rebuild graph for asset type if needed
         if is_crypto(self.ticker):
@@ -311,7 +356,30 @@ class BacktestEngine:
                 take_profit_price = final_state.get("take_profit_price")
                 max_hold_days = final_state.get("max_hold_days")
                 confidence = final_state.get("confidence")
-                
+
+                # Kelly position sizing via ConfidenceScorer (BLOCKER 4)
+                kelly_size = self.position_size_pct
+                try:
+                    from tradingagents.graph.confidence import ConfidenceScorer
+                    from tradingagents.backtesting.regime import detect_regime_context
+                    scorer = ConfidenceScorer()
+                    regime_ctx = detect_regime_context(self.ticker)
+                    scored = scorer.score(
+                        ticker=self.ticker,
+                        signal=signal,
+                        llm_confidence=confidence if confidence is not None else 0.50,
+                        regime_ctx=regime_ctx,
+                        stop_loss=stop_loss_price,
+                        take_profit=take_profit_price,
+                    )
+                    if scored.get("gated"):
+                        signal = "HOLD"
+                        logger.debug(f"Signal gated by ConfidenceScorer on {trade_date}")
+                    else:
+                        kelly_size = scored.get("position_size_pct", self.position_size_pct)
+                except Exception as e:
+                    logger.debug(f"Kelly sizing skipped on {trade_date}: {e}")
+
                 # Calculate dynamic ATR and volatility for advanced position sizing
                 atr = None
                 volatility = None
@@ -322,7 +390,11 @@ class BacktestEngine:
                         logger.debug(f"ATR for {self.ticker} on {trade_date}: {atr:.2f}")
                     if volatility:
                         logger.debug(f"Volatility for {self.ticker} on {trade_date}: {volatility:.4f}")
-                
+
+                # Apply Kelly-derived position size for this trade only
+                _orig_size = self.portfolio.position_size_pct
+                self.portfolio.position_size_pct = kelly_size
+
                 # Process signal through portfolio with risk parameters
                 funding_rate = _get_funding_on_date(self.ticker, trade_date)
                 action = self.portfolio.process_signal(
@@ -335,6 +407,7 @@ class BacktestEngine:
                     max_hold_days=max_hold_days,
                     atr=atr,
                 )
+                self.portfolio.position_size_pct = _orig_size  # restore after each trade
 
                 # Record the decision with structured fields
                 decision = {
@@ -348,6 +421,7 @@ class BacktestEngine:
                     "take_profit_price": take_profit_price,
                     "confidence": confidence,
                     "max_hold_days": max_hold_days,
+                    "kelly_size": kelly_size,
                 }
                 self.decisions.append(decision)
 
@@ -396,7 +470,18 @@ class BacktestEngine:
         except Exception as e:
             logger.warning(f"Failed to refresh backtest lessons: {e}")
 
-        # Compute metrics
+        # Compute benchmark return for alpha calculation (HIGH 7)
+        benchmark_return_pct = None
+        try:
+            start_price = _get_price_on_date(self.ticker, trade_dates[0])
+            end_price = _get_price_on_date(self.ticker, trade_dates[-1])
+            if start_price and end_price and start_price > 0:
+                benchmark_return_pct = (end_price - start_price) / start_price * 100
+                logger.info(f"Benchmark (buy & hold) return: {benchmark_return_pct:+.2f}%")
+        except Exception as e:
+            logger.warning(f"Benchmark return calculation failed: {e}")
+
+        # Compute metrics (BLOCKER 2: pass is_crypto for correct trading_days_per_year)
         metrics = compute_metrics(
             equity_curve=self.portfolio.equity_curve,
             closed_positions=self.portfolio.closed_positions,
@@ -407,6 +492,8 @@ class BacktestEngine:
             leverage=self.portfolio.leverage,
             stops_hit=self.portfolio.stops_hit,
             takes_hit=self.portfolio.takes_hit,
+            is_crypto=is_crypto(self.ticker),
+            benchmark_return_pct=benchmark_return_pct,
         )
 
         # Generate report
@@ -423,7 +510,7 @@ class BacktestEngine:
     def _save_results(self, metrics: Dict) -> str:
         """Save backtest results to disk."""
         results_dir = Path(
-            self.config.get("results_dir", "./results") if self.config else "./results"
+            self.config.get("results_dir", "./eval_results") if self.config else "./eval_results"
         )
         backtest_dir = results_dir / "backtests" / self.ticker
         backtest_dir.mkdir(parents=True, exist_ok=True)

@@ -49,6 +49,13 @@ def generate_report(
     lines.append(f"| **Sortino Ratio** | {metrics.get('sortino_ratio', 0):.3f} |")
     lines.append(f"| **Max Drawdown** | {metrics.get('max_drawdown_pct', 0):.2f}% |")
     lines.append(f"| **Calmar Ratio** | {metrics.get('calmar_ratio', 0):.3f} |")
+
+    benchmark_return_pct = metrics.get("benchmark_return_pct")
+    alpha_pct = metrics.get("alpha_pct")
+    if benchmark_return_pct is not None:
+        lines.append(f"| **Buy & Hold Return** | {benchmark_return_pct:+.2f}% |")
+    if alpha_pct is not None:
+        lines.append(f"| **Alpha vs Buy & Hold** | {alpha_pct:+.2f}% |")
     lines.append("")
 
     # Trade Statistics
@@ -62,7 +69,8 @@ def generate_report(
     lines.append(f"| **Win Rate** | {metrics.get('win_rate_pct', 0):.1f}% |")
     lines.append(f"| **Average Win** | ${metrics.get('avg_win', 0):+,.2f} |")
     lines.append(f"| **Average Loss** | ${metrics.get('avg_loss', 0):+,.2f} |")
-    lines.append(f"| **Profit Factor** | {metrics.get('profit_factor', 0):.2f} |")
+    _pf = metrics.get('profit_factor')
+    lines.append(f"| **Profit Factor** | {'∞ (no losses)' if _pf is None else f'{_pf:.2f}'} |")
     lines.append(f"| **Expectancy** | ${metrics.get('expectancy', 0):+,.2f} |")
     lines.append("")
 

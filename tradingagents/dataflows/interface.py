@@ -30,6 +30,8 @@ from .crypto_data import (
     get_onchain_data as get_crypto_onchain,
     get_macro_context as get_fred_macro,
     get_crypto_sentiment as get_crypto_sent,
+    get_intraday_summary as get_crypto_intraday,
+    get_realtime_snapshot as get_crypto_realtime,
 )
 from .crypto_news_scraper import (
     get_crypto_news as get_crypto_rss_news,
@@ -81,6 +83,14 @@ TOOLS_CATEGORIES = {
     "sentiment_data": {
         "description": "Crypto sentiment: Alternative.me Fear & Greed index",
         "tools": ["get_sentiment_data"]
+    },
+    "intraday_data": {
+        "description": "Intraday 1H candle summary: VWAP, drawdown, volume, funding momentum",
+        "tools": ["get_intraday_data"]
+    },
+    "realtime_data": {
+        "description": "Zero-cache realtime snapshot: spot price, 1H candle, live funding",
+        "tools": ["get_realtime_snapshot"]
     },
 }
 
@@ -143,6 +153,9 @@ VENDOR_METHODS = {
     "get_derivatives_data": {"crypto": get_crypto_derivatives},
     "get_macro_indicators": {"fred": get_fred_macro},
     "get_sentiment_data": {"crypto": get_crypto_sent},
+    # Intraday & realtime (crypto-only, graceful fallback for equities)
+    "get_intraday_data": {"crypto": get_crypto_intraday},
+    "get_realtime_snapshot": {"crypto": get_crypto_realtime},
 }
 
 def get_category_for_method(method: str) -> str:

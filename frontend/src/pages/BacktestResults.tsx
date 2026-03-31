@@ -33,6 +33,7 @@ export default function BacktestResults() {
   const [currentStep, setCurrentStep] = useState(0);
   const [lessons, setLessons] = useState<any[]>([]);
   const [lessonsExpanded, setLessonsExpanded] = useState(true);
+  const [dateRangeWarning, setDateRangeWarning] = useState<{ requested: string; actual: string } | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Fetch lessons whenever job result is loaded (ticker becomes known)
@@ -136,6 +137,12 @@ export default function BacktestResults() {
             }
             break;
           
+          case 'warning':
+            if (eventData.type === 'date_range_adjusted') {
+              setDateRangeWarning({ requested: eventData.requested, actual: eventData.actual });
+            }
+            break;
+
           case 'error':
             setError(eventData.message || 'Backtest failed');
             setLoading(false);
@@ -148,7 +155,7 @@ export default function BacktestResults() {
     };
 
     // Listen to named events (sse_starlette sends named events)
-    for (const eventName of ['status', 'progress', 'decision', 'complete', 'error', 'ping']) {
+    for (const eventName of ['status', 'progress', 'decision', 'complete', 'error', 'warning', 'ping']) {
       eventSource.addEventListener(eventName, (msg: MessageEvent) => {
         try {
           const data = JSON.parse(msg.data);
@@ -399,6 +406,21 @@ export default function BacktestResults() {
         </p>
       </div>
 
+      {/* Date-range adjustment warning */}
+      {dateRangeWarning && (
+        <div className="mb-6 bg-yellow-500/10 border border-yellow-500/40 rounded-xl p-4 flex items-start gap-3">
+          <span className="text-yellow-400 text-lg mt-0.5">⚠</span>
+          <div>
+            <p className="text-yellow-300 font-medium text-sm">Date range auto-adjusted</p>
+            <p className="text-yellow-400/80 text-sm mt-1">
+              Requested: <span className="font-mono">{dateRangeWarning.requested}</span> →
+              Actual: <span className="font-mono">{dateRangeWarning.actual}</span>
+            </p>
+            <p className="text-slate-400 text-xs mt-1">No analysis logs existed for the requested range. Run more analyses to extend the available date range.</p>
+          </div>
+        </div>
+      )}
+
       {/* Metrics Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <div className="bg-slate-800 rounded-xl p-4">
@@ -513,6 +535,35 @@ export default function BacktestResults() {
         </div>
       )}
 
+      {/* Benchmark vs Strategy */}
+      {metrics?.benchmark_return_pct != null && (
+        <div className="mb-8">
+          <h3 className="text-lg font-semibold text-white mb-4">Strategy vs Buy &amp; Hold</h3>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <div className="text-slate-400 text-sm mb-1">Strategy Return</div>
+              <div className={`text-2xl font-bold ${(metrics?.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {(metrics?.total_return_pct ?? 0) >= 0 ? '+' : ''}{metrics?.total_return_pct?.toFixed(2)}%
+              </div>
+            </div>
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <div className="text-slate-400 text-sm mb-1">Buy &amp; Hold Return</div>
+              <div className={`text-2xl font-bold ${metrics.benchmark_return_pct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                {metrics.benchmark_return_pct >= 0 ? '+' : ''}{metrics.benchmark_return_pct.toFixed(2)}%
+              </div>
+            </div>
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
+              <div className="text-slate-400 text-sm mb-1">Alpha vs Buy &amp; Hold</div>
+              <div className={`text-2xl font-bold ${
+                (metrics?.alpha_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {(metrics?.alpha_pct ?? 0) >= 0 ? '+' : ''}{(metrics?.alpha_pct ?? 0).toFixed(2)}%
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Additional Metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <div className="bg-slate-800 rounded-xl p-4">
@@ -521,7 +572,12 @@ export default function BacktestResults() {
         </div>
         <div className="bg-slate-800 rounded-xl p-4">
           <div className="text-slate-400 text-sm mb-1">Profit Factor</div>
-          <div className="text-xl font-semibold text-white">{metrics?.profit_factor?.toFixed(2)}</div>
+          <div className="text-xl font-semibold text-white">
+            {metrics?.profit_factor == null ? '∞' : metrics.profit_factor.toFixed(2)}
+          </div>
+          {metrics?.profit_factor == null && (
+            <div className="text-xs text-green-400 mt-0.5">No losing trades</div>
+          )}
         </div>
         <div className="bg-slate-800 rounded-xl p-4">
           <div className="text-slate-400 text-sm mb-1">Initial Capital</div>
@@ -570,8 +626,8 @@ export default function BacktestResults() {
             <div className="text-xl font-semibold text-white">{metrics?.omega_ratio?.toFixed(2)}</div>
           </div>
           <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Omega Ratio</div>
-            <div className="text-xl font-semibold text-white">{metrics?.omega_ratio?.toFixed(2)}</div>
+            <div className="text-slate-400 text-sm mb-1">Calmar Ratio</div>
+            <div className="text-xl font-semibold text-white">{metrics?.calmar_ratio?.toFixed(2)}</div>
           </div>
         </div>
       </div>
@@ -639,6 +695,7 @@ export default function BacktestResults() {
                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Action</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Portfolio Value</th>
                 <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Open PnL</th>
+                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Kelly Size</th>
                 <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Position</th>
               </tr>
             </thead>
@@ -670,6 +727,9 @@ export default function BacktestResults() {
                   </td>
                   <td className={`px-4 py-3 text-sm text-right font-medium ${trade.unrealized_pnl > 0 ? 'text-green-400' : trade.unrealized_pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
                     ${trade.unrealized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) || '0.00'}
+                  </td>
+                  <td className="px-4 py-3 text-sm text-right text-slate-400">
+                    {trade.kelly_size != null ? `${(trade.kelly_size * 100).toFixed(1)}%` : '—'}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-400">{trade.position}</td>
                 </tr>

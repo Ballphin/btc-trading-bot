@@ -8,6 +8,7 @@ from rank_bm25 import BM25Okapi
 from typing import List, Tuple
 import re
 import json
+from datetime import datetime
 from pathlib import Path
 
 
@@ -116,6 +117,7 @@ class FinancialSituationMemory:
         
         data = {
             "name": self.name,
+            "saved_at": datetime.now().isoformat(),
             "documents": self.documents,
             "recommendations": self.recommendations,
         }
@@ -123,12 +125,15 @@ class FinancialSituationMemory:
         with open(memory_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
-    def load_from_disk(self, ticker: str, results_dir: str = "./eval_results") -> bool:
+    def load_from_disk(self, ticker: str, results_dir: str = "./eval_results",
+                       before_date: str = None) -> bool:
         """Load memory from disk if it exists.
         
         Args:
             ticker: Ticker symbol for organization
             results_dir: Base directory for results storage
+            before_date: If set (YYYY-MM-DD), only load memories saved before this date
+                         to prevent look-ahead bias in backtests.
             
         Returns:
             True if memory was loaded, False otherwise
@@ -141,6 +146,18 @@ class FinancialSituationMemory:
         try:
             with open(memory_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            
+            # Filter out memories saved on or after before_date (look-ahead guard)
+            if before_date:
+                saved_at = data.get("saved_at")
+                if saved_at:
+                    try:
+                        saved_dt = datetime.fromisoformat(saved_at)
+                        cutoff_dt = datetime.strptime(before_date.split(" ")[0], "%Y-%m-%d")
+                        if saved_dt >= cutoff_dt:
+                            return False  # Memory was saved during/after the backtest period
+                    except (ValueError, TypeError):
+                        pass  # Unparseable saved_at — load anyway
             
             self.documents = data.get("documents", [])
             self.recommendations = data.get("recommendations", [])

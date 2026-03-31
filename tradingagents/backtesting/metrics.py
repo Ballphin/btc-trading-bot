@@ -11,12 +11,14 @@ def compute_metrics(
     risk_free_rate: float = 0.04,
     trading_days_per_year: int = 252,
     benchmark_returns: List[float] = None,
+    benchmark_return_pct: float = None,
     total_fees: float = 0.0,
     total_funding: float = 0.0,
     liquidations: int = 0,
     leverage: float = 1.0,
     stops_hit: int = 0,
     takes_hit: int = 0,
+    is_crypto: bool = False,
 ) -> Dict[str, Any]:
     """
     Compute comprehensive backtest performance metrics with crypto enhancements.
@@ -26,21 +28,35 @@ def compute_metrics(
         closed_positions: List of closed Position objects
         initial_capital: Starting capital
         risk_free_rate: Annual risk-free rate (default 4%)
-        trading_days_per_year: Annualization factor
-        benchmark_returns: Optional list of benchmark returns for comparison
+        trading_days_per_year: Annualization factor (overridden to 365 when is_crypto=True)
+        benchmark_returns: Optional list of daily benchmark returns for CAPM metrics
+        benchmark_return_pct: Optional total buy-and-hold benchmark return % for alpha display
         total_fees: Total trading fees paid
         total_funding: Total funding costs (positive = paid, negative = received)
         liquidations: Number of liquidations
         leverage: Average leverage used
+        is_crypto: If True, uses 365 trading days/year for annualisation
 
     Returns:
         Dict of computed metrics.
     """
+    if is_crypto:
+        trading_days_per_year = 365
     if len(equity_curve) < 2:
         return _empty_metrics(initial_capital)
 
     values = [e["portfolio_value"] for e in equity_curve]
     dates = [e["date"] for e in equity_curve]
+    n_periods = len(equity_curve)
+
+    # Sample size tier for statistical reliability
+    # SE(SR) ≈ √((1 + 0.5×SR²) / n); n<10 → SE>0.39 (unreliable), n<30 → SE<0.24 (decent)
+    if n_periods < 10:
+        sample_size_tier = "unreliable"
+    elif n_periods < 30:
+        sample_size_tier = "limited"
+    else:
+        sample_size_tier = "reliable"
 
     # Returns
     returns = []
@@ -57,7 +73,6 @@ def compute_metrics(
     total_pnl = final_value - initial_capital
 
     # Annualized return
-    n_periods = len(equity_curve)
     years = n_periods / trading_days_per_year if trading_days_per_year > 0 else 1
     annualized_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
 
@@ -121,10 +136,10 @@ def compute_metrics(
         if losing_trades else 0
     )
 
-    # Profit factor
+    # Profit factor — None means ∞ (no losing trades); serialised as null in JSON
     gross_profit = sum(p.pnl for p in winning_trades)
     gross_loss = abs(sum(p.pnl for p in losing_trades))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 1e-9 else (None if gross_profit > 0 else 0.0)
 
     # Expectancy
     expectancy = (win_rate * avg_win + (1 - win_rate) * avg_loss) if total_trades > 0 else 0
@@ -160,6 +175,7 @@ def compute_metrics(
     information_ratio = 0.0
     up_capture = 0.0
     down_capture = 0.0
+    alpha_pct = (total_return * 100 - benchmark_return_pct) if benchmark_return_pct is not None else None
     
     if benchmark_returns and len(benchmark_returns) == len(returns):
         # Beta (market correlation)
@@ -254,7 +270,7 @@ def compute_metrics(
         "win_rate_pct": win_rate * 100,
         "avg_win": avg_win,
         "avg_loss": avg_loss,
-        "profit_factor": profit_factor,
+        "profit_factor": profit_factor,  # None = ∞ (no losing trades)
         "expectancy": expectancy,
         # Crypto-specific
         "total_fees": total_fees,
@@ -265,6 +281,8 @@ def compute_metrics(
         "avg_leverage": leverage,
         "leverage_adjusted_return_pct": leverage_adjusted_return * 100,
         # Benchmark
+        "benchmark_return_pct": benchmark_return_pct,
+        "alpha_pct": alpha_pct,
         "alpha": alpha,
         "beta": beta,
         "information_ratio": information_ratio,
@@ -273,6 +291,7 @@ def compute_metrics(
         "start_date": dates[0],
         "end_date": dates[-1],
         "n_periods": n_periods,
+        "sample_size_tier": sample_size_tier,
         # Risk management
         "stops_hit": stops_hit,
         "takes_hit": takes_hit,
@@ -304,7 +323,7 @@ def _empty_metrics(initial_capital: float) -> Dict[str, Any]:
         "win_rate_pct": 0.0,
         "avg_win": 0.0,
         "avg_loss": 0.0,
-        "profit_factor": 0.0,
+        "profit_factor": None,
         "expectancy": 0.0,
         # Crypto-specific
         "total_fees": 0.0,
@@ -315,6 +334,8 @@ def _empty_metrics(initial_capital: float) -> Dict[str, Any]:
         "avg_leverage": 1.0,
         "leverage_adjusted_return_pct": 0.0,
         # Benchmark
+        "benchmark_return_pct": None,
+        "alpha_pct": None,
         "alpha": 0.0,
         "beta": 0.0,
         "information_ratio": 0.0,
@@ -323,6 +344,7 @@ def _empty_metrics(initial_capital: float) -> Dict[str, Any]:
         "start_date": "",
         "end_date": "",
         "n_periods": 0,
+        "sample_size_tier": "unreliable",
         # Risk management
         "stops_hit": 0,
         "takes_hit": 0,
