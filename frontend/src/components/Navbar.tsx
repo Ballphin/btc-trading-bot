@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, History, Home, TrendingUp, Server, ServerOff } from 'lucide-react';
+import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Home', icon: Home },
   { to: '/backtest', label: 'Backtest', icon: TrendingUp },
+  { to: '/backtests', label: 'Backtest History', icon: BarChart3 },
   { to: '/history', label: 'History', icon: History },
 ];
 
@@ -53,7 +54,8 @@ export default function Navbar() {
             {NAV_ITEMS.map(item => {
               const isActive = location.pathname === item.to ||
                 (item.to === '/history' && location.pathname.startsWith('/history')) ||
-                (item.to === '/backtest' && location.pathname.startsWith('/backtest'));
+                (item.to === '/backtest' && location.pathname === '/backtest') ||
+                (item.to === '/backtests' && location.pathname.startsWith('/backtests'));
               return (
                 <Link
                   key={item.to}

@@ -13,6 +13,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import FinancialSituationMemory
+from tradingagents.backtesting.knowledge_store import BacktestKnowledgeStore
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -108,6 +109,10 @@ class TradingAgentsGraph:
         self.invest_judge_memory = FinancialSituationMemory("invest_judge_memory", self.config)
         self.portfolio_manager_memory = FinancialSituationMemory("portfolio_manager_memory", self.config)
 
+        # Initialize backtest knowledge store for cross-session learning
+        results_dir = self.config.get("results_dir", "./eval_results")
+        self.backtest_knowledge_store = BacktestKnowledgeStore(results_dir)
+
         # Create tool nodes
         self.tool_nodes = self._create_tool_nodes()
 
@@ -126,6 +131,7 @@ class TradingAgentsGraph:
             self.invest_judge_memory,
             self.portfolio_manager_memory,
             self.conditional_logic,
+            self.backtest_knowledge_store,
         )
 
         self.propagator = Propagator()
@@ -252,6 +258,7 @@ class TradingAgentsGraph:
             self.invest_judge_memory,
             self.portfolio_manager_memory,
             self.conditional_logic,
+            self.backtest_knowledge_store,
         )
         self.graph = self.graph_setup.setup_graph(selected_analysts)
 
@@ -375,6 +382,31 @@ class TradingAgentsGraph:
         self.reflector.reflect_portfolio_manager(
             self.curr_state, returns_losses, self.portfolio_manager_memory
         )
+
+    def load_memories_for_ticker(self, ticker: str):
+        """Load persisted agent memories from disk for a specific ticker.
+        
+        Args:
+            ticker: Ticker symbol to load memories for
+        """
+        results_dir = self.config.get("results_dir", "./eval_results")
+        
+        loaded = []
+        if self.bull_memory.load_from_disk(ticker, results_dir):
+            loaded.append("bull_memory")
+        if self.bear_memory.load_from_disk(ticker, results_dir):
+            loaded.append("bear_memory")
+        if self.trader_memory.load_from_disk(ticker, results_dir):
+            loaded.append("trader_memory")
+        if self.invest_judge_memory.load_from_disk(ticker, results_dir):
+            loaded.append("invest_judge_memory")
+        if self.portfolio_manager_memory.load_from_disk(ticker, results_dir):
+            loaded.append("portfolio_manager_memory")
+        
+        if loaded:
+            logger.info(f"Loaded memories for {ticker}: {', '.join(loaded)}")
+        
+        return len(loaded) > 0
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

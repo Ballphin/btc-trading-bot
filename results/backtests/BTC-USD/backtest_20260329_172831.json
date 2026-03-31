@@ -1,0 +1,182 @@
+{
+  "config": {
+    "ticker": "BTC-USD",
+    "start_date": "2026-03-01 00:00:00",
+    "end_date": "2026-03-06 00:00:00",
+    "frequency": "4h",
+    "initial_capital": 100000,
+    "position_size_pct": 1
+  },
+  "metrics": {
+    "initial_capital": 100000,
+    "final_value": 100000,
+    "total_return_pct": 0.0,
+    "total_pnl": 0.0,
+    "annualized_return_pct": 0.0,
+    "annualized_volatility_pct": 0.0,
+    "sharpe_ratio": 0.0,
+    "sortino_ratio": 0.0,
+    "max_drawdown_pct": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": "",
+    "calmar_ratio": 0.0,
+    "omega_ratio": 0.0,
+    "tail_ratio": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "win_rate_pct": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0,
+    "profit_factor": 0.0,
+    "expectancy": 0.0,
+    "total_fees": 0.0,
+    "total_funding": 0.0,
+    "fee_impact_pct": 0.0,
+    "funding_impact_pct": 0.0,
+    "liquidations": 0,
+    "avg_leverage": 1.0,
+    "leverage_adjusted_return_pct": 0.0,
+    "alpha": 0.0,
+    "beta": 0.0,
+    "information_ratio": 0.0,
+    "up_capture": 0.0,
+    "down_capture": 0.0,
+    "start_date": "",
+    "end_date": "",
+    "n_periods": 0,
+    "stops_hit": 0,
+    "takes_hit": 0,
+    "avg_hold_days": 0,
+    "avg_rr_ratio": 0
+  },
+  "decisions": [],
+  "equity_curve": [],
+  "trade_history": [],
+  "errors": [
+    {
+      "date": "2026-03-01 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-01 04:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-01 08:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-01 12:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-01 16:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-01 20:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 04:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 08:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 12:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 16:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-02 20:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 04:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 08:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 12:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 16:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-03 20:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 04:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 08:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 12:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 16:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-04 20:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 04:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 08:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 12:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 16:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-05 20:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-03-06 00:00:00",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    }
+  ]
+}

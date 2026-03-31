@@ -25,6 +25,7 @@ class GraphSetup:
         invest_judge_memory,
         portfolio_manager_memory,
         conditional_logic: ConditionalLogic,
+        backtest_knowledge_store=None,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
@@ -36,6 +37,7 @@ class GraphSetup:
         self.invest_judge_memory = invest_judge_memory
         self.portfolio_manager_memory = portfolio_manager_memory
         self.conditional_logic = conditional_logic
+        self.backtest_knowledge_store = backtest_knowledge_store
 
     def setup_graph(
         self, selected_analysts=["market", "social", "news", "fundamentals"]
@@ -95,14 +97,14 @@ class GraphSetup:
         research_manager_node = create_research_manager(
             self.deep_thinking_llm, self.invest_judge_memory
         )
-        trader_node = create_trader(self.quick_thinking_llm, self.trader_memory)
+        trader_node = create_trader(self.quick_thinking_llm, self.trader_memory, self.backtest_knowledge_store)
 
         # Create risk analysis nodes
         aggressive_analyst = create_aggressive_debator(self.quick_thinking_llm)
         neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
         conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
         portfolio_manager_node = create_portfolio_manager(
-            self.deep_thinking_llm, self.portfolio_manager_memory
+            self.deep_thinking_llm, self.portfolio_manager_memory, self.backtest_knowledge_store
         )
 
         # Create workflow

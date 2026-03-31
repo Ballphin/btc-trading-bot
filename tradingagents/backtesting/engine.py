@@ -285,6 +285,9 @@ class BacktestEngine:
             config=self.config,
         )
 
+        # Load persisted memories for cross-session learning
+        graph.load_memories_for_ticker(self.ticker)
+
         # Rebuild graph for asset type if needed
         if is_crypto(self.ticker):
             graph._rebuild_graph_for_asset(self.ticker, self.selected_analysts)
@@ -373,6 +376,25 @@ class BacktestEngine:
             final_price = _get_price_on_date(self.ticker, trade_dates[-1])
             if final_price:
                 self.portfolio.force_close(final_price, trade_dates[-1])
+
+        # Save agent memories to disk for cross-session learning
+        try:
+            results_dir = self.config.get("results_dir", "./eval_results") if self.config else "./eval_results"
+            graph.bull_memory.save_to_disk(self.ticker, results_dir)
+            graph.bear_memory.save_to_disk(self.ticker, results_dir)
+            graph.trader_memory.save_to_disk(self.ticker, results_dir)
+            graph.invest_judge_memory.save_to_disk(self.ticker, results_dir)
+            graph.portfolio_manager_memory.save_to_disk(self.ticker, results_dir)
+            logger.info(f"Agent memories saved to {results_dir}/{self.ticker}/agent_memory/")
+        except Exception as e:
+            logger.warning(f"Failed to save agent memories: {e}")
+
+        # Refresh backtest knowledge store lessons with latest results
+        try:
+            graph.backtest_knowledge_store.refresh_lessons(self.ticker)
+            logger.info(f"Backtest lessons refreshed for {self.ticker}")
+        except Exception as e:
+            logger.warning(f"Failed to refresh backtest lessons: {e}")
 
         # Compute metrics
         metrics = compute_metrics(

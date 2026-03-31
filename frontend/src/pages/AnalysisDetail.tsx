@@ -175,6 +175,23 @@ export default function AnalysisDetail() {
           {(analysis.stop_loss_price !== undefined || analysis.take_profit_price !== undefined) && (
             <div>
               <h3 className="text-sm font-medium text-slate-400 mb-3">Risk Parameters</h3>
+
+              {/* Warnings */}
+              {(analysis.gated || analysis.r_ratio_warning) && (
+                <div className="flex flex-col gap-2 mb-3">
+                  {analysis.gated && (
+                    <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+                      <span className="text-red-400 text-xs font-medium">⚠ Signal Gated — Confidence below regime threshold. Position size was 0%.</span>
+                    </div>
+                  )}
+                  {analysis.r_ratio_warning && (
+                    <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                      <span className="text-amber-400 text-xs font-medium">⚠ Unfavorable R:R — Risk exceeded potential reward on this trade.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 {analysis.stop_loss_price !== undefined && analysis.stop_loss_price > 0 && (
                   <div className="glass p-4">
@@ -190,17 +207,82 @@ export default function AnalysisDetail() {
                 )}
                 {analysis.confidence !== undefined && (
                   <div className="glass p-4">
-                    <p className="text-xs text-slate-500 mb-1">Confidence</p>
-                    <p className="text-sm font-medium text-white">{(analysis.confidence * 100).toFixed(0)}%</p>
+                    <p className="text-xs text-slate-500 mb-1">Conviction</p>
+                    <div className="flex items-center gap-1.5 mb-1">
+                      {analysis.conviction_label && (
+                        <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                          analysis.conviction_label === 'VERY HIGH' ? 'bg-cyan-500/20 text-cyan-300' :
+                          analysis.conviction_label === 'HIGH'      ? 'bg-green-500/20 text-green-300' :
+                          analysis.conviction_label === 'MODERATE'  ? 'bg-yellow-500/20 text-yellow-300' :
+                          'bg-red-500/20 text-red-300'
+                        }`}>{analysis.conviction_label}</span>
+                      )}
+                      <span className="text-sm font-medium text-white">{(analysis.confidence * 100).toFixed(0)}%</span>
+                    </div>
+                    <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${
+                          analysis.confidence >= 0.75 ? 'bg-cyan-400' :
+                          analysis.confidence >= 0.60 ? 'bg-green-400' :
+                          analysis.confidence >= 0.45 ? 'bg-yellow-400' :
+                          'bg-red-400'
+                        }`}
+                        style={{ width: `${analysis.confidence * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {analysis.position_size_pct !== undefined && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">Suggested Size</p>
+                    <p className={`text-sm font-medium ${
+                      analysis.gated ? 'text-red-400' :
+                      analysis.position_size_pct > 0.5 ? 'text-green-400' :
+                      analysis.position_size_pct > 0.2 ? 'text-yellow-400' :
+                      'text-slate-300'
+                    }`}>
+                      {analysis.gated ? 'GATED' : `${(analysis.position_size_pct * 100).toFixed(1)}%`}
+                    </p>
+                  </div>
+                )}
+                {analysis.r_ratio != null && (
+                  <div className="glass p-4">
+                    <p className="text-xs text-slate-500 mb-1">R:R Ratio</p>
+                    <div className="flex items-center gap-1">
+                      <p className={`text-sm font-medium ${
+                        analysis.r_ratio >= 2.0 ? 'text-green-400' :
+                        analysis.r_ratio >= 1.0 ? 'text-yellow-400' :
+                        'text-red-400'
+                      }`}>{analysis.r_ratio.toFixed(2)}:1</p>
+                      <span className="text-xs">
+                        {analysis.r_ratio >= 2.0 ? '✅' : analysis.r_ratio >= 1.0 ? '⚠️' : '🔴'}
+                      </span>
+                    </div>
                   </div>
                 )}
                 {analysis.max_hold_days !== undefined && (
                   <div className="glass p-4">
-                    <p className="text-xs text-slate-500 mb-1">Max Hold Days</p>
+                    <p className="text-xs text-slate-500 mb-1">Max Hold</p>
                     <p className="text-sm font-medium text-white">{analysis.max_hold_days} days</p>
+                    {analysis.hold_period_scalar != null && analysis.hold_period_scalar < 1.0 && (
+                      <p className="text-xs text-slate-500 mt-0.5">scaled ×{analysis.hold_period_scalar.toFixed(2)}</p>
+                    )}
                   </div>
                 )}
               </div>
+
+              {/* Reasoning with hedge penalty */}
+              {analysis.reasoning && (
+                <div className="glass p-4 mt-3">
+                  <p className="text-xs text-slate-500 mb-1">Reasoning</p>
+                  <p className="text-sm text-slate-300">{analysis.reasoning}</p>
+                  {analysis.hedge_penalty_applied != null && analysis.hedge_penalty_applied > 0 && (
+                    <p className="text-xs text-amber-500/70 mt-1">
+                      Hedge-word penalty: −{(analysis.hedge_penalty_applied * 100).toFixed(0)}% confidence
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </motion.div>

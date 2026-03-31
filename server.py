@@ -207,13 +207,11 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str):
             # Log which tools are now assigned
             for node_name, tool_node in ta.tool_nodes.items():
                 try:
-                    # ToolNode stores tools in different ways depending on version
-                    if hasattr(tool_node, 'tools'):
-                        tool_names = [t.name for t in tool_node.tools]
-                    elif hasattr(tool_node, '_tools'):
-                        tool_names = [t.name for t in tool_node._tools]
+                    # LangGraph ToolNode stores tools in tools_by_name dict
+                    if hasattr(tool_node, 'tools_by_name'):
+                        tool_names = list(tool_node.tools_by_name.keys())
                     else:
-                        tool_names = ["unknown"]
+                        tool_names = [type(tool_node).__name__]
                     print(f"[Analysis {job_id}] Tools for {node_name}: {tool_names}")
                 except Exception as e:
                     print(f"[Analysis {job_id}] Could not list tools for {node_name}: {e}")
@@ -260,11 +258,76 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str):
         from tradingagents.graph.signal_processing import SignalProcessor
         decision = ta.process_signal(final_state.get("final_trade_decision", "HOLD"))
 
+        # Normalize: process_signal returns str OR dict - always extract a string signal
+        if isinstance(decision, dict):
+            decision_signal = str(decision.get("signal", "HOLD")).upper()
+            stop_loss_price = decision.get("stop_loss_price")
+            take_profit_price = decision.get("take_profit_price")
+            confidence = decision.get("confidence")
+            max_hold_days = decision.get("max_hold_days")
+            reasoning = decision.get("reasoning")
+        else:
+            decision_signal = str(decision).upper() if decision else "HOLD"
+            stop_loss_price = None
+            take_profit_price = None
+            confidence = None
+            max_hold_days = None
+            reasoning = None
+
+        # Run confidence scorer (regime context + calibration + position sizing)
+        scored = {}
+        try:
+            from tradingagents.backtesting.regime import detect_regime_context
+            from tradingagents.graph.confidence import ConfidenceScorer
+            from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_asset
+
+            regime_ctx = detect_regime_context(ticker, trade_date)
+
+            # Crypto-specific guards: cap hold days and SHORT stop distance
+            if _is_crypto_asset(ticker):
+                if max_hold_days and max_hold_days > 7:
+                    max_hold_days = 7
+                if (decision_signal in ('SHORT', 'SELL')
+                        and regime_ctx.get('current_price')
+                        and stop_loss_price):
+                    max_crypto_stop = regime_ctx['current_price'] * 1.12
+                    if stop_loss_price > max_crypto_stop:
+                        stop_loss_price = max_crypto_stop
+
+            scored = ConfidenceScorer().score(
+                llm_confidence=confidence if confidence is not None else 0.50,
+                ticker=ticker,
+                signal=decision_signal,
+                knowledge_store=ta.backtest_knowledge_store,
+                regime_ctx=regime_ctx,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                max_hold_days=int(max_hold_days) if max_hold_days else 7,
+                reasoning=reasoning or "",
+            )
+            confidence = scored.get("confidence", confidence)
+            print(f"[Analysis {job_id}] Scored: conf={confidence:.3f} size={scored.get('position_size_pct', 0):.1%} R={scored.get('r_ratio')} gated={scored.get('gated')}")
+        except Exception as _score_err:
+            print(f"[Analysis {job_id}] Confidence scorer error (non-fatal): {_score_err}")
+            import traceback; traceback.print_exc()
+
         # Build result
         result = {
             "ticker": ticker,
             "date": trade_date,
-            "decision": decision,
+            "decision": decision_signal,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
+            "confidence": confidence,
+            "max_hold_days": max_hold_days,
+            "reasoning": reasoning,
+            "position_size_pct": scored.get("position_size_pct"),
+            "conviction_label": scored.get("conviction_label"),
+            "gated": scored.get("gated", False),
+            "r_ratio": scored.get("r_ratio"),
+            "r_ratio_warning": scored.get("r_ratio_warning", False),
+            "hold_period_scalar": scored.get("hold_period_scalar"),
+            "hedge_penalty_applied": scored.get("hedge_penalty_applied"),
             "market_report": final_state.get("market_report", ""),
             "sentiment_report": final_state.get("sentiment_report", ""),
             "news_report": final_state.get("news_report", ""),
@@ -288,7 +351,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str):
         jobs[job_id]["result"] = result
         jobs[job_id]["status"] = "done"
 
-        eq.put({"event": "decision", "signal": decision})
+        eq.put({"event": "decision", "signal": decision_signal})
         eq.put({"event": "done", "result": result})
         print(f"[Analysis {job_id}] Done event sent")
 
@@ -1087,6 +1150,92 @@ async def list_active_backtests():
         if job["status"] == "running"
     ]
     return {"active": active}
+
+@app.get("/api/backtests/recent")
+async def get_recent_backtests(limit: int = 20):
+    """Get recent backtests with full metrics for Backtest History page."""
+    results = []
+    seen_backtests = set()  # Track unique ticker+date combinations
+    
+    # Search disk for saved backtests
+    backtest_dir = EVAL_RESULTS_DIR / "backtests"
+    if not backtest_dir.exists():
+        return results
+    
+    # Collect all backtest files with timestamps
+    all_files = []
+    for ticker_dir in backtest_dir.iterdir():
+        if not ticker_dir.is_dir():
+            continue
+        for result_file in ticker_dir.glob("backtest_*.json"):
+            all_files.append(result_file)
+    
+    # Sort by modification time (most recent first)
+    all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    
+    for result_file in all_files:
+        try:
+            with open(result_file) as f:
+                data = _sanitize_json(json.load(f))
+                metrics = data.get("metrics", {})
+                config = data.get("config", {})
+                
+                ticker = config.get("ticker", "UNKNOWN")
+                start_date = config.get("start_date", "")
+                end_date = config.get("end_date", "")
+                
+                # Create unique key for deduplication
+                backtest_key = f"{ticker}_{start_date}_{end_date}"
+                
+                # Skip if we've already seen this backtest
+                if backtest_key in seen_backtests:
+                    continue
+                
+                seen_backtests.add(backtest_key)
+                
+                results.append({
+                    "id": data.get("job_id", result_file.stem),
+                    "ticker": ticker,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "frequency": config.get("frequency", "daily"),
+                    "mode": config.get("mode", "replay"),
+                    "created_at": datetime.fromtimestamp(result_file.stat().st_mtime).isoformat(),
+                    "total_return_pct": metrics.get("total_return_pct", 0),
+                    "sharpe_ratio": metrics.get("sharpe_ratio", 0),
+                    "max_drawdown_pct": metrics.get("max_drawdown_pct", 0),
+                    "total_trades": metrics.get("total_trades", 0),
+                    "win_rate_pct": metrics.get("win_rate_pct", 0),
+                })
+                
+                # Stop once we have enough unique backtests
+                if len(results) >= limit:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error loading backtest {result_file}: {e}")
+            continue
+    
+    return results
+
+@app.get("/api/backtests/lessons/{ticker}")
+async def get_backtest_lessons(ticker: str):
+    """Get backtest-derived lessons for a ticker."""
+    try:
+        from tradingagents.backtesting.knowledge_store import BacktestKnowledgeStore
+        store = BacktestKnowledgeStore(str(EVAL_RESULTS_DIR))
+        # Load latest saved lessons (no re-generation to keep it fast)
+        lessons = store.feedback_generator.load_latest_lessons(ticker.upper())
+        if not lessons:
+            # Generate fresh if none exist
+            lessons = store.feedback_generator.generate_lessons(ticker.upper(), min_trades=3)
+            if lessons:
+                store.feedback_generator.save_lessons(ticker.upper(), lessons)
+        return {"ticker": ticker.upper(), "lessons": lessons, "count": len(lessons)}
+    except Exception as e:
+        logger.error(f"Error getting lessons for {ticker}: {e}")
+        return {"ticker": ticker.upper(), "lessons": [], "count": 0}
+
 
 @app.get("/api/backtest/results")
 async def list_backtest_results(ticker: Optional[str] = None, limit: int = 50):

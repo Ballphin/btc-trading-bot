@@ -7,6 +7,8 @@ no token limits, works offline with any LLM provider.
 from rank_bm25 import BM25Okapi
 from typing import List, Tuple
 import re
+import json
+from pathlib import Path
 
 
 class FinancialSituationMemory:
@@ -96,6 +98,59 @@ class FinancialSituationMemory:
         self.documents = []
         self.recommendations = []
         self.bm25 = None
+
+    def save_to_disk(self, ticker: str, results_dir: str = "./eval_results"):
+        """Save memory to disk for cross-session persistence.
+        
+        Args:
+            ticker: Ticker symbol for organization
+            results_dir: Base directory for results storage
+        """
+        if not self.documents:
+            return  # Nothing to save
+        
+        memory_dir = Path(results_dir) / ticker / "agent_memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        
+        memory_file = memory_dir / f"{self.name}.json"
+        
+        data = {
+            "name": self.name,
+            "documents": self.documents,
+            "recommendations": self.recommendations,
+        }
+        
+        with open(memory_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def load_from_disk(self, ticker: str, results_dir: str = "./eval_results") -> bool:
+        """Load memory from disk if it exists.
+        
+        Args:
+            ticker: Ticker symbol for organization
+            results_dir: Base directory for results storage
+            
+        Returns:
+            True if memory was loaded, False otherwise
+        """
+        memory_file = Path(results_dir) / ticker / "agent_memory" / f"{self.name}.json"
+        
+        if not memory_file.exists():
+            return False
+        
+        try:
+            with open(memory_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            self.documents = data.get("documents", [])
+            self.recommendations = data.get("recommendations", [])
+            
+            # Rebuild BM25 index
+            self._rebuild_index()
+            
+            return True
+        except Exception:
+            return False
 
 
 if __name__ == "__main__":

@@ -21,6 +21,14 @@ interface SignalMarker {
   price: number;
 }
 
+interface GroupedSignal {
+  signal: string;
+  startDate: string;
+  endDate: string;
+  price: number;
+  count: number;
+}
+
 interface Props {
   data: PriceRecord[];
   signals?: SignalMarker[];
@@ -34,6 +42,46 @@ const SIGNAL_COLORS: Record<string, string> = {
   COVER: '#06b6d4',
   HOLD: '#f59e0b',
 };
+
+// Group consecutive same signals with date ranges
+function groupConsecutiveSignals(signals: SignalMarker[]): GroupedSignal[] {
+  if (!signals.length) return [];
+  
+  const grouped: GroupedSignal[] = [];
+  let currentGroup: GroupedSignal | null = null;
+  
+  signals.forEach((signal) => {
+    // Normalize HOLD signals to include position info
+    const normalizedSignal = signal.signal.startsWith('HOLD') ? 'HOLD' : signal.signal;
+    
+    if (!currentGroup || currentGroup.signal !== normalizedSignal) {
+      // Start new group
+      if (currentGroup) {
+        grouped.push(currentGroup);
+      }
+      currentGroup = {
+        signal: normalizedSignal,
+        startDate: signal.date,
+        endDate: signal.date,
+        price: signal.price,
+        count: 1,
+      };
+    } else {
+      // Extend current group
+      currentGroup.endDate = signal.date;
+      currentGroup.count++;
+      // Use average price for the group
+      currentGroup.price = (currentGroup.price * (currentGroup.count - 1) + signal.price) / currentGroup.count;
+    }
+  });
+  
+  // Add last group
+  if (currentGroup) {
+    grouped.push(currentGroup);
+  }
+  
+  return grouped;
+}
 
 function formatPrice(value: number) {
   if (value >= 10000) return `$${(value / 1000).toFixed(1)}k`;
@@ -73,6 +121,7 @@ function CustomTooltip({ active, payload, label }: TooltipProps) {
 
 export default function PriceChart({ data, signals = [], height = 400 }: Props) {
   const maxVol = useMemo(() => Math.max(...data.map(d => d.volume)), [data]);
+  const groupedSignals = useMemo(() => groupConsecutiveSignals(signals), [signals]);
 
   if (!data.length) {
     return (
@@ -158,8 +207,8 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
             connectNulls
           />
 
-          {/* Signal Reference Lines */}
-          {signals.map((s, i) => (
+          {/* Grouped Signal Reference Lines */}
+          {groupedSignals.map((s, i) => (
             <ReferenceLine
               key={`line-${i}`}
               yAxisId="price"
@@ -172,12 +221,12 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
             />
           ))}
 
-          {/* Signal Dot Markers with Labels */}
-          {signals.map((s, i) => (
+          {/* Grouped Signal Dot Markers with Labels */}
+          {groupedSignals.map((s, i) => (
             <ReferenceDot
               key={`dot-${i}`}
               yAxisId="price"
-              x={s.date}
+              x={s.startDate}
               y={s.price}
               r={6}
               fill={SIGNAL_COLORS[s.signal] || '#94a3b8'}
@@ -185,11 +234,14 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
               strokeWidth={2}
             >
               <Label
-                value={`${s.signal} @ $${s.price.toLocaleString()}`}
+                value={s.startDate === s.endDate 
+                  ? `${s.signal} (${s.startDate})`
+                  : `${s.signal} (${s.startDate} ~ ${s.endDate})`
+                }
                 position="top"
                 dy={i % 2 === 0 ? -10 : -25}
                 fill={SIGNAL_COLORS[s.signal] || '#94a3b8'}
-                fontSize={12}
+                fontSize={11}
                 fontWeight={600}
               />
             </ReferenceDot>
@@ -198,14 +250,14 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
       </ResponsiveContainer>
 
       {/* Legend */}
-      <div className="flex items-center justify-center gap-6 mt-3 text-xs text-slate-400">
+      <div className="flex flex-wrap items-center justify-center gap-4 mt-3 text-xs text-slate-400">
         <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-[#0ea5e9] inline-block rounded" /> Price</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-[#f59e0b] inline-block rounded border-dashed" /> SMA 50</span>
         <span className="flex items-center gap-1.5"><span className="w-3 h-0.5 bg-[#a855f7] inline-block rounded" /> SMA 200</span>
-        {signals.length > 0 && signals.map((s, i) => (
+        {groupedSignals.length > 0 && groupedSignals.map((s, i) => (
           <span key={i} className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: SIGNAL_COLORS[s.signal] || '#94a3b8' }} />
-            {s.signal} ({s.date.slice(5)})
+            {s.signal} {s.startDate === s.endDate ? `(${s.startDate.slice(5)})` : `(${s.startDate.slice(5)} ~ ${s.endDate.slice(5)})`}
           </span>
         ))}
       </div>

@@ -1,0 +1,279 @@
+"""Confidence calibration and position sizing for trading signals.
+
+Two-tier calibration: LLM confidence is first anchored via prompt tiers, then
+adjusted against historical win rates from backtests, a regime-based volatility
+penalty, and a hedge-word penalty extracted from the reasoning text.
+
+Position sizing uses the corrected half-Kelly formula capped by a 2% portfolio
+risk target and a hold-period scalar that accounts for increased variance on
+longer-duration trades.
+"""
+
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Hedge words in reasoning that signal LLM uncertainty
+_HEDGE_WORDS = frozenset({
+    "but", "however", "although", "despite", "uncertain",
+    "volatile", "caution", "risk", "concern", "weak",
+})
+
+# Signals that are binary trades — Kelly applies
+_DIRECTIONAL_SIGNALS = frozenset({"BUY", "SELL", "SHORT", "COVER"})
+
+# Minimum confidence threshold per regime (gate signals below this)
+_GATE_THRESHOLDS = {
+    "volatile_down": 0.58,
+    "volatile_up":   0.45,
+    "volatile":      0.52,
+    "trending_up":   0.45,
+    "trending_down": 0.45,
+    "ranging":       0.48,
+    "unknown":       0.50,
+}
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+class ConfidenceScorer:
+    """Calibrates LLM confidence and computes position sizing for trade signals."""
+
+    # Baseline hold period for the hold-period scalar (days)
+    HOLD_BASELINE_DAYS = 7
+    # Portfolio risk fraction per trade (2%)
+    PORTFOLIO_RISK_TARGET = 0.02
+
+    def calibrate(
+        self,
+        llm_confidence: float,
+        win_rate: Optional[float],
+        sample_size: int,
+        R: Optional[float],
+        regime: str,
+        above_sma20: bool,
+        reasoning: str = "",
+    ) -> tuple:
+        """Calibrate raw LLM confidence against historical data, vol regime, and reasoning.
+
+        Returns:
+            (calibrated_confidence: float, hedge_penalty: float)
+        """
+        calibrated = _clamp(llm_confidence, 0.0, 1.0)
+
+        # Historical win-rate adjustment (only when data is available)
+        if win_rate is not None and sample_size > 0:
+            # Correct breakeven probability depends on R ratio
+            if R and R > 0:
+                breakeven_p = 1.0 / (1.0 + R)
+            else:
+                breakeven_p = 0.50
+
+            raw_multiplier = win_rate / breakeven_p if breakeven_p > 0 else 1.0
+            # Weight towards 1.0 (no adjustment) for small samples
+            weight = min(1.0, sample_size / 20.0)
+            effective_multiplier = 1.0 + (raw_multiplier - 1.0) * weight
+            calibrated = _clamp(calibrated * effective_multiplier, 0.30, 0.95)
+
+        # Regime volatility penalty
+        if regime == "volatile":
+            # Differentiate breakout (above SMA20) from crash (below SMA20)
+            vol_penalty = 0.90 if above_sma20 else 0.75
+            calibrated = _clamp(calibrated * vol_penalty, 0.25, 0.95)
+
+        # Hedge-word penalty from reasoning text
+        reasoning_lower = reasoning.lower() if reasoning else ""
+        hedge_count = sum(1 for w in _HEDGE_WORDS if w in reasoning_lower)
+        hedge_penalty = min(0.08, hedge_count * 0.02)
+        calibrated = _clamp(calibrated - hedge_penalty, 0.25, 0.95)
+
+        return calibrated, hedge_penalty
+
+    def kelly_position_size(
+        self,
+        p: float,
+        R: Optional[float],
+        entry_price: Optional[float],
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        signal: str,
+        max_hold_days: int = 7,
+    ) -> tuple:
+        """Compute position size as a fraction of portfolio using half-Kelly.
+
+        Returns:
+            (position_size_pct: float, r_ratio: float|None, hold_scalar: float)
+        """
+        sig = signal.upper()
+
+        # Non-directional signals
+        if sig == "HOLD":
+            return 0.0, None, 1.0
+        if sig in ("OVERWEIGHT", "UNDERWEIGHT"):
+            hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+            return _clamp(0.40 * hold_scalar, 0.0, 1.0), None, hold_scalar
+
+        # Validate price levels before Kelly
+        if not entry_price or entry_price <= 0:
+            hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+            return 0.50 * hold_scalar, None, hold_scalar
+
+        sl = stop_loss or 0.0
+        tp = take_profit or 0.0
+
+        if sl <= 0 or tp <= 0:
+            hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+            return 0.50 * hold_scalar, None, hold_scalar
+
+        # Compute R ratio based on signal direction
+        if sig in ("BUY", "OVERWEIGHT"):
+            stop_dist = entry_price - sl
+            profit_dist = tp - entry_price
+        else:  # SHORT, SELL, COVER
+            stop_dist = sl - entry_price
+            profit_dist = entry_price - tp
+
+        if stop_dist <= 0 or profit_dist <= 0:
+            hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+            return 0.50 * hold_scalar, None, hold_scalar
+
+        r_ratio = profit_dist / stop_dist
+
+        # Corrected Kelly: f* = p - (1-p)/R
+        f_star = p - (1.0 - p) / r_ratio
+        if f_star <= 0:
+            return 0.0, r_ratio, 1.0
+
+        half_kelly = 0.5 * f_star
+
+        # Portfolio risk cap: risk at most PORTFOLIO_RISK_TARGET per trade
+        stop_pct = stop_dist / entry_price
+        vol_cap = self.PORTFOLIO_RISK_TARGET / stop_pct if stop_pct > 0 else 1.0
+
+        # Hold-period scalar: longer holds have higher variance, scale down
+        hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+
+        size = _clamp(min(half_kelly, vol_cap) * hold_scalar, 0.0, 1.0)
+        return size, r_ratio, hold_scalar
+
+    def conviction_label(self, confidence: float) -> str:
+        """Map confidence float to a human-readable label."""
+        if confidence >= 0.80:
+            return "VERY HIGH"
+        if confidence >= 0.65:
+            return "HIGH"
+        if confidence >= 0.50:
+            return "MODERATE"
+        return "LOW"
+
+    def _gate_key(self, regime: str, above_sma20: bool) -> str:
+        """Resolve the gate threshold key for this regime + direction."""
+        if regime == "volatile":
+            return "volatile_up" if above_sma20 else "volatile_down"
+        return regime if regime in _GATE_THRESHOLDS else "unknown"
+
+    def score(
+        self,
+        llm_confidence: float,
+        ticker: str,
+        signal: str,
+        knowledge_store,
+        regime_ctx: dict,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        max_hold_days: int = 7,
+        reasoning: str = "",
+    ) -> dict:
+        """Full confidence scoring pipeline.
+
+        Args:
+            llm_confidence: Raw confidence from LLM output (0.0–1.0)
+            ticker: Ticker symbol
+            signal: Signal string (BUY, SELL, SHORT, etc.)
+            knowledge_store: BacktestKnowledgeStore instance (or None)
+            regime_ctx: Dict from detect_regime_context()
+            stop_loss: Stop loss price from LLM output
+            take_profit: Take profit price from LLM output
+            max_hold_days: Max hold days from LLM output
+            reasoning: Reasoning text from LLM output
+
+        Returns:
+            Dict with: confidence, position_size_pct, conviction_label, gated,
+                       r_ratio, r_ratio_warning, hold_period_scalar,
+                       hedge_penalty_applied, win_rate_used, sample_size_used, regime_used
+        """
+        regime = regime_ctx.get("regime", "unknown")
+        current_price = regime_ctx.get("current_price")
+        above_sma20 = regime_ctx.get("above_sma20", True)
+
+        # Compute R using current_price as entry proxy
+        R = None
+        if current_price and current_price > 0 and stop_loss and take_profit:
+            sig = signal.upper()
+            if sig in ("BUY", "OVERWEIGHT") and current_price > stop_loss:
+                R = (take_profit - current_price) / (current_price - stop_loss)
+            elif sig in ("SHORT", "SELL") and current_price < stop_loss:
+                R = (current_price - take_profit) / (stop_loss - current_price)
+            if R is not None and R <= 0:
+                R = None
+
+        # Fetch historical win rate from backtest knowledge store
+        win_rate_data = None
+        if knowledge_store is not None:
+            try:
+                win_rate_data = knowledge_store.get_signal_win_rate(
+                    ticker, signal, regime=regime
+                )
+            except Exception:
+                pass
+
+        win_rate = win_rate_data["win_rate"] if win_rate_data else None
+        sample_size = win_rate_data["sample_size"] if win_rate_data else 0
+
+        # Two-tier calibration
+        calibrated, hedge_penalty = self.calibrate(
+            llm_confidence=llm_confidence,
+            win_rate=win_rate,
+            sample_size=sample_size,
+            R=R,
+            regime=regime,
+            above_sma20=above_sma20,
+            reasoning=reasoning,
+        )
+
+        # Position sizing via corrected half-Kelly
+        position_size_pct, r_ratio, hold_scalar = self.kelly_position_size(
+            p=calibrated,
+            R=R,
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            signal=signal,
+            max_hold_days=max_hold_days,
+        )
+
+        # Signal gating
+        gate_key = self._gate_key(regime, above_sma20)
+        gate_threshold = _GATE_THRESHOLDS.get(gate_key, 0.50)
+        gated = bool(calibrated < gate_threshold)
+
+        # Override position size to 0 when gated
+        if gated:
+            position_size_pct = 0.0
+
+        return {
+            "confidence": round(calibrated, 4),
+            "position_size_pct": round(position_size_pct, 4),
+            "conviction_label": self.conviction_label(calibrated),
+            "gated": gated,
+            "r_ratio": round(r_ratio, 3) if r_ratio is not None else None,
+            "r_ratio_warning": bool(r_ratio is not None and r_ratio < 1.0),
+            "hold_period_scalar": round(hold_scalar, 3),
+            "hedge_penalty_applied": round(hedge_penalty, 3),
+            "win_rate_used": round(win_rate, 4) if win_rate is not None else None,
+            "sample_size_used": sample_size,
+            "regime_used": regime,
+        }

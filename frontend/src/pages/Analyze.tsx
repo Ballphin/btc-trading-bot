@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer, useCallback } from 'react';
+import { useState, useEffect, useReducer, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { BarChart3, MessageSquare, Newspaper, PieChart, ArrowLeft } from 'lucide-react';
@@ -39,6 +39,14 @@ interface State {
   confidence?: number;
   maxHoldDays?: number;
   reasoning?: string;
+  // Confidence scorer output
+  positionSizePct?: number;
+  convictionLabel?: string;
+  gated?: boolean;
+  rRatio?: number | null;
+  rRatioWarning?: boolean;
+  holdPeriodScalar?: number;
+  hedgePenaltyApplied?: number;
 }
 
 type Action =
@@ -116,6 +124,13 @@ function reducer(state: State, action: Action): State {
         confidence: result.confidence as number | undefined,
         maxHoldDays: result.max_hold_days as number | undefined,
         reasoning: result.reasoning as string | undefined,
+        positionSizePct: result.position_size_pct as number | undefined,
+        convictionLabel: result.conviction_label as string | undefined,
+        gated: result.gated as boolean | undefined,
+        rRatio: result.r_ratio as number | null | undefined,
+        rRatioWarning: result.r_ratio_warning as boolean | undefined,
+        holdPeriodScalar: result.hold_period_scalar as number | undefined,
+        hedgePenaltyApplied: result.hedge_penalty_applied as number | undefined,
       };
     }
     case 'ERROR':
@@ -142,6 +157,13 @@ const initialState: State = {
   confidence: undefined,
   maxHoldDays: undefined,
   reasoning: undefined,
+  positionSizePct: undefined,
+  convictionLabel: undefined,
+  gated: undefined,
+  rRatio: undefined,
+  rRatioWarning: undefined,
+  holdPeriodScalar: undefined,
+  hedgePenaltyApplied: undefined,
 };
 
 export default function Analyze() {
@@ -149,9 +171,11 @@ export default function Analyze() {
   const navigate = useNavigate();
   const [state, dispatch] = useReducer(reducer, initialState);
   const [jobId, setJobId] = useState<string | null>(null);
+  const startedRef = useRef(false);
 
   const start = useCallback(async () => {
-    if (!ticker) return;
+    if (!ticker || startedRef.current) return;
+    startedRef.current = true;
     dispatch({ type: 'START' });
     try {
       const res = await startAnalysis(ticker);
@@ -161,7 +185,7 @@ export default function Analyze() {
     }
   }, [ticker]);
 
-  // Auto-start on mount
+  // Auto-start on mount (ref guard prevents Strict Mode double-fire)
   useEffect(() => { start(); }, [start]);
 
   // SSE stream
@@ -282,43 +306,134 @@ export default function Analyze() {
               className="glass p-6"
             >
               <h3 className="text-lg font-bold text-white mb-4">Trade Parameters</h3>
+
+              {/* Warnings row */}
+              {(state.gated || state.rRatioWarning) && (
+                <div className="flex flex-col gap-2 mb-4">
+                  {state.gated && (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
+                      <span className="text-red-400 text-sm font-medium">⚠ Signal Gated — Confidence below regime threshold. Position size set to 0%.</span>
+                    </div>
+                  )}
+                  {state.rRatioWarning && (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                      <span className="text-amber-400 text-sm font-medium">⚠ Unfavorable R:R — You risk more than you stand to gain on this trade.</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                {/* Stop Loss */}
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="text-xs text-slate-400 mb-1">Stop Loss</p>
                   <p className="text-lg font-semibold text-red-400">
                     ${state.stopLoss?.toLocaleString() || 'N/A'}
                   </p>
                 </div>
+
+                {/* Take Profit */}
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="text-xs text-slate-400 mb-1">Take Profit</p>
                   <p className="text-lg font-semibold text-green-400">
                     ${state.takeProfit?.toLocaleString() || 'N/A'}
                   </p>
                 </div>
+
+                {/* Conviction */}
                 <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="text-xs text-slate-400 mb-1">Confidence</p>
+                  <p className="text-xs text-slate-400 mb-1">Conviction</p>
                   <div className="flex items-center gap-2">
-                    <div className="flex-1 h-2 bg-slate-700 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-accent-teal transition-all"
-                        style={{ width: `${(state.confidence || 0) * 100}%` }}
-                      />
-                    </div>
-                    <p className="text-sm font-semibold text-white">
+                    {state.convictionLabel && (
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                        state.convictionLabel === 'VERY HIGH' ? 'bg-cyan-500/20 text-cyan-300' :
+                        state.convictionLabel === 'HIGH'      ? 'bg-green-500/20 text-green-300' :
+                        state.convictionLabel === 'MODERATE'  ? 'bg-yellow-500/20 text-yellow-300' :
+                        'bg-red-500/20 text-red-300'
+                      }`}>{state.convictionLabel}</span>
+                    )}
+                    <span className="text-sm font-semibold text-white">
                       {((state.confidence || 0) * 100).toFixed(0)}%
-                    </p>
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        (state.confidence || 0) >= 0.75 ? 'bg-cyan-400' :
+                        (state.confidence || 0) >= 0.60 ? 'bg-green-400' :
+                        (state.confidence || 0) >= 0.45 ? 'bg-yellow-400' :
+                        'bg-red-400'
+                      }`}
+                      style={{ width: `${(state.confidence || 0) * 100}%` }}
+                    />
                   </div>
                 </div>
+
+                {/* Suggested Position Size */}
                 <div className="bg-slate-800/50 rounded-lg p-4">
-                  <p className="text-xs text-slate-400 mb-1">Max Hold Days</p>
+                  <p className="text-xs text-slate-400 mb-1">Suggested Size</p>
+                  <p className={`text-lg font-semibold ${
+                    state.gated ? 'text-red-400' :
+                    (state.positionSizePct || 0) > 0.5 ? 'text-green-400' :
+                    (state.positionSizePct || 0) > 0.2 ? 'text-yellow-400' :
+                    'text-slate-300'
+                  }`}>
+                    {state.gated ? 'GATED' : `${((state.positionSizePct || 0) * 100).toFixed(1)}%`}
+                  </p>
+                  {!state.gated && (
+                    <div className="mt-1.5 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent-teal transition-all"
+                        style={{ width: `${Math.min((state.positionSizePct || 0) * 100, 100)}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* R:R Ratio */}
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">R:R Ratio</p>
+                  {state.rRatio != null ? (
+                    <div className="flex items-center gap-1.5">
+                      <p className={`text-lg font-semibold ${
+                        state.rRatio >= 2.0 ? 'text-green-400' :
+                        state.rRatio >= 1.0 ? 'text-yellow-400' :
+                        'text-red-400'
+                      }`}>
+                        {state.rRatio.toFixed(2)}:1
+                      </p>
+                      <span className="text-base">
+                        {state.rRatio >= 2.0 ? '✅' : state.rRatio >= 1.0 ? '⚠️' : '🔴'}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="text-slate-500 text-sm">N/A</p>
+                  )}
+                </div>
+
+                {/* Hold Period */}
+                <div className="bg-slate-800/50 rounded-lg p-4">
+                  <p className="text-xs text-slate-400 mb-1">Max Hold</p>
                   <p className="text-lg font-semibold text-white">
                     {state.maxHoldDays || 'N/A'} days
                   </p>
+                  {state.holdPeriodScalar != null && state.holdPeriodScalar < 1.0 && (
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      size scaled ×{state.holdPeriodScalar.toFixed(2)}
+                    </p>
+                  )}
                 </div>
+
+                {/* Reasoning */}
                 {state.reasoning && (
-                  <div className="bg-slate-800/50 rounded-lg p-4 col-span-2">
+                  <div className="bg-slate-800/50 rounded-lg p-4 col-span-2 md:col-span-3">
                     <p className="text-xs text-slate-400 mb-1">Reasoning</p>
                     <p className="text-sm text-slate-300">{state.reasoning}</p>
+                    {state.hedgePenaltyApplied != null && state.hedgePenaltyApplied > 0 && (
+                      <p className="text-xs text-amber-500/70 mt-1">
+                        Hedge-word penalty: −{(state.hedgePenaltyApplied * 100).toFixed(0)}% confidence
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

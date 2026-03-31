@@ -98,7 +98,34 @@ class SignalProcessor:
         
         # Normalize signal to uppercase
         data['signal'] = data['signal'].upper()
-        
+
+        # Validate confidence is a float in [0.0, 1.0]
+        conf = data.get('confidence')
+        if not isinstance(conf, (int, float)) or not (0.0 <= float(conf) <= 1.0):
+            return False
+        data['confidence'] = float(conf)
+
+        # Validate max_hold_days is a positive integer; clamp to [1, 90]
+        hold = data.get('max_hold_days')
+        if not isinstance(hold, (int, float)) or int(hold) < 1:
+            return False
+        data['max_hold_days'] = max(1, min(90, int(hold)))
+
+        # Validate reasoning is a non-trivial string
+        if len(str(data.get('reasoning', '')).strip()) < 10:
+            return False
+
+        # Directional check: stop/take relationship must match signal direction
+        sig = data['signal']
+        sl = data.get('stop_loss_price', 0) or 0
+        tp = data.get('take_profit_price', 0) or 0
+        if sig in ('BUY', 'OVERWEIGHT') and sl > 0 and tp > 0:
+            if not (tp > sl):
+                return False
+        if sig in ('SHORT', 'SELL') and sl > 0 and tp > 0:
+            if not (sl > tp):
+                return False
+
         return True
     
     def _extract_signal_word(self, full_signal: str) -> str:

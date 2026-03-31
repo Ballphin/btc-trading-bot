@@ -5,7 +5,7 @@ import json
 from tradingagents.agents.utils.agent_utils import build_instrument_context
 
 
-def create_trader(llm, memory):
+def create_trader(llm, memory, backtest_knowledge_store=None):
     def trader_node(state, name):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
@@ -25,6 +25,26 @@ def create_trader(llm, memory):
         else:
             past_memory_str = "No past memories found."
 
+        # Get backtest signal lessons if available (regime-aware)
+        backtest_lessons_str = ""
+        if backtest_knowledge_store:
+            try:
+                trade_date = state.get("trade_date", "")
+                current_regime = None
+                if trade_date:
+                    from tradingagents.backtesting.regime import detect_regime
+                    current_regime = detect_regime(company_name, str(trade_date))
+                lessons = backtest_knowledge_store.get_relevant_lessons(
+                    company_name,
+                    categories=["signal_accuracy"],
+                    max_lessons=2,
+                    current_regime=current_regime,
+                )
+                if lessons and "No backtest lessons" not in lessons:
+                    backtest_lessons_str = f"\n\nLessons from past backtests for {company_name}:\n{lessons}"
+            except Exception:
+                pass  # Silently skip if lessons unavailable
+
         context = {
             "role": "user",
             "content": f"Based on a comprehensive analysis by a team of analysts, here is an investment plan tailored for {company_name}. {instrument_context} This plan incorporates insights from current technical market trends, macroeconomic indicators, and social media sentiment. Use this plan as a foundation for evaluating your next trading decision.\n\nProposed Investment Plan: {investment_plan}\n\nLeverage these insights to make an informed and strategic decision.",
@@ -33,7 +53,7 @@ def create_trader(llm, memory):
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a trading agent analyzing market data to make investment decisions. Based on your analysis, provide a specific recommendation to buy, sell, hold, short, or cover. End with a firm decision and always conclude your response with 'FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL/SHORT/COVER**' to confirm your recommendation. Apply lessons from past decisions to strengthen your analysis. Here are reflections from similar situations you traded in and the lessons learned: {past_memory_str}""",
+                "content": f"""You are a trading agent analyzing market data to make investment decisions. Based on your analysis, provide a specific recommendation to buy, sell, hold, short, or cover. End with a firm decision and always conclude your response with 'FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL/SHORT/COVER**' to confirm your recommendation. Apply lessons from past decisions to strengthen your analysis. Here are reflections from similar situations you traded in and the lessons learned: {past_memory_str}{backtest_lessons_str}""",
             },
             context,
         ]

@@ -44,16 +44,12 @@ export default function Backtest() {
   const [positionSizing, setPositionSizing] = useState('fixed');
   const [useFunding, setUseFunding] = useState(true);
   
-  // Recent backtests
-  const [recentBacktests, setRecentBacktests] = useState<any[]>([]);
-  
   // Active backtests (running)
   const [activeBacktests, setActiveBacktests] = useState<any[]>([]);
 
   // Check server health on mount and fetch backtests
   useEffect(() => {
     checkServerHealth();
-    fetchRecentBacktests();
     fetchActiveBacktests();
     
     // Poll for active backtests every 3 seconds
@@ -102,18 +98,6 @@ export default function Backtest() {
       setServerStatus('offline');
       setError('Cannot connect to backend server. Please ensure it is running on port 8000.');
       return false;
-    }
-  };
-
-  const fetchRecentBacktests = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/backtest/results?limit=5`);
-      if (response.ok) {
-        const data = await response.json();
-        setRecentBacktests(data.results || []);
-      }
-    } catch {
-      // Silently fail - backtests list is not critical
     }
   };
 
@@ -255,47 +239,6 @@ export default function Backtest() {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                   </svg>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Recent Backtests */}
-      {recentBacktests.length > 0 && (
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-slate-300">Recent Backtests</h3>
-            <button
-              onClick={fetchRecentBacktests}
-              className="text-xs text-cyan-400 hover:text-cyan-300"
-            >
-              Refresh
-            </button>
-          </div>
-          <div className="space-y-2">
-            {recentBacktests.map((bt) => (
-              <div
-                key={bt.job_id}
-                onClick={() => navigate(`/backtest/${bt.job_id}`)}
-                className="flex items-center justify-between p-3 bg-slate-800 rounded-lg border border-slate-700 cursor-pointer hover:border-cyan-500 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`w-2 h-2 rounded-full ${
-                    bt.total_return_pct >= 0 ? 'bg-green-500' : 'bg-red-500'
-                  }`} />
-                  <div>
-                    <div className="text-sm font-medium text-white">
-                      {bt.ticker} • {bt.start_date} to {bt.end_date}
-                    </div>
-                    <div className="text-xs text-slate-400">
-                      {bt.mode} • {bt.total_return_pct >= 0 ? '+' : ''}{bt.total_return_pct?.toFixed(2)}% • Sharpe: {bt.sharpe_ratio?.toFixed(2)}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-cyan-400">
-                  <Play className="w-4 h-4" />
                 </div>
               </div>
             ))}

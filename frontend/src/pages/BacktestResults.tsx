@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, TrendingUp, TrendingDown, Activity, DollarSign, Percent, BarChart3, Calendar, Download } from 'lucide-react';
+import { ArrowLeft, TrendingUp, TrendingDown, Activity, DollarSign, Percent, BarChart3, Calendar, Download, Brain, ChevronDown, ChevronUp } from 'lucide-react';
 import { API_BASE_URL, type BacktestResult, type PriceRecord, fetchPrice } from '../lib/api';
 import PriceChart from '../components/PriceChart';
 import EquityCurveChart from '../components/EquityCurveChart';
@@ -31,14 +31,60 @@ export default function BacktestResults() {
   const [loading, setLoading] = useState(true);
   const [statusSteps, setStatusSteps] = useState<StatusStep[]>([]);
   const [currentStep, setCurrentStep] = useState(0);
+  const [lessons, setLessons] = useState<any[]>([]);
+  const [lessonsExpanded, setLessonsExpanded] = useState(true);
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Fetch lessons whenever job result is loaded (ticker becomes known)
+  const resultTicker = job?.result?.config?.ticker;
+  useEffect(() => {
+    if (!resultTicker) return;
+    fetch(`${API_BASE_URL}/backtests/lessons/${resultTicker}`)
+      .then(r => r.json())
+      .then(data => setLessons(data.lessons || []))
+      .catch(() => {});
+  }, [resultTicker]);
 
   useEffect(() => {
     if (!jobId) return;
 
-    // Connect to SSE stream
-    const eventSource = new EventSource(`${API_BASE_URL}/backtest/stream/${jobId}`);
-    eventSourceRef.current = eventSource;
+    // First, try to fetch saved results (for completed backtests)
+    const fetchSavedResult = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/backtest/${jobId}`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === 'completed' && data.result) {
+            // Found saved results - no need to connect to SSE
+            setJob(data);
+            setLoading(false);
+            setError('');
+            // Fetch price data for the chart
+            if (data.result?.config?.ticker) {
+              const ticker = data.result.config.ticker;
+              const startDate = data.result.config.start_date;
+              const endDate = data.result.config.end_date;
+              const days = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 30;
+              fetchPrice(ticker, Math.max(days, 90))
+                .then(setPriceData)
+                .catch(console.error);
+            }
+            return true; // Found saved result
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching saved result:', err);
+      }
+      return false; // No saved result found
+    };
+
+    // Try saved results first
+    fetchSavedResult().then((foundSaved) => {
+      if (foundSaved) return; // Don't connect to SSE if we have saved results
+
+      // Only connect to SSE for active/running backtests
+      const eventSource = new EventSource(`${API_BASE_URL}/backtest/stream/${jobId}`);
+      eventSourceRef.current = eventSource;
 
     const handleEvent = (eventData: any) => {
       try {
@@ -126,40 +172,19 @@ export default function BacktestResults() {
     eventSource.onerror = () => {
       // Don't show error if data was already fetched successfully
       // The SSE stream may 404 for completed jobs that are no longer in memory
+      setLoading(false);
       eventSource.close();
     };
 
-    // Also fetch current status (primary path for completed jobs)
-    fetch(`${API_BASE_URL}/backtest/${jobId}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.status === 'completed' && data.result) {
-          setJob(data);
-          setLoading(false);
-          setError('');  // Clear any SSE errors
-          // Fetch price data for the chart
-          if (data.result?.config?.ticker) {
-            const ticker = data.result.config.ticker;
-            const startDate = data.result.config.start_date;
-            const endDate = data.result.config.end_date;
-            const days = Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)) + 30;
-            fetchPrice(ticker, Math.max(days, 90))
-              .then(setPriceData)
-              .catch(console.error);
-          }
-          eventSource.close();
-        } else if (data.status === 'failed' && data.error) {
-          setError(data.error);
-          setLoading(false);
-          eventSource.close();
-        }
-      })
-      .catch(() => {
-        // Job might still be starting, continue with SSE
-      });
+      return () => {
+        eventSource.close();
+      };
+    });
 
     return () => {
-      eventSource.close();
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
     };
   }, [jobId]);
 
@@ -416,6 +441,77 @@ export default function BacktestResults() {
           </div>
         </div>
       </div>
+
+      {/* Backtest Lessons */}
+      {lessons.length > 0 && (
+        <div className="bg-slate-800 rounded-xl p-6 mb-8 border border-cyan-500/20">
+          <button
+            onClick={() => setLessonsExpanded(prev => !prev)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <div className="flex items-center gap-2">
+              <Brain className="w-5 h-5 text-cyan-400" />
+              <h3 className="text-lg font-semibold text-white">Agent Lessons Learned</h3>
+              <span className="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full">
+                {lessons.length} insight{lessons.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            {lessonsExpanded ? (
+              <ChevronUp className="w-4 h-4 text-slate-400" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400" />
+            )}
+          </button>
+          {lessonsExpanded && (
+            <div className="mt-4 space-y-3">
+              <p className="text-sm text-slate-400 mb-3">
+                These insights are derived from historical backtest performance and are fed into future LLM decisions.
+              </p>
+              {lessons.map((lesson: any, i: number) => {
+                const category = (lesson.category || 'general').replace(/_/g, ' ');
+                const confidence = lesson.confidence || 'medium';
+                const regime = lesson.regime ? lesson.regime.replace(/_/g, ' ') : null;
+                const categoryColors: Record<string, string> = {
+                  'signal accuracy': 'text-green-400 bg-green-500/10',
+                  'risk management': 'text-yellow-400 bg-yellow-500/10',
+                  'position sizing': 'text-purple-400 bg-purple-500/10',
+                };
+                const colorClass = categoryColors[category] || 'text-slate-400 bg-slate-700';
+                const confColor = confidence === 'high' ? 'text-green-400' : 'text-yellow-400';
+                return (
+                  <div key={i} className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full capitalize ${colorClass}`}>
+                        {category}
+                      </span>
+                      <span className={`text-xs font-medium ${confColor}`}>
+                        {confidence.toUpperCase()} CONFIDENCE
+                      </span>
+                      {regime && (
+                        <span className="text-xs text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full capitalize">
+                          {regime}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-200 leading-relaxed">{lesson.lesson}</p>
+                    {lesson.win_rate != null && (
+                      <div className="mt-2 flex gap-4 text-xs text-slate-400">
+                        <span>Win rate: <span className="text-white font-medium">{(lesson.win_rate * 100).toFixed(1)}%</span></span>
+                        {lesson.avg_return != null && (
+                          <span>Avg return: <span className={lesson.avg_return >= 0 ? 'text-green-400 font-medium' : 'text-red-400 font-medium'}>{(lesson.avg_return * 100).toFixed(2)}%</span></span>
+                        )}
+                        {lesson.sample_size && (
+                          <span>Sample: <span className="text-white font-medium">{lesson.sample_size} trades</span></span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Additional Metrics */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
