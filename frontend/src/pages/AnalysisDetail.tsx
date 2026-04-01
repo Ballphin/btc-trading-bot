@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart } from 'lucide-react';
+import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
 import PriceChart from '../components/PriceChart';
 import ReactMarkdown from 'react-markdown';
 import { fetchAnalysis, fetchPrice, type AnalysisData, type PriceRecord } from '../lib/api';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 function extractSignal(text: string): string {
   const upper = (text || '').toUpperCase();
@@ -41,6 +42,7 @@ function extractEntryPrice(text: string): number | null {
 
 export default function AnalysisDetail() {
   const { ticker, date } = useParams<{ ticker: string; date: string }>();
+  useDocumentTitle(`${ticker} — ${date}`);
   const navigate = useNavigate();
   const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
   const [priceData, setPriceData] = useState<PriceRecord[]>([]);
@@ -107,7 +109,7 @@ export default function AnalysisDetail() {
     <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Header */}
       <div className="flex items-center gap-4 mb-6">
-        <button onClick={() => navigate(`/history/${ticker}`)} className="text-slate-400 hover:text-white transition-colors">
+        <button onClick={() => navigate(`/history/${ticker}`)} aria-label="Back to history" className="text-slate-400 hover:text-white transition-colors">
           <ArrowLeft className="w-5 h-5" />
         </button>
         <div className="flex-1">
@@ -118,12 +120,14 @@ export default function AnalysisDetail() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-6 bg-navy-800/50 p-1 rounded-lg w-fit">
+      <div role="tablist" aria-label="Analysis sections" className="flex gap-1 mb-6 bg-navy-800/50 p-1 rounded-lg w-fit">
         {TABS.map(tab => (
           <button
             key={tab.key}
+            role="tab"
+            aria-selected={activeTab === tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            className={`px-4 py-2 min-h-[44px] rounded-md text-sm font-medium transition-colors ${
               activeTab === tab.key
                 ? 'bg-accent-teal/10 text-accent-teal'
                 : 'text-slate-400 hover:text-white'
@@ -154,21 +158,6 @@ export default function AnalysisDetail() {
             <div className="markdown-content text-sm max-h-[500px] overflow-y-auto">
               <ReactMarkdown>{analysis.final_trade_decision}</ReactMarkdown>
             </div>
-          </div>
-
-          {/* Quick stats */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {[
-              { label: 'Market Report', value: analysis.market_report ? '✓ Available' : '—', color: 'text-accent-teal' },
-              { label: 'Sentiment Report', value: analysis.sentiment_report ? '✓ Available' : '—', color: 'text-accent-cyan' },
-              { label: 'News Report', value: analysis.news_report ? '✓ Available' : '—', color: 'text-accent-amber' },
-              { label: 'Fundamentals', value: analysis.fundamentals_report ? '✓ Available' : '—', color: 'text-accent-purple' },
-            ].map(stat => (
-              <div key={stat.label} className="glass p-4">
-                <p className="text-xs text-slate-500 mb-1">{stat.label}</p>
-                <p className={`text-sm font-medium ${stat.color}`}>{stat.value}</p>
-              </div>
-            ))}
           </div>
 
           {/* Risk Parameters (if structured signal available) */}
@@ -211,7 +200,7 @@ export default function AnalysisDetail() {
                     <div className="flex items-center gap-1.5 mb-1">
                       {analysis.conviction_label && (
                         <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
-                          analysis.conviction_label === 'VERY HIGH' ? 'bg-cyan-500/20 text-cyan-300' :
+                          analysis.conviction_label === 'VERY HIGH' ? 'bg-accent-teal/20 text-accent-teal' :
                           analysis.conviction_label === 'HIGH'      ? 'bg-green-500/20 text-green-300' :
                           analysis.conviction_label === 'MODERATE'  ? 'bg-yellow-500/20 text-yellow-300' :
                           'bg-red-500/20 text-red-300'
@@ -222,7 +211,7 @@ export default function AnalysisDetail() {
                     <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
                       <div
                         className={`h-full ${
-                          analysis.confidence >= 0.75 ? 'bg-cyan-400' :
+                          analysis.confidence >= 0.75 ? 'bg-accent-teal' :
                           analysis.confidence >= 0.60 ? 'bg-green-400' :
                           analysis.confidence >= 0.45 ? 'bg-yellow-400' :
                           'bg-red-400'
@@ -254,9 +243,13 @@ export default function AnalysisDetail() {
                         analysis.r_ratio >= 1.0 ? 'text-yellow-400' :
                         'text-red-400'
                       }`}>{analysis.r_ratio.toFixed(2)}:1</p>
-                      <span className="text-xs">
-                        {analysis.r_ratio >= 2.0 ? '✅' : analysis.r_ratio >= 1.0 ? '⚠️' : '🔴'}
-                      </span>
+                      {analysis.r_ratio >= 2.0 ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                      ) : analysis.r_ratio >= 1.0 ? (
+                        <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-red-400" />
+                      )}
                     </div>
                   </div>
                 )}

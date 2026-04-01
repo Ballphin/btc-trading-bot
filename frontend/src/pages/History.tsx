@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { ChevronRight, Calendar, Activity } from 'lucide-react';
+import { ChevronRight, Activity } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import { fetchTickers, fetchAnalyses, type TickerInfo, type AnalysisSummary } from '../lib/api';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 export default function History() {
   const { ticker: selectedTicker } = useParams<{ ticker?: string }>();
+  useDocumentTitle(selectedTicker ? `${selectedTicker} History` : 'Analysis History');
   const navigate = useNavigate();
   const [tickers, setTickers] = useState<TickerInfo[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
@@ -58,7 +59,7 @@ export default function History() {
         <div className="lg:col-span-3">
           {!selectedTicker ? (
             <div className="glass p-12 text-center">
-              <Calendar className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+              <Activity className="w-10 h-10 text-slate-600 mx-auto mb-3" />
               <p className="text-slate-500">Select a ticker from the sidebar to view past analyses</p>
             </div>
           ) : loading ? (
@@ -71,32 +72,18 @@ export default function History() {
             <div className="space-y-3">
               <h2 className="text-lg font-semibold text-white mb-4">{selectedTicker} — {analyses.length} {analyses.length === 1 ? 'analysis' : 'analyses'}</h2>
               {analyses.map((a, i) => (
-                <motion.div
+                <Link
                   key={a.date}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.05 }}
+                  to={`/history/${selectedTicker}/${a.date}`}
+                  className="glass-static px-4 py-3 flex items-center justify-between group no-underline animate-fade-in-up"
+                  style={{ display: 'flex', animationDelay: `${i * 0.03}s` }}
                 >
-                  <Link
-                    to={`/history/${selectedTicker}/${a.date}`}
-                    className="glass p-4 flex items-center justify-between group no-underline"
-                    style={{ display: 'flex' }}
-                  >
-                    <div className="flex items-center gap-4">
-                      <div className="w-10 h-10 rounded-lg bg-navy-700 flex items-center justify-center">
-                        <Calendar className="w-5 h-5 text-slate-400" />
-                      </div>
-                      <div>
-                        <span className="font-medium text-white text-sm">{a.date}</span>
-                        <p className="text-xs text-slate-500 mt-0.5">Full multi-agent analysis</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <SignalBadge signal={a.signal} size="sm" />
-                      <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-accent-teal transition-colors" />
-                    </div>
-                  </Link>
-                </motion.div>
+                  <span className="font-medium text-white text-sm tabular-nums">{a.date}</span>
+                  <div className="flex items-center gap-3">
+                    <SignalBadge signal={a.signal} size="sm" />
+                    <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-accent-teal transition-colors" />
+                  </div>
+                </Link>
               ))}
             </div>
           )}

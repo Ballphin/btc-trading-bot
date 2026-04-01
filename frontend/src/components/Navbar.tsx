@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3 } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -11,7 +11,7 @@ const NAV_ITEMS = [
   { to: '/history', label: 'History', icon: History },
 ];
 
-export default function Navbar() {
+export default memo(function Navbar() {
   const location = useLocation();
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'checking'>('checking');
 
@@ -43,7 +43,7 @@ export default function Navbar() {
   }, []);
 
   return (
-    <nav className="sticky top-0 z-50 backdrop-blur-xl bg-navy-950/80 border-b border-white/5">
+    <nav aria-label="Main navigation" className="sticky top-0 z-50 backdrop-blur-xl bg-navy-950/80 border-b border-white/5">
       <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-2 text-white font-bold text-lg no-underline">
           <Activity className="w-5 h-5 text-accent-cyan" />
@@ -75,7 +75,7 @@ export default function Navbar() {
           </div>
           
           {/* Connection Status */}
-          <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-800/50">
+          <div aria-label={`Server status: ${connectionStatus}`} role="status" className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-800/50">
             {connectionStatus === 'connected' ? (
               <>
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
@@ -100,4 +100,4 @@ export default function Navbar() {
       </div>
     </nav>
   );
-}
+});

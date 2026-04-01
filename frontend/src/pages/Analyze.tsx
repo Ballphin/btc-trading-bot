@@ -1,13 +1,14 @@
 import { useState, useEffect, useReducer, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { BarChart3, MessageSquare, Newspaper, PieChart, ArrowLeft } from 'lucide-react';
+import { BarChart3, MessageSquare, Newspaper, PieChart, ArrowLeft, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import ProgressStepper, { type StepState } from '../components/ProgressStepper';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
 import SignalBadge from '../components/SignalBadge';
 import ReactMarkdown from 'react-markdown';
 import { startAnalysis, streamAnalysis, type SSEEvent } from '../lib/api';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const INITIAL_STEPS: StepState[] = [
   { key: 'market', label: 'Market Analyst', status: 'pending' },
@@ -168,6 +169,7 @@ const initialState: State = {
 
 export default function Analyze() {
   const { ticker } = useParams<{ ticker: string }>();
+  useDocumentTitle(`${ticker} — Live Analysis`);
   const navigate = useNavigate();
   const [state, dispatch] = useReducer(reducer, initialState);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -227,7 +229,7 @@ export default function Analyze() {
     <div className="max-w-7xl mx-auto px-6 py-8">
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
-        <button onClick={() => navigate('/')} className="text-slate-400 hover:text-white transition-colors">
+        <button onClick={() => navigate('/')} aria-label="Back to home" className="text-slate-400 hover:text-white transition-colors">
           <ArrowLeft className="w-5 h-5" />
         </button>
         <div>
@@ -346,7 +348,7 @@ export default function Analyze() {
                   <div className="flex items-center gap-2">
                     {state.convictionLabel && (
                       <span className={`text-xs font-bold px-2 py-0.5 rounded ${
-                        state.convictionLabel === 'VERY HIGH' ? 'bg-cyan-500/20 text-cyan-300' :
+                        state.convictionLabel === 'VERY HIGH' ? 'bg-accent-teal/20 text-accent-teal' :
                         state.convictionLabel === 'HIGH'      ? 'bg-green-500/20 text-green-300' :
                         state.convictionLabel === 'MODERATE'  ? 'bg-yellow-500/20 text-yellow-300' :
                         'bg-red-500/20 text-red-300'
@@ -359,7 +361,7 @@ export default function Analyze() {
                   <div className="mt-1.5 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                     <div
                       className={`h-full transition-all ${
-                        (state.confidence || 0) >= 0.75 ? 'bg-cyan-400' :
+                        (state.confidence || 0) >= 0.75 ? 'bg-accent-teal' :
                         (state.confidence || 0) >= 0.60 ? 'bg-green-400' :
                         (state.confidence || 0) >= 0.45 ? 'bg-yellow-400' :
                         'bg-red-400'
@@ -402,9 +404,13 @@ export default function Analyze() {
                       }`}>
                         {state.rRatio.toFixed(2)}:1
                       </p>
-                      <span className="text-base">
-                        {state.rRatio >= 2.0 ? '✅' : state.rRatio >= 1.0 ? '⚠️' : '🔴'}
-                      </span>
+                      {state.rRatio >= 2.0 ? (
+                        <CheckCircle2 className="w-4 h-4 text-green-400" />
+                      ) : state.rRatio >= 1.0 ? (
+                        <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                      ) : (
+                        <XCircle className="w-4 h-4 text-red-400" />
+                      )}
                     </div>
                   ) : (
                     <p className="text-slate-500 text-sm">N/A</p>

@@ -58,7 +58,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               </button>
               <button
                 onClick={() => { window.location.href = '/'; }}
-                className="px-4 py-2 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/20 rounded-lg transition-colors text-sm"
+                className="px-4 py-2 bg-accent-teal/10 hover:bg-accent-teal/20 text-accent-teal border border-accent-teal/20 rounded-lg transition-colors text-sm"
               >
                 Go Home
               </button>

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'framer-motion';
-import { Search, TrendingUp, Clock, ArrowRight } from 'lucide-react';
+import { Search, Clock, ArrowRight } from 'lucide-react';
 import { fetchTickers, type TickerInfo } from '../lib/api';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const QUICK_TICKERS = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'NVDA', 'AAPL', 'TSLA'];
 
 export default function Home() {
+  useDocumentTitle('Home');
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [tickers, setTickers] = useState<TickerInfo[]>([]);
@@ -28,27 +29,13 @@ export default function Home() {
     <div className="min-h-[calc(100vh-3.5rem)] flex flex-col">
       {/* Hero */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-20">
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 }}
-          className="text-center max-w-2xl"
-        >
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent-cyan/10 border border-accent-cyan/20 text-accent-cyan text-xs font-medium mb-6">
-            <TrendingUp className="w-3.5 h-3.5" />
-            Multi-Agent AI Trading Analysis
-          </div>
-
-          <h1 className="text-4xl md:text-5xl font-bold text-white mb-4 leading-tight">
-            Analyze any asset with
-            <span className="bg-gradient-to-r from-accent-teal to-accent-cyan bg-clip-text text-transparent"> AI agents</span>
+        <div className="text-center max-w-2xl animate-fade-in-up">
+          <h1 className="text-4xl md:text-5xl font-bold text-white mb-8 leading-tight">
+            Run multi-agent analysis
           </h1>
-          <p className="text-slate-400 text-lg mb-10">
-            Enter a ticker to run a full multi-agent analysis: market, sentiment, news, fundamentals, debates, and a final trading decision.
-          </p>
 
           {/* Search */}
-          <form onSubmit={handleSubmit} className="relative max-w-md mx-auto mb-8">
+          <form onSubmit={handleSubmit} className="relative max-w-md mx-auto mb-6">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
             <input
               type="text"
@@ -68,28 +55,22 @@ export default function Home() {
 
           {/* Quick tickers */}
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <span className="text-xs text-slate-500 mr-1">Quick:</span>
             {QUICK_TICKERS.map(t => (
               <button
                 key={t}
                 onClick={() => handleQuick(t)}
-                className="px-3 py-1.5 rounded-lg bg-navy-800 border border-white/5 text-slate-300 text-xs font-medium hover:border-accent-teal/30 hover:text-white transition-colors"
+                className="px-3 py-1.5 min-h-[44px] rounded-lg bg-navy-800 border border-white/5 text-slate-300 text-xs font-medium hover:border-accent-teal/30 hover:text-white transition-colors"
               >
                 {t}
               </button>
             ))}
           </div>
-        </motion.div>
+        </div>
       </div>
 
       {/* Recent analyses */}
       {tickers.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="px-6 pb-12"
-        >
+        <div className="px-6 pb-12 animate-fade-in-up" style={{ animationDelay: '0.2s' }}>
           <div className="max-w-4xl mx-auto">
             <div className="flex items-center gap-2 mb-4">
               <Clock className="w-4 h-4 text-slate-500" />
@@ -97,13 +78,11 @@ export default function Home() {
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {tickers.map((t, i) => (
-                <motion.div
+                <div
                   key={t.ticker}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.1 * i }}
                   onClick={() => navigate(`/history/${t.ticker}`)}
-                  className="glass p-4 cursor-pointer group"
+                  className="glass-static p-4 cursor-pointer group animate-fade-in-up"
+                  style={{ animationDelay: `${i * 0.05}s` }}
                 >
                   <div className="flex items-center justify-between mb-3">
                     <span className="font-bold text-white text-lg">{t.ticker}</span>
@@ -117,11 +96,11 @@ export default function Home() {
                       <span className="text-slate-500">Latest: {t.latest_date}</span>
                     )}
                   </div>
-                </motion.div>
+                </div>
               ))}
             </div>
           </div>
-        </motion.div>
+        </div>
       )}
 
       {loading && (

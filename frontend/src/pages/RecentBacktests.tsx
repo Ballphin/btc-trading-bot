@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, TrendingUp, Activity, Clock, FileText } from 'lucide-react';
+import { FileText } from 'lucide-react';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 interface BacktestSummary {
   id: string;
@@ -18,6 +19,7 @@ interface BacktestSummary {
 }
 
 export default function RecentBacktests() {
+  useDocumentTitle('Backtest History');
   const [backtests, setBacktests] = useState<BacktestSummary[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -59,99 +61,64 @@ export default function RecentBacktests() {
 
   if (loading) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <div className="text-center text-slate-400">Loading backtests...</div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-white mb-2">Backtest History</h1>
-        <p className="text-slate-400">View and compare your backtest results</p>
-      </div>
+    <div className="max-w-7xl mx-auto px-6 py-8">
+      <h1 className="text-2xl font-bold text-white mb-6">Backtest History</h1>
 
       {backtests.length === 0 ? (
-        <div className="bg-slate-800 rounded-xl p-12 text-center">
-          <FileText className="w-16 h-16 text-slate-600 mx-auto mb-4" />
-          <h3 className="text-xl font-semibold text-slate-300 mb-2">No backtests yet</h3>
-          <p className="text-slate-400 mb-6">Run your first backtest to see results here</p>
+        <div className="glass p-12 text-center">
+          <FileText className="w-10 h-10 text-slate-600 mx-auto mb-3" />
+          <p className="text-slate-400 mb-4">No backtests run yet</p>
           <Link
             to="/backtest"
-            className="inline-flex items-center gap-2 px-6 py-3 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition-colors"
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-accent-teal to-accent-cyan hover:opacity-90 text-navy-950 font-bold rounded-lg transition-opacity text-sm"
           >
             Run Backtest
           </Link>
         </div>
       ) : (
-        <div className="grid gap-4">
+        <div className="space-y-3">
           {backtests.map((backtest) => (
             <Link
               key={backtest.id}
               to={`/backtest/results/${backtest.id}`}
-              className="bg-slate-800 rounded-xl p-6 hover:bg-slate-750 transition-colors border border-slate-700 hover:border-slate-600"
+              className="glass-static p-5 flex items-center justify-between gap-6 hover:bg-white/5 transition-colors animate-fade-in-up"
+              style={{ display: 'flex' }}
             >
-              <div className="flex items-start justify-between mb-4">
-                <div>
-                  <h3 className="text-2xl font-bold text-white mb-2">{backtest.ticker}</h3>
-                  <div className="flex items-center gap-1 text-base text-slate-300 font-medium mb-1">
-                    <Calendar className="w-5 h-5" />
-                    <span>{formatDate(backtest.start_date)} - {formatDate(backtest.end_date)}</span>
-                    <span className="mx-2 text-slate-600">•</span>
-                    <span className="text-cyan-400 capitalize">{backtest.frequency}</span>
-                  </div>
-                  <div className="flex items-center gap-1 text-sm text-slate-400">
-                    <Clock className="w-4 h-4" />
-                    <span>Run on {formatDateTime(backtest.created_at)}</span>
-                  </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-3 mb-1">
+                  <span className="text-lg font-bold text-white font-mono">{backtest.ticker}</span>
+                  <span className="text-xs text-slate-500">{formatDate(backtest.start_date)} – {formatDate(backtest.end_date)}</span>
+                  <span className="text-xs text-accent-teal capitalize">{backtest.frequency}</span>
                 </div>
-                <div
-                  className={`text-3xl font-bold ${
-                    backtest.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'
-                  }`}
-                >
-                  {backtest.total_return_pct >= 0 ? '+' : ''}
-                  {backtest.total_return_pct.toFixed(2)}%
-                </div>
+                <span className="text-xs text-slate-600">{formatDateTime(backtest.created_at)}</span>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                <div className="bg-slate-900 rounded-lg p-3">
-                  <div className="flex items-center gap-2 text-slate-400 text-xs mb-1">
-                    <Activity className="w-3 h-3" />
-                    Sharpe Ratio
-                  </div>
-                  <div className="text-lg font-semibold text-white">
-                    {backtest.sharpe_ratio.toFixed(2)}
-                  </div>
+              <div className="flex items-center gap-8 shrink-0">
+                <div className="text-right">
+                  <div className="text-xs text-slate-500 mb-0.5">Sharpe</div>
+                  <div className="text-sm font-semibold text-white tabular-nums">{backtest.sharpe_ratio.toFixed(2)}</div>
                 </div>
-
-                <div className="bg-slate-900 rounded-lg p-3">
-                  <div className="flex items-center gap-2 text-slate-400 text-xs mb-1">
-                    <TrendingUp className="w-3 h-3" />
-                    Max Drawdown
-                  </div>
-                  <div className="text-lg font-semibold text-red-400">
-                    -{backtest.max_drawdown_pct.toFixed(2)}%
-                  </div>
+                <div className="text-right">
+                  <div className="text-xs text-slate-500 mb-0.5">Drawdown</div>
+                  <div className="text-sm font-semibold text-red-400 tabular-nums">−{backtest.max_drawdown_pct.toFixed(2)}%</div>
                 </div>
-
-                <div className="bg-slate-900 rounded-lg p-3">
-                  <div className="text-slate-400 text-xs mb-1">Total Trades</div>
-                  <div className="text-lg font-semibold text-white">{backtest.total_trades}</div>
+                <div className="text-right">
+                  <div className="text-xs text-slate-500 mb-0.5">Win Rate</div>
+                  <div className="text-sm font-semibold text-white tabular-nums">{backtest.win_rate_pct.toFixed(1)}%</div>
                 </div>
-
-                <div className="bg-slate-900 rounded-lg p-3">
-                  <div className="text-slate-400 text-xs mb-1">Win Rate</div>
-                  <div className="text-lg font-semibold text-white">
-                    {backtest.win_rate_pct.toFixed(1)}%
-                  </div>
+                <div className="text-right">
+                  <div className="text-xs text-slate-500 mb-0.5">Trades</div>
+                  <div className="text-sm font-semibold text-white tabular-nums">{backtest.total_trades}</div>
                 </div>
-
-                <div className="bg-slate-900 rounded-lg p-3">
-                  <div className="text-slate-400 text-xs mb-1">Status</div>
-                  <div className="text-sm font-semibold text-green-400">Completed</div>
+                <div className={`text-xl font-bold tabular-nums ${backtest.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {backtest.total_return_pct >= 0 ? '+' : ''}{backtest.total_return_pct.toFixed(2)}%
                 </div>
               </div>
             </Link>

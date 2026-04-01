@@ -1,9 +1,10 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, TrendingUp, TrendingDown, Activity, DollarSign, Percent, BarChart3, Calendar, Download, Brain, ChevronDown, ChevronUp } from 'lucide-react';
+import { ArrowLeft, TrendingUp, BarChart3, Download, Brain, ChevronDown, ChevronUp } from 'lucide-react';
 import { API_BASE_URL, type BacktestResult, type PriceRecord, fetchPrice } from '../lib/api';
 import PriceChart from '../components/PriceChart';
 import EquityCurveChart from '../components/EquityCurveChart';
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 interface BacktestJob {
   job_id: string;
@@ -24,6 +25,8 @@ interface StatusStep {
 export default function BacktestResults() {
   const { jobId } = useParams<{ jobId: string }>();
   const [job, setJob] = useState<BacktestJob | null>(null);
+  const resultTicker0 = job?.result?.config?.ticker;
+  useDocumentTitle(resultTicker0 ? `${resultTicker0} Backtest` : 'Backtest Results');
   const [priceData, setPriceData] = useState<PriceRecord[]>([]);
   const [progress, setProgress] = useState({ current: 0, total: 0, date: '' });
   const [decisions, setDecisions] = useState<any[]>([]);
@@ -210,7 +213,7 @@ export default function BacktestResults() {
 
   if (loading && !job?.result) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <Link to="/backtest" className="flex items-center gap-2 text-slate-400 hover:text-white mb-6">
           <ArrowLeft className="w-4 h-4" />
           Back to Backtest
@@ -219,7 +222,7 @@ export default function BacktestResults() {
         <div className="bg-slate-800 rounded-xl p-8">
           {/* Header */}
           <div className="text-center mb-8">
-            <div className="w-16 h-16 border-4 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mx-auto mb-4" />
+            <div className="w-16 h-16 border-4 border-accent-teal/30 border-t-accent-teal rounded-full animate-spin mx-auto mb-4" />
             <h2 className="text-xl font-semibold text-white mb-2">Running Backtest...</h2>
             <p className="text-slate-400">
               {currentStep > 0 && statusSteps.find(s => s.step === currentStep)?.status}
@@ -236,7 +239,7 @@ export default function BacktestResults() {
                       step < currentStep
                         ? 'bg-green-500 text-white'
                         : step === currentStep
-                        ? 'bg-cyan-500 text-white animate-pulse'
+                        ? 'bg-accent-teal text-white animate-pulse'
                         : 'bg-slate-700 text-slate-400'
                     }`}
                   >
@@ -276,7 +279,7 @@ export default function BacktestResults() {
               </div>
               <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-cyan-500 transition-all duration-300"
+                  className="h-full bg-accent-teal transition-all duration-300"
                   style={{ width: `${(progress.current / progress.total) * 100}%` }}
                 />
               </div>
@@ -292,7 +295,7 @@ export default function BacktestResults() {
                   <div
                     key={idx}
                     className={`flex items-start gap-3 text-sm ${
-                      step.step === currentStep ? 'text-cyan-400' : 'text-slate-400'
+                      step.step === currentStep ? 'text-accent-teal' : 'text-slate-400'
                     }`}
                   >
                     <span className="text-xs text-slate-500 whitespace-nowrap">
@@ -302,7 +305,7 @@ export default function BacktestResults() {
                       step.step < currentStep
                         ? 'bg-green-500/20 text-green-400'
                         : step.step === currentStep
-                        ? 'bg-cyan-500/20 text-cyan-400'
+                        ? 'bg-accent-teal/20 text-accent-teal'
                         : 'bg-slate-700 text-slate-500'
                     }`}>
                       {step.step < currentStep ? '✓' : step.step}
@@ -348,7 +351,7 @@ export default function BacktestResults() {
 
   if (error && !job?.result) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <Link to="/backtest" className="flex items-center gap-2 text-slate-400 hover:text-white mb-6">
           <ArrowLeft className="w-4 h-4" />
           Back to Backtest
@@ -363,7 +366,7 @@ export default function BacktestResults() {
 
   if (!job?.result) {
     return (
-      <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="max-w-7xl mx-auto px-6 py-8">
         <div className="text-center text-slate-400">Loading results...</div>
       </div>
     );
@@ -380,7 +383,7 @@ export default function BacktestResults() {
   })) || [];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
+    <div className="max-w-7xl mx-auto px-6 py-8">
       <div className="flex items-center justify-between mb-6">
         <Link to="/backtest" className="flex items-center gap-2 text-slate-400 hover:text-white">
           <ArrowLeft className="w-4 h-4" />
@@ -397,12 +400,9 @@ export default function BacktestResults() {
 
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-white mb-2">
-          Backtest Results: {ticker}
-        </h1>
-        <p className="text-slate-400">
-          <Calendar className="w-4 h-4 inline mr-1" />
-          {config?.start_date} to {config?.end_date} • {config?.mode} mode • {config?.frequency}
+        <h1 className="text-3xl font-bold text-white mb-1">{ticker}</h1>
+        <p className="text-slate-400 text-sm">
+          {config?.start_date} – {config?.end_date} · {config?.mode} · {config?.frequency}
         </p>
       </div>
 
@@ -421,60 +421,60 @@ export default function BacktestResults() {
         </div>
       )}
 
-      {/* Metrics Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      {/* Primary Metrics — 8 stats in one unified grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         <div className="bg-slate-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 text-slate-400 text-sm mb-1">
-            <TrendingUp className="w-4 h-4" />
-            Total Return
-          </div>
-          <div className={`text-2xl font-bold ${metrics?.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          <div className="text-slate-400 text-xs mb-1">Total Return</div>
+          <div className={`text-2xl font-bold tabular-nums ${metrics?.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
             {metrics?.total_return_pct >= 0 ? '+' : ''}{metrics?.total_return_pct?.toFixed(2)}%
           </div>
         </div>
-
         <div className="bg-slate-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 text-slate-400 text-sm mb-1">
-            <Activity className="w-4 h-4" />
-            Sharpe Ratio
-          </div>
-          <div className="text-2xl font-bold text-white">
-            {metrics?.sharpe_ratio?.toFixed(2) || 'N/A'}
-          </div>
+          <div className="text-slate-400 text-xs mb-1">Sharpe Ratio</div>
+          <div className="text-2xl font-bold text-white tabular-nums">{metrics?.sharpe_ratio?.toFixed(2) || 'N/A'}</div>
         </div>
-
         <div className="bg-slate-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 text-slate-400 text-sm mb-1">
-            <TrendingDown className="w-4 h-4" />
-            Max Drawdown
-          </div>
-          <div className="text-2xl font-bold text-red-400">
-            -{metrics?.max_drawdown_pct?.toFixed(2)}%
-          </div>
+          <div className="text-slate-400 text-xs mb-1">Max Drawdown</div>
+          <div className="text-2xl font-bold text-red-400 tabular-nums">−{metrics?.max_drawdown_pct?.toFixed(2)}%</div>
         </div>
-
         <div className="bg-slate-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 text-slate-400 text-sm mb-1">
-            <Percent className="w-4 h-4" />
-            Win Rate
+          <div className="text-slate-400 text-xs mb-1">Win Rate</div>
+          <div className="text-2xl font-bold text-white tabular-nums">{metrics?.win_rate_pct?.toFixed(1)}%</div>
+        </div>
+        <div className="bg-slate-800 rounded-xl p-4">
+          <div className="text-slate-400 text-xs mb-1">Total Trades</div>
+          <div className="text-xl font-semibold text-white tabular-nums">{metrics?.total_trades}</div>
+        </div>
+        <div className="bg-slate-800 rounded-xl p-4">
+          <div className="text-slate-400 text-xs mb-1">Profit Factor</div>
+          <div className="text-xl font-semibold text-white tabular-nums">
+            {metrics?.profit_factor == null ? '∞' : metrics.profit_factor.toFixed(2)}
           </div>
-          <div className="text-2xl font-bold text-white">
-            {metrics?.win_rate_pct?.toFixed(1)}%
-          </div>
+          {metrics?.profit_factor == null && <div className="text-xs text-green-400 mt-0.5">No losing trades</div>}
+        </div>
+        <div className="bg-slate-800 rounded-xl p-4">
+          <div className="text-slate-400 text-xs mb-1">Initial Capital</div>
+          <div className="text-xl font-semibold text-white tabular-nums">${config?.initial_capital?.toLocaleString()}</div>
+        </div>
+        <div className="bg-slate-800 rounded-xl p-4">
+          <div className="text-slate-400 text-xs mb-1">Final Value</div>
+          <div className="text-xl font-semibold text-white tabular-nums">${metrics?.final_value?.toLocaleString()}</div>
         </div>
       </div>
 
       {/* Backtest Lessons */}
       {lessons.length > 0 && (
-        <div className="bg-slate-800 rounded-xl p-6 mb-8 border border-cyan-500/20">
+        <div className="bg-slate-800 rounded-xl p-6 mb-8 border border-accent-teal/20">
           <button
             onClick={() => setLessonsExpanded(prev => !prev)}
+            aria-label={lessonsExpanded ? 'Collapse lessons' : 'Expand lessons'}
+            aria-expanded={lessonsExpanded}
             className="w-full flex items-center justify-between text-left"
           >
             <div className="flex items-center gap-2">
-              <Brain className="w-5 h-5 text-cyan-400" />
+              <Brain className="w-5 h-5 text-accent-teal" />
               <h3 className="text-lg font-semibold text-white">Agent Lessons Learned</h3>
-              <span className="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full">
+              <span className="text-xs bg-accent-teal/20 text-accent-teal px-2 py-0.5 rounded-full">
                 {lessons.length} insight{lessons.length !== 1 ? 's' : ''}
               </span>
             </div>
@@ -510,7 +510,7 @@ export default function BacktestResults() {
                         {confidence.toUpperCase()} CONFIDENCE
                       </span>
                       {regime && (
-                        <span className="text-xs text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded-full capitalize">
+                        <span className="text-xs text-accent-teal bg-accent-teal/10 px-2 py-0.5 rounded-full capitalize">
                           {regime}
                         </span>
                       )}
@@ -535,125 +535,89 @@ export default function BacktestResults() {
         </div>
       )}
 
-      {/* Benchmark vs Strategy */}
+      {/* Benchmark comparison — inline strip, only when data exists */}
       {metrics?.benchmark_return_pct != null && (
-        <div className="mb-8">
-          <h3 className="text-lg font-semibold text-white mb-4">Strategy vs Buy &amp; Hold</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-              <div className="text-slate-400 text-sm mb-1">Strategy Return</div>
-              <div className={`text-2xl font-bold ${(metrics?.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {(metrics?.total_return_pct ?? 0) >= 0 ? '+' : ''}{metrics?.total_return_pct?.toFixed(2)}%
-              </div>
+        <div className="flex gap-3 mb-6">
+          <div className="bg-slate-800 rounded-xl px-4 py-3 flex-1">
+            <div className="text-slate-400 text-xs mb-0.5">Strategy</div>
+            <div className={`text-lg font-bold tabular-nums ${(metrics?.total_return_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {(metrics?.total_return_pct ?? 0) >= 0 ? '+' : ''}{metrics?.total_return_pct?.toFixed(2)}%
             </div>
-            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-              <div className="text-slate-400 text-sm mb-1">Buy &amp; Hold Return</div>
-              <div className={`text-2xl font-bold ${metrics.benchmark_return_pct >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                {metrics.benchmark_return_pct >= 0 ? '+' : ''}{metrics.benchmark_return_pct.toFixed(2)}%
-              </div>
+          </div>
+          <div className="bg-slate-800 rounded-xl px-4 py-3 flex-1">
+            <div className="text-slate-400 text-xs mb-0.5">Buy &amp; Hold</div>
+            <div className={`text-lg font-bold tabular-nums ${metrics.benchmark_return_pct >= 0 ? 'text-accent-teal' : 'text-red-400'}`}>
+              {metrics.benchmark_return_pct >= 0 ? '+' : ''}{metrics.benchmark_return_pct.toFixed(2)}%
             </div>
-            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700">
-              <div className="text-slate-400 text-sm mb-1">Alpha vs Buy &amp; Hold</div>
-              <div className={`text-2xl font-bold ${
-                (metrics?.alpha_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {(metrics?.alpha_pct ?? 0) >= 0 ? '+' : ''}{(metrics?.alpha_pct ?? 0).toFixed(2)}%
-              </div>
+          </div>
+          <div className="bg-slate-800 rounded-xl px-4 py-3 flex-1">
+            <div className="text-slate-400 text-xs mb-0.5">Alpha</div>
+            <div className={`text-lg font-bold tabular-nums ${(metrics?.alpha_pct ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {(metrics?.alpha_pct ?? 0) >= 0 ? '+' : ''}{(metrics?.alpha_pct ?? 0).toFixed(2)}%
             </div>
           </div>
         </div>
       )}
 
-      {/* Additional Metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        <div className="bg-slate-800 rounded-xl p-4">
-          <div className="text-slate-400 text-sm mb-1">Total Trades</div>
-          <div className="text-xl font-semibold text-white">{metrics?.total_trades}</div>
-        </div>
-        <div className="bg-slate-800 rounded-xl p-4">
-          <div className="text-slate-400 text-sm mb-1">Profit Factor</div>
-          <div className="text-xl font-semibold text-white">
-            {metrics?.profit_factor == null ? '∞' : metrics.profit_factor.toFixed(2)}
-          </div>
-          {metrics?.profit_factor == null && (
-            <div className="text-xs text-green-400 mt-0.5">No losing trades</div>
+      {/* Advanced Metrics — crypto + risk, collapsed into one grid */}
+      {(metrics?.sortino_ratio != null || metrics?.stops_hit !== undefined) && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+          {metrics?.sortino_ratio != null && (
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-xs mb-1">Sortino</div>
+              <div className="text-xl font-semibold text-white tabular-nums">{metrics.sortino_ratio.toFixed(2)}</div>
+            </div>
           )}
-        </div>
-        <div className="bg-slate-800 rounded-xl p-4">
-          <div className="text-slate-400 text-sm mb-1">Initial Capital</div>
-          <div className="text-xl font-semibold text-white">${config?.initial_capital?.toLocaleString()}</div>
-        </div>
-        <div className="bg-slate-800 rounded-xl p-4">
-          <div className="text-slate-400 text-sm mb-1">Final Value</div>
-          <div className="text-xl font-semibold text-white">${metrics?.final_value?.toLocaleString()}</div>
-        </div>
-      </div>
-
-      {/* Crypto Metrics */}
-      <div className="mb-8">
-        <h3 className="text-lg font-semibold text-white mb-4">Crypto Trading Metrics</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Leverage Used</div>
-            <div className="text-xl font-semibold text-cyan-400">{config?.leverage || 1}x</div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Total Fees</div>
-            <div className="text-xl font-semibold text-yellow-400">${metrics?.total_fees?.toFixed(2)}</div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Funding Costs</div>
-            <div className={`text-xl font-semibold ${(metrics?.total_funding || 0) > 0 ? 'text-red-400' : 'text-green-400'}`}>
-              ${Math.abs(metrics?.total_funding || 0).toFixed(2)}
-            </div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Liquidations</div>
-            <div className={`text-xl font-semibold ${(metrics?.liquidations || 0) > 0 ? 'text-red-400' : 'text-green-400'}`}>
-              {metrics?.liquidations || 0}
-            </div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Fee Impact</div>
-            <div className="text-xl font-semibold text-white">{metrics?.fee_impact_pct?.toFixed(2)}%</div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Sortino Ratio</div>
-            <div className="text-xl font-semibold text-white">{metrics?.sortino_ratio?.toFixed(2)}</div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Omega Ratio</div>
-            <div className="text-xl font-semibold text-white">{metrics?.omega_ratio?.toFixed(2)}</div>
-          </div>
-          <div className="bg-slate-800 rounded-xl p-4">
-            <div className="text-slate-400 text-sm mb-1">Calmar Ratio</div>
-            <div className="text-xl font-semibold text-white">{metrics?.calmar_ratio?.toFixed(2)}</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Risk Management Metrics */}
-      {(metrics?.stops_hit !== undefined || metrics?.takes_hit !== undefined) && (
-        <div className="mb-8">
-          <h3 className="text-lg font-semibold text-white mb-4">Risk Management</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {metrics?.calmar_ratio != null && (
             <div className="bg-slate-800 rounded-xl p-4">
-              <div className="text-slate-400 text-sm mb-1">Stops Hit</div>
-              <div className="text-xl font-semibold text-red-400">{metrics?.stops_hit || 0}</div>
+              <div className="text-slate-400 text-xs mb-1">Calmar</div>
+              <div className="text-xl font-semibold text-white tabular-nums">{metrics.calmar_ratio.toFixed(2)}</div>
             </div>
+          )}
+          {metrics?.omega_ratio != null && (
             <div className="bg-slate-800 rounded-xl p-4">
-              <div className="text-slate-400 text-sm mb-1">Targets Hit</div>
-              <div className="text-xl font-semibold text-green-400">{metrics?.takes_hit || 0}</div>
+              <div className="text-slate-400 text-xs mb-1">Omega</div>
+              <div className="text-xl font-semibold text-white tabular-nums">{metrics.omega_ratio.toFixed(2)}</div>
             </div>
+          )}
+          {metrics?.avg_rr_ratio != null && (
             <div className="bg-slate-800 rounded-xl p-4">
-              <div className="text-slate-400 text-sm mb-1">Avg Hold Days</div>
-              <div className="text-xl font-semibold text-white">{metrics?.avg_hold_days?.toFixed(1) || 'N/A'}</div>
+              <div className="text-slate-400 text-xs mb-1">Avg R:R</div>
+              <div className="text-xl font-semibold text-accent-teal tabular-nums">{metrics.avg_rr_ratio.toFixed(2)}</div>
             </div>
+          )}
+          {metrics?.avg_hold_days != null && (
             <div className="bg-slate-800 rounded-xl p-4">
-              <div className="text-slate-400 text-sm mb-1">Avg R:R Ratio</div>
-              <div className="text-xl font-semibold text-cyan-400">{metrics?.avg_rr_ratio?.toFixed(2) || 'N/A'}</div>
+              <div className="text-slate-400 text-xs mb-1">Avg Hold</div>
+              <div className="text-xl font-semibold text-white tabular-nums">{metrics.avg_hold_days.toFixed(1)}d</div>
             </div>
-          </div>
+          )}
+          {metrics?.stops_hit !== undefined && (
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-xs mb-1">Stops Hit</div>
+              <div className="text-xl font-semibold text-red-400 tabular-nums">{metrics.stops_hit || 0}</div>
+            </div>
+          )}
+          {metrics?.takes_hit !== undefined && (
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-xs mb-1">Targets Hit</div>
+              <div className="text-xl font-semibold text-green-400 tabular-nums">{metrics.takes_hit || 0}</div>
+            </div>
+          )}
+          {metrics?.total_fees != null && (
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-xs mb-1">Total Fees</div>
+              <div className="text-xl font-semibold text-yellow-400 tabular-nums">${metrics.total_fees.toFixed(2)}</div>
+            </div>
+          )}
+          {metrics?.liquidations !== undefined && (
+            <div className="bg-slate-800 rounded-xl p-4">
+              <div className="text-slate-400 text-xs mb-1">Liquidations</div>
+              <div className={`text-xl font-semibold tabular-nums ${(metrics.liquidations || 0) > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                {metrics.liquidations || 0}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -661,7 +625,7 @@ export default function BacktestResults() {
       <div className="grid lg:grid-cols-2 gap-6 mb-8">
         <div className="bg-slate-800 rounded-xl p-6">
           <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-cyan-400" />
+            <BarChart3 className="w-5 h-5 text-accent-teal" />
             Price & Signals
           </h3>
           <PriceChart
@@ -673,7 +637,7 @@ export default function BacktestResults() {
 
         <div className="bg-slate-800 rounded-xl p-6">
           <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-            <DollarSign className="w-5 h-5 text-green-400" />
+            <TrendingUp className="w-5 h-5 text-green-400" />
             Equity Curve
           </h3>
           <EquityCurveChart equityCurve={equity_curve || []} />
@@ -687,16 +651,17 @@ export default function BacktestResults() {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full">
+            <caption className="sr-only">Trade log for backtest {ticker}</caption>
             <thead className="bg-slate-700/50">
               <tr>
-                <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Date</th>
-                <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Signal</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Price</th>
-                <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Action</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Portfolio Value</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Open PnL</th>
-                <th className="px-4 py-3 text-right text-sm font-medium text-slate-300">Kelly Size</th>
-                <th className="px-4 py-3 text-left text-sm font-medium text-slate-300">Position</th>
+                <th scope="col" className="px-4 py-3 text-left text-sm font-medium text-slate-300">Date</th>
+                <th scope="col" className="px-4 py-3 text-left text-sm font-medium text-slate-300">Signal</th>
+                <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-slate-300">Price</th>
+                <th scope="col" className="px-4 py-3 text-left text-sm font-medium text-slate-300">Action</th>
+                <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-slate-300">Portfolio Value</th>
+                <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-slate-300">Open PnL</th>
+                <th scope="col" className="px-4 py-3 text-right text-sm font-medium text-slate-300">Kelly Size</th>
+                <th scope="col" className="px-4 py-3 text-left text-sm font-medium text-slate-300">Position</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">

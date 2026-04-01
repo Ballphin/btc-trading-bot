@@ -1,13 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Play, Clock, Zap, TrendingUp, DollarSign, Percent, Calendar, AlertCircle, ServerOff } from 'lucide-react';
+import { Play, Clock, TrendingUp, AlertCircle, ServerOff } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
-
-const PRESETS = [
-  { ticker: 'BTC-USD', name: 'Bitcoin', color: 'bg-orange-500' },
-  { ticker: 'ETH-USD', name: 'Ethereum', color: 'bg-blue-500' },
-  { ticker: 'NVDA', name: 'NVIDIA', color: 'bg-green-500' },
-];
+import useDocumentTitle from '../hooks/useDocumentTitle';
 
 const FREQUENCIES = [
   { value: '4h', label: '4-Hour' },
@@ -18,6 +13,7 @@ const FREQUENCIES = [
 ];
 
 export default function Backtest() {
+  useDocumentTitle('Backtest Strategy');
   const navigate = useNavigate();
   
   // Get today's date in YYYY-MM-DD format
@@ -46,6 +42,8 @@ export default function Backtest() {
   
   // Active backtests (running)
   const [activeBacktests, setActiveBacktests] = useState<any[]>([]);
+
+  const isCrypto = ticker.includes('-USD') || ticker.includes('-USDT') || ticker.includes('-BTC');
 
   // Check server health on mount and fetch backtests
   useEffect(() => {
@@ -162,12 +160,9 @@ export default function Backtest() {
   // Show server offline warning
   if (serverStatus === 'offline') {
     return (
-      <div className="max-w-4xl mx-auto px-4 py-8">
+      <div className="max-w-4xl mx-auto px-6 py-8">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Backtest Strategy</h1>
-          <p className="text-slate-400">
-            Test TradingAgents strategy on historical data with simulated portfolio performance.
-          </p>
         </div>
 
         <div className="p-6 bg-red-500/10 border border-red-500 rounded-xl">
@@ -180,13 +175,13 @@ export default function Backtest() {
               </p>
               <div className="bg-slate-800 p-4 rounded-lg mb-4">
                 <p className="text-sm text-slate-400 mb-2">Start the server with:</p>
-                <code className="text-sm text-cyan-400 font-mono">
+                <code className="text-sm text-accent-teal font-mono">
                   python -m uvicorn server:app --host 0.0.0.0 --port 8000 --reload
                 </code>
               </div>
               <button
                 onClick={checkServerHealth}
-                className="px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-navy-950 font-medium rounded-lg transition-colors"
+                className="px-4 py-2 bg-gradient-to-r from-accent-teal to-accent-cyan hover:opacity-90 text-navy-950 font-medium rounded-lg transition-colors"
               >
                 Retry Connection
               </button>
@@ -198,12 +193,9 @@ export default function Backtest() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8">
+    <div className="max-w-4xl mx-auto px-6 py-8">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-white mb-2">Backtest Strategy</h1>
-        <p className="text-slate-400">
-          Test TradingAgents strategy on historical data with simulated portfolio performance.
-        </p>
+        <h1 className="text-3xl font-bold text-white">Backtest Strategy</h1>
       </div>
 
       {/* Active Backtests (Running) */}
@@ -211,7 +203,7 @@ export default function Backtest() {
         <div className="mb-8">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-slate-300 flex items-center gap-2">
-              <span className="w-2 h-2 bg-cyan-500 rounded-full animate-pulse" />
+              <span className="w-2 h-2 bg-accent-teal rounded-full animate-pulse" />
               Running Backtests
             </h3>
             <span className="text-xs text-slate-500">{activeBacktests.length} active</span>
@@ -221,10 +213,10 @@ export default function Backtest() {
               <div
                 key={bt.job_id}
                 onClick={() => navigate(`/backtest/${bt.job_id}`)}
-                className="flex items-center justify-between p-3 bg-slate-800/80 rounded-lg border border-cyan-500/50 cursor-pointer hover:border-cyan-400 transition-colors"
+                className="flex items-center justify-between p-3 bg-slate-800/80 rounded-lg border border-accent-teal/50 cursor-pointer hover:border-accent-teal transition-colors"
               >
                 <div className="flex items-center gap-3">
-                  <div className="w-2 h-2 bg-cyan-500 rounded-full animate-pulse" />
+                  <div className="w-2 h-2 bg-accent-teal rounded-full animate-pulse" />
                   <div>
                     <div className="text-sm font-medium text-white">
                       {bt.ticker} • {bt.start_date} to {bt.end_date}
@@ -234,7 +226,7 @@ export default function Backtest() {
                     </div>
                   </div>
                 </div>
-                <div className="text-cyan-400">
+                <div className="text-accent-teal">
                   <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
@@ -246,93 +238,70 @@ export default function Backtest() {
         </div>
       )}
 
-      {/* Asset Presets */}
-      <div className="mb-8">
-        <label className="block text-sm font-medium text-slate-300 mb-3">Select Asset</label>
-        <div className="flex gap-4">
-          {PRESETS.map((preset) => (
-            <button
-              key={preset.ticker}
-              onClick={() => setTicker(preset.ticker)}
-              className={`flex-1 p-4 rounded-xl border-2 transition-all ${
-                ticker === preset.ticker
-                  ? 'border-cyan-500 bg-cyan-500/10'
-                  : 'border-slate-700 bg-slate-800 hover:border-slate-600'
-              }`}
-            >
-              <div className={`w-3 h-3 rounded-full ${preset.color} mb-2`} />
-              <div className="text-white font-semibold">{preset.name}</div>
-              <div className="text-sm text-slate-400">{preset.ticker}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Mode Selection */}
       <div className="mb-8">
-        <label className="block text-sm font-medium text-slate-300 mb-3">Backtest Mode</label>
-        <div className="grid grid-cols-2 gap-4">
+        <label className="block text-sm font-medium text-slate-300 mb-2">Backtest Mode</label>
+        <div className="flex gap-2">
           <button
+            type="button"
             onClick={() => setMode('replay')}
-            className={`p-4 rounded-xl border-2 text-left transition-all ${
+            className={`flex-1 px-4 py-2.5 min-h-[44px] rounded-lg border text-sm font-medium transition-all ${
               mode === 'replay'
-                ? 'border-cyan-500 bg-cyan-500/10'
-                : 'border-slate-700 bg-slate-800 hover:border-slate-600'
+                ? 'border-accent-teal bg-accent-teal/10 text-accent-teal'
+                : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600'
             }`}
           >
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-5 h-5 text-yellow-400" />
-              <span className="font-semibold text-white">Quick Replay</span>
-            </div>
-            <p className="text-sm text-slate-400">
-              Uses cached analysis decisions. Results in &lt;2 seconds.
-            </p>
+            Quick Replay
+            <span className="block text-xs font-normal opacity-60 mt-0.5">cached · &lt;2s</span>
           </button>
           <button
+            type="button"
             onClick={() => setMode('simulation')}
-            className={`p-4 rounded-xl border-2 text-left transition-all ${
+            className={`flex-1 px-4 py-2.5 min-h-[44px] rounded-lg border text-sm font-medium transition-all ${
               mode === 'simulation'
-                ? 'border-cyan-500 bg-cyan-500/10'
-                : 'border-slate-700 bg-slate-800 hover:border-slate-600'
+                ? 'border-accent-teal bg-accent-teal/10 text-accent-teal'
+                : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600'
             }`}
           >
-            <div className="flex items-center gap-2 mb-2">
-              <Clock className="w-5 h-5 text-cyan-400" />
-              <span className="font-semibold text-white">Full Simulation</span>
-            </div>
-            <p className="text-sm text-slate-400">
-              Runs full LLM pipeline on each date. Takes several minutes.
-            </p>
+            Full Simulation
+            <span className="block text-xs font-normal opacity-60 mt-0.5">full LLM · minutes</span>
           </button>
         </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Ticker */}
+        <div>
+          <label className="block text-sm font-medium text-slate-300 mb-2">Ticker</label>
+          <input
+            type="text"
+            value={ticker}
+            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+            placeholder="e.g. BTC-USD, NVDA, ETH-USD"
+            className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white placeholder:text-slate-500 focus:border-accent-teal/50 focus:outline-none font-mono"
+            required
+          />
+        </div>
+
         {/* Date Range */}
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              <Calendar className="w-4 h-4 inline mr-1" />
-              Start Date
-            </label>
+            <label className="block text-sm font-medium text-slate-300 mb-2">Start Date</label>
             <input
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
+              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-accent-teal/50 focus:outline-none"
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              <Calendar className="w-4 h-4 inline mr-1" />
-              End Date
-            </label>
+            <label className="block text-sm font-medium text-slate-300 mb-2">End Date</label>
             <input
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
+              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-accent-teal/50 focus:outline-none"
               required
             />
           </div>
@@ -347,9 +316,9 @@ export default function Backtest() {
                 key={freq.value}
                 type="button"
                 onClick={() => setFrequency(freq.value)}
-                className={`px-4 py-2 rounded-lg border transition-all ${
+                className={`px-4 py-2 min-h-[44px] rounded-lg border transition-all ${
                   frequency === freq.value
-                    ? 'border-cyan-500 bg-cyan-500/10 text-cyan-400'
+                    ? 'border-accent-teal bg-accent-teal/10 text-accent-teal'
                     : 'border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600'
                 }`}
               >
@@ -362,10 +331,7 @@ export default function Backtest() {
         {/* Capital and Position Size */}
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              <DollarSign className="w-4 h-4 inline mr-1" />
-              Initial Capital
-            </label>
+            <label className="block text-sm font-medium text-slate-300 mb-2">Initial Capital</label>
             <input
               type="number"
               min="10000"
@@ -373,31 +339,28 @@ export default function Backtest() {
               step="10000"
               value={initialCapital}
               onChange={(e) => setInitialCapital(Number(e.target.value))}
-              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-cyan-500 focus:outline-none"
+              className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white focus:border-accent-teal/50 focus:outline-none"
             />
             <div className="mt-1 text-sm text-slate-500">
               ${initialCapital.toLocaleString()}
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-300 mb-2">
-              <Percent className="w-4 h-4 inline mr-1" />
-              Position Size
-            </label>
+            <label className="block text-sm font-medium text-slate-300 mb-2">Position Size</label>
             <input
               type="range"
               min="5"
               max="100"
               value={positionSize}
               onChange={(e) => setPositionSize(Number(e.target.value))}
-              className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+              className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-accent-teal"
             />
             <div className="mt-1 text-sm text-slate-500">{positionSize}% per trade</div>
           </div>
         </div>
 
         {/* Crypto Trading Settings */}
-        <div className="border border-slate-700 rounded-xl p-4 space-y-4">
+        {isCrypto && <div className="border border-slate-700 rounded-xl p-4 space-y-4">
           <h3 className="text-sm font-medium text-slate-300 flex items-center gap-2">
             <TrendingUp className="w-4 h-4" />
             Crypto Trading Settings
@@ -409,7 +372,7 @@ export default function Backtest() {
               <select
                 value={leverage}
                 onChange={(e) => setLeverage(Number(e.target.value))}
-                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-accent-teal/50 focus:outline-none"
               >
                 <option value={1}>1x (No Leverage)</option>
                 <option value={2}>2x</option>
@@ -424,7 +387,7 @@ export default function Backtest() {
               <select
                 value={positionSizing}
                 onChange={(e) => setPositionSizing(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-accent-teal/50 focus:outline-none"
               >
                 <option value="fixed">Fixed %</option>
                 <option value="kelly">Kelly Criterion</option>
@@ -437,7 +400,7 @@ export default function Backtest() {
               <select
                 value={feeRate}
                 onChange={(e) => setFeeRate(Number(e.target.value))}
-                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-cyan-500 focus:outline-none"
+                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm focus:border-accent-teal/50 focus:outline-none"
               >
                 <option value={0.0002}>Maker 0.02%</option>
                 <option value={0.0005}>Taker 0.05%</option>
@@ -452,13 +415,13 @@ export default function Backtest() {
               id="useFunding"
               checked={useFunding}
               onChange={(e) => setUseFunding(e.target.checked)}
-              className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-500"
+              className="w-4 h-4 rounded border-slate-600 bg-accent-teal/20 text-accent-teal focus:ring-accent-teal/20"
             />
             <label htmlFor="useFunding" className="text-sm text-slate-400">
               Include funding rate costs (shorts pay ~0.01% per 8h)
             </label>
           </div>
-        </div>
+        </div>}
 
         {/* Error Message */}
         {error && (
@@ -472,7 +435,7 @@ export default function Backtest() {
         <button
           type="submit"
           disabled={loading}
-          className="w-full py-4 bg-cyan-500 hover:bg-cyan-400 disabled:bg-slate-700 text-navy-950 font-bold rounded-xl flex items-center justify-center gap-2 transition-colors"
+          className="w-full py-4 bg-gradient-to-r from-accent-teal to-accent-cyan hover:opacity-90 disabled:bg-slate-700 text-navy-950 font-bold rounded-xl flex items-center justify-center gap-2 transition-colors"
         >
           {loading ? (
             <>

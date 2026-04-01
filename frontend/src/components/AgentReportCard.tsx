@@ -29,7 +29,7 @@ export default function AgentReportCard({ title, icon, content, defaultOpen = fa
           </div>
           <h3 className="font-semibold text-white text-sm">{title}</h3>
         </div>
-        <button className="text-slate-400 hover:text-white transition-colors">
+        <button aria-label={open ? `Collapse ${title}` : `Expand ${title}`} aria-expanded={open} className="text-slate-400 hover:text-white transition-colors">
           {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
       </div>

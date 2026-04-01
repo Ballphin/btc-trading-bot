@@ -39,13 +39,15 @@ export default function DebatePanel({ type, data }: Props) {
       animate={{ opacity: 1, y: 0 }}
       className="glass overflow-hidden"
     >
-      <div className="flex border-b border-white/5">
+      <div role="tablist" aria-label={`${isInvestment ? 'Investment' : 'Risk'} debate perspectives`} className="flex border-b border-white/5">
         {tabs.map(tab => (
           <button
             key={tab.key}
+            role="tab"
+            aria-selected={active === tab.key}
             onClick={() => setActive(tab.key)}
             className={clsx(
-              'flex-1 px-4 py-3 text-sm font-medium transition-colors relative',
+              'flex-1 px-4 py-3 min-h-[44px] text-sm font-medium transition-colors relative',
               active === tab.key ? tab.color : 'text-slate-500 hover:text-slate-300',
             )}
           >
