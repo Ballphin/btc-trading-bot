@@ -146,4 +146,29 @@ class DeribitClient(BaseDataClient):
             return pd.DataFrame()
 
         result = data.get("result", [])
-        return pd.DataFrame(result) if result else pd.DataFrame()
+        if not result:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(result)
+        
+        # Calculate Implied Probability of expiring ITM using Delta as a proxy
+        if "instrument_name" in df.columns:
+            def extract_prob(row):
+                # Deribit book summary doesn't always expose greeks without a ticker call,
+                # but if we have delta available, we extract it. 
+                # Proxy: Delta of Call = Prob(ITM), |Delta| of Put = Prob(ITM)
+                prob = None
+                try:
+                    if isinstance(row.get("greeks"), dict) and "delta" in row["greeks"]:
+                        delta = row["greeks"]["delta"]
+                        if "-C" in row.get("instrument_name", ""):
+                            prob = delta * 100
+                        elif "-P" in row.get("instrument_name", ""):
+                            prob = abs(delta) * 100
+                except Exception:
+                    pass
+                return prob
+                
+            df["implied_probability"] = df.apply(extract_prob, axis=1)
+            
+        return df

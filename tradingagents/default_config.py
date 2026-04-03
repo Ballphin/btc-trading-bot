@@ -28,6 +28,7 @@ DEFAULT_CONFIG = {
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "prediction_market_data": "kalshi",  # Prediction Markets
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
@@ -47,5 +48,6 @@ DEFAULT_CONFIG = {
         "macro_data": "fred",                    # FRED API (M2, DXY, yields)
         "sentiment_data": "crypto",              # Alternative.me Fear & Greed
         "news_data": "yfinance",                 # yfinance news (works for crypto)
+        "prediction_market_data": "kalshi",      # Overwrites generic macro odds
     },
 }

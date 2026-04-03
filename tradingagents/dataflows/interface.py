@@ -37,6 +37,7 @@ from .crypto_news_scraper import (
     get_crypto_news as get_crypto_rss_news,
     get_crypto_global_news as get_crypto_rss_global_news,
 )
+from .kalshi_client import get_kalshi_macro_context as get_kalshi_macro
 
 # Configuration and routing logic
 from .config import get_config
@@ -92,6 +93,10 @@ TOOLS_CATEGORIES = {
         "description": "Zero-cache realtime snapshot: spot price, 1H candle, live funding",
         "tools": ["get_realtime_snapshot"]
     },
+    "prediction_market_data": {
+        "description": "Macro risk dashboard using Kalshi event probability odds",
+        "tools": ["get_kalshi_macro_context"]
+    },
 }
 
 VENDOR_LIST = [
@@ -100,6 +105,7 @@ VENDOR_LIST = [
     "crypto",
     "crypto_news",
     "fred",
+    "kalshi",
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -156,6 +162,8 @@ VENDOR_METHODS = {
     # Intraday & realtime (crypto-only, graceful fallback for equities)
     "get_intraday_data": {"crypto": get_crypto_intraday},
     "get_realtime_snapshot": {"crypto": get_crypto_realtime},
+    # Prediction Markets
+    "get_kalshi_macro_context": {"kalshi": get_kalshi_macro},
 }
 
 def get_category_for_method(method: str) -> str:

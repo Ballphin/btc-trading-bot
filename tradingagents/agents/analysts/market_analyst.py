@@ -11,6 +11,7 @@ from tradingagents.agents.utils.intraday_tools import (
     get_realtime_snapshot,
 )
 from tradingagents.dataflows.config import get_config
+from tradingagents.agents.utils.prediction_tools import get_prediction_markets
 
 
 def create_market_analyst(llm):
@@ -23,6 +24,7 @@ def create_market_analyst(llm):
             get_stock_data,
             get_indicators,
             get_intraday_data,
+            get_prediction_markets,
         ]
 
         # In live analysis (not backtest), also include realtime snapshot
@@ -57,7 +59,7 @@ Volume-Based Indicators:
 
 - Select indicators that provide diverse and complementary information. Avoid redundancy (e.g., do not select both rsi and stochrsi). Also briefly explain why they are suitable for the given market context. When you tool call, please use the exact name of the indicators provided above as they are defined parameters, otherwise your call will fail.
 
-**IMPORTANT workflow**: First call get_intraday_data to check intraday price action and context (VWAP, drawdown, funding momentum, taker ratio). Then call get_stock_data to retrieve daily OHLCV. Then use get_indicators for specific technical indicators. If get_realtime_snapshot is available, call it to get the latest live market conditions. Write a very detailed and nuanced report of the trends you observe, integrating both daily and intraday context. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
+**IMPORTANT workflow**: First call get_intraday_data to check intraday price action and context. Then call get_prediction_markets to fetch the Kalshi Macro Risk Dashboard and Deribit Option probabilities. Use these predictive probability values to synthesize deeper technical trends. Then call get_stock_data to retrieve daily OHLCV and get_indicators for technical indicators. If get_realtime_snapshot is available, call it to get the latest live market conditions. Write a very detailed and nuanced report of the trends you observe, integrating both daily and intraday context. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."""
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
         )
 
