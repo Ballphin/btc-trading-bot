@@ -94,7 +94,11 @@ def get_news_yfinance(
             filtered_count += 1
 
         if filtered_count == 0:
-            return f"No news found for {ticker} between {start_date} and {end_date}"
+            return (
+                f"[BACKTEST] No historical news available for {ticker} between "
+                f"{start_date} and {end_date}. yfinance only returns recent articles. "
+                f"Analysis for this date is limited to price action, technicals, and fundamentals."
+            )
 
         return f"## {ticker} News, from {start_date} to {end_date}:\n\n{news_str}"
 

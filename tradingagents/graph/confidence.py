@@ -233,27 +233,45 @@ class ConfidenceScorer:
         win_rate = win_rate_data["win_rate"] if win_rate_data else None
         sample_size = win_rate_data["sample_size"] if win_rate_data else 0
 
-        # Two-tier calibration
+        # Kelly contamination guard: require ≥30 trades before trusting
+        # knowledge-store win rates for Kelly sizing.  With fewer trades the
+        # win-rate estimate is too noisy and may come from low-coverage or
+        # simulated backtests — fall back to fixed 15% allocation.
+        _KELLY_MIN_TRADES = 30
+        _FIXED_FALLBACK_SIZE = 0.15
+        kelly_eligible = sample_size >= _KELLY_MIN_TRADES
+
+        # Two-tier calibration (always runs — it adjusts confidence, not sizing)
         calibrated, hedge_penalty = self.calibrate(
             llm_confidence=llm_confidence,
-            win_rate=win_rate,
-            sample_size=sample_size,
+            win_rate=win_rate if kelly_eligible else None,
+            sample_size=sample_size if kelly_eligible else 0,
             R=R,
             regime=regime,
             above_sma20=above_sma20,
             reasoning=reasoning,
         )
 
-        # Position sizing via corrected half-Kelly
-        position_size_pct, r_ratio, hold_scalar = self.kelly_position_size(
-            p=calibrated,
-            R=R,
-            entry_price=current_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            signal=signal,
-            max_hold_days=max_hold_days,
-        )
+        # Position sizing: Kelly when eligible, fixed fallback otherwise
+        if kelly_eligible:
+            position_size_pct, r_ratio, hold_scalar = self.kelly_position_size(
+                p=calibrated,
+                R=R,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                signal=signal,
+                max_hold_days=max_hold_days,
+            )
+        else:
+            hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+            position_size_pct = _FIXED_FALLBACK_SIZE * hold_scalar
+            r_ratio = None
+            if sample_size > 0:
+                logger.debug(
+                    f"Kelly skipped for {ticker}/{signal}: only {sample_size} trades "
+                    f"(need {_KELLY_MIN_TRADES}), using fixed {_FIXED_FALLBACK_SIZE*100:.0f}%"
+                )
 
         # Signal gating
         gate_key = self._gate_key(regime, above_sma20)

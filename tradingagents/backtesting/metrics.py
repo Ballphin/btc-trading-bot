@@ -1,6 +1,7 @@
 """Performance metrics for backtesting: Sharpe, Sortino, drawdown, win rate, etc."""
 
 import math
+from datetime import datetime
 from typing import List, Dict, Any
 
 
@@ -72,8 +73,16 @@ def compute_metrics(
     total_return = (final_value - initial_capital) / initial_capital
     total_pnl = final_value - initial_capital
 
-    # Annualized return
-    years = n_periods / trading_days_per_year if trading_days_per_year > 0 else 1
+    # Annualized return — use actual calendar span, not n_periods
+    try:
+        _fmt1 = "%Y-%m-%d %H:%M:%S" if " " in dates[0] else "%Y-%m-%d"
+        _fmt2 = "%Y-%m-%d %H:%M:%S" if " " in dates[-1] else "%Y-%m-%d"
+        _dt_first = datetime.strptime(dates[0], _fmt1)
+        _dt_last = datetime.strptime(dates[-1], _fmt2)
+        calendar_days = (_dt_last - _dt_first).days
+        years = calendar_days / 365.25 if calendar_days > 0 else (1 / trading_days_per_year)
+    except (ValueError, TypeError):
+        years = n_periods / trading_days_per_year if trading_days_per_year > 0 else 1
     annualized_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
 
     # Volatility
@@ -292,6 +301,7 @@ def compute_metrics(
         "end_date": dates[-1],
         "n_periods": n_periods,
         "sample_size_tier": sample_size_tier,
+        "sharpe_se": math.sqrt((1 + 0.5 * sharpe ** 2) / max(n_periods, 1)),
         # Risk management
         "stops_hit": stops_hit,
         "takes_hit": takes_hit,
@@ -345,6 +355,7 @@ def _empty_metrics(initial_capital: float) -> Dict[str, Any]:
         "end_date": "",
         "n_periods": 0,
         "sample_size_tier": "unreliable",
+        "sharpe_se": 0.0,
         # Risk management
         "stops_hit": 0,
         "takes_hit": 0,

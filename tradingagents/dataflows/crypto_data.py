@@ -12,7 +12,6 @@ import pandas as pd
 from stockstats import wrap
 
 from tradingagents.dataflows.coinbase_client import CoinbaseClient
-from tradingagents.dataflows.binance_client import BinanceClient
 from tradingagents.dataflows.deribit_client import DeribitClient
 from tradingagents.dataflows.bgeometrics_client import BGeometricsClient
 from tradingagents.dataflows.fred_client import FREDClient
@@ -40,12 +39,6 @@ def _to_coinbase_product(ticker: str) -> str:
     """Ensure ticker is in Coinbase format: BTC-USD"""
     base = _normalize_symbol(ticker)
     return f"{base}-USD"
-
-
-def _to_binance_symbol(ticker: str) -> str:
-    """Ensure ticker is in Binance format: BTCUSDT"""
-    base = _normalize_symbol(ticker)
-    return f"{base}USDT"
 
 
 def _to_deribit_instrument(ticker: str) -> str:
@@ -191,25 +184,24 @@ def get_crypto_indicators(
 
 def get_derivatives_data(symbol: str, curr_date: str) -> str:
     """
-    Binance funding rates + open interest + taker ratio,
+    Hyperliquid funding rates + open interest + premium (directional aggression),
     cross-referenced with Deribit perpetual funding rates.
 
     Returns a structured markdown report.
     """
-    bn = _get(BinanceClient, "binance")
+    hl = _get(HyperliquidClient, "hyperliquid")
     dr = _get(DeribitClient, "deribit")
 
-    bn_symbol = _to_binance_symbol(symbol)
+    base_asset = _normalize_symbol(symbol)
     dr_instrument = _to_deribit_instrument(symbol)
 
     start = (
         datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=30)
     ).strftime("%Y-%m-%d")
 
-    # Fetch all derivatives data
-    bn_funding = bn.get_funding_rates(bn_symbol, start, curr_date)
-    bn_oi = bn.get_open_interest_hist(bn_symbol, "1d", start, curr_date)
-    bn_taker = bn.get_taker_ratio(bn_symbol, "1d", start, curr_date)
+    # Fetch Hyperliquid data
+    hl_funding = hl.get_funding_history(base_asset, start, curr_date)
+    hl_ctx = hl.get_asset_context(base_asset)
     dr_funding = dr.get_funding_rate_history(dr_instrument, start, curr_date)
 
     lines = [
@@ -218,13 +210,13 @@ def get_derivatives_data(symbol: str, curr_date: str) -> str:
         "",
     ]
 
-    # Binance Funding Rates
-    lines.append("## Binance Funding Rates (8h)")
-    if not bn_funding.empty and "fundingRate" in bn_funding.columns:
-        latest_rate = float(bn_funding.iloc[-1]["fundingRate"])
-        avg_rate = bn_funding["fundingRate"].astype(float).mean()
-        max_rate = bn_funding["fundingRate"].astype(float).max()
-        min_rate = bn_funding["fundingRate"].astype(float).min()
+    # Hyperliquid Funding Rates (historical)
+    lines.append("## Funding Rates — Hyperliquid (8h settlements)")
+    if not hl_funding.empty and "funding_rate" in hl_funding.columns:
+        latest_rate = float(hl_funding.iloc[-1]["funding_rate"])
+        avg_rate = hl_funding["funding_rate"].mean()
+        max_rate = hl_funding["funding_rate"].max()
+        min_rate = hl_funding["funding_rate"].min()
         lines.append(f"- **Latest realized**: {latest_rate:.6f}")
         lines.append(f"- **30d average**: {avg_rate:.6f}")
         lines.append(f"- **30d range**: [{min_rate:.6f}, {max_rate:.6f}]")
@@ -233,9 +225,9 @@ def get_derivatives_data(symbol: str, curr_date: str) -> str:
         elif latest_rate < -0.0003:
             lines.append("- ⚠️ Elevated negative funding — shorts paying longs, potential short squeeze risk")
 
-        # Funding Rate Momentum (HIGH 7): predicted vs realized + direction
-        if len(bn_funding) >= 2:
-            prev_rate = float(bn_funding.iloc[-2]["fundingRate"])
+        # Funding Rate Momentum: predicted vs realized + direction
+        if len(hl_funding) >= 2:
+            prev_rate = float(hl_funding.iloc[-2]["funding_rate"])
             funding_8h_change = latest_rate - prev_rate
             if funding_8h_change > 0.0001:
                 direction = "rising"
@@ -246,56 +238,60 @@ def get_derivatives_data(symbol: str, curr_date: str) -> str:
             lines.append(f"- **8h change**: {funding_8h_change:+.6f} ({direction})")
             lines.append(f"- **Previous settlement**: {prev_rate:.6f}")
 
-        # Add Hyperliquid predicted funding if available
-        try:
-            base_asset = _normalize_symbol(symbol)
-            hl = _get(HyperliquidClient, "hyperliquid")
-            predicted = hl.get_predicted_funding(base_asset)
-            if predicted:
-                pred_rate = predicted["predicted_rate"]
-                lines.append(f"- **Predicted (next settlement, Hyperliquid)**: {pred_rate:.6f}")
-                pred_vs_realized = pred_rate - latest_rate
-                pred_dir = "rising" if pred_vs_realized > 0.0001 else ("falling" if pred_vs_realized < -0.0001 else "stable")
-                lines.append(f"- **Predicted vs realized**: {pred_vs_realized:+.6f} ({pred_dir})")
-        except Exception as e:
-            logger.debug(f"Hyperliquid predicted funding unavailable: {e}")
+        # Predicted funding from asset context
+        if hl_ctx:
+            pred_rate = hl_ctx["funding"]
+            lines.append(f"- **Predicted (next settlement)**: {pred_rate:.6f}")
+            pred_vs_realized = pred_rate - latest_rate
+            pred_dir = "rising" if pred_vs_realized > 0.0001 else ("falling" if pred_vs_realized < -0.0001 else "stable")
+            lines.append(f"- **Predicted vs realized**: {pred_vs_realized:+.6f} ({pred_dir})")
     else:
         lines.append("- Data unavailable")
     lines.append("")
 
-    # Open Interest
-    lines.append("## Open Interest (Binance)")
-    if not bn_oi.empty and "sumOpenInterest" in bn_oi.columns:
-        latest_oi = bn_oi.iloc[-1]
-        lines.append(f"- **Latest OI**: {float(latest_oi['sumOpenInterest']):,.2f} BTC")
-        lines.append(f"- **Latest OI Value**: ${float(latest_oi['sumOpenInterestValue']):,.0f}")
-        if len(bn_oi) >= 7:
-            oi_7d_ago = bn_oi.iloc[-7]["sumOpenInterest"]
-            oi_change = ((float(latest_oi["sumOpenInterest"]) - float(oi_7d_ago)) / float(oi_7d_ago) * 100)
-            lines.append(f"- **7d change**: {oi_change:+.1f}%")
+    # Open Interest + Volume (from asset context snapshot)
+    lines.append("## Open Interest & Volume — Hyperliquid")
+    if hl_ctx:
+        oi = hl_ctx["openInterest"]
+        mark_px = hl_ctx["markPx"]
+        oi_value = oi * mark_px if mark_px > 0 else 0
+        day_vol = hl_ctx["dayNtlVlm"]
+        lines.append(f"- **Open Interest**: {oi:,.2f} contracts")
+        lines.append(f"- **OI Notional Value**: ${oi_value:,.0f}")
+        lines.append(f"- **24h Notional Volume**: ${day_vol:,.0f}")
+        if day_vol > 0 and oi_value > 0:
+            turnover = day_vol / oi_value
+            lines.append(f"- **OI Turnover (vol/OI)**: {turnover:.2f}x")
     else:
         lines.append("- Data unavailable")
     lines.append("")
 
-    # Taker Buy/Sell Ratio
-    lines.append("## Taker Buy/Sell Ratio (Binance)")
-    if not bn_taker.empty and "buySellRatio" in bn_taker.columns:
-        latest_ratio = float(bn_taker.iloc[-1]["buySellRatio"])
-        avg_ratio = bn_taker["buySellRatio"].astype(float).mean()
-        lines.append(f"- **Latest**: {latest_ratio:.4f}")
-        lines.append(f"- **30d average**: {avg_ratio:.4f}")
-        if latest_ratio > 1.1:
-            lines.append("- Buyers dominating — bullish pressure")
-        elif latest_ratio < 0.9:
-            lines.append("- Sellers dominating — bearish pressure")
+    # Directional Aggression (premium — replaces Binance taker ratio)
+    lines.append("## Directional Aggression — Hyperliquid Premium")
+    if hl_ctx:
+        premium = hl_ctx["premium"]
+        mark_px = hl_ctx["markPx"]
+        oracle_px = hl_ctx["oraclePx"]
+        prev_day_px = hl_ctx["prevDayPx"]
+        premium_bps = premium * 10000
+        lines.append(f"- **Mark Price**: ${mark_px:,.2f}")
+        lines.append(f"- **Oracle Price**: ${oracle_px:,.2f}")
+        lines.append(f"- **Premium**: {premium_bps:+.1f} bps ({premium:.6f})")
+        if premium > 0.0005:
+            lines.append("- Perp trading above index — **buyers aggressing**, bullish pressure")
+        elif premium < -0.0005:
+            lines.append("- Perp trading below index — **sellers aggressing**, bearish pressure")
         else:
-            lines.append("- Balanced buy/sell pressure")
+            lines.append("- Balanced — perp near index price")
+        if prev_day_px > 0:
+            day_change = (mark_px - prev_day_px) / prev_day_px * 100
+            lines.append(f"- **24h price change**: {day_change:+.2f}%")
     else:
         lines.append("- Data unavailable")
     lines.append("")
 
-    # Deribit Perp Funding
-    lines.append("## Deribit Perpetual Funding (hourly)")
+    # Deribit Perp Funding (cross-reference)
+    lines.append("## Deribit Perpetual Funding (hourly, cross-reference)")
     if not dr_funding.empty and "interest_8h" in dr_funding.columns:
         latest_8h = dr_funding.iloc[-1].get("interest_8h", "N/A")
         lines.append(f"- **Latest 8h rate**: {latest_8h}")
@@ -420,25 +416,24 @@ def get_intraday_summary(symbol: str, curr_date: str) -> str:
     lines.append(f"- **Worst-case drawdown from peak**: {max_dd:.2f}%")
     lines.append("")
 
-    # Binance taker buy/sell ratio (latest)
+    # Directional aggression (Hyperliquid premium)
     try:
-        bn = _get(BinanceClient, "binance")
-        bn_symbol = _to_binance_symbol(symbol)
-        taker_df = bn.get_taker_ratio(bn_symbol, "1h", start_str, end_str)
-        if not taker_df.empty and "buySellRatio" in taker_df.columns:
-            latest_ratio = float(taker_df.iloc[-1]["buySellRatio"])
-            lines.append(f"## Cross-Venue Volume Signal")
-            lines.append(f"- **Binance taker buy/sell ratio (latest 1h)**: {latest_ratio:.4f}")
-            if latest_ratio > 1.1:
-                lines.append("- Buyers aggressing — bullish pressure")
-            elif latest_ratio < 0.9:
-                lines.append("- Sellers aggressing — bearish pressure")
+        hl = _get(HyperliquidClient, "hyperliquid")
+        hl_ctx = hl.get_asset_context(base_asset)
+        if hl_ctx:
+            premium = hl_ctx["premium"]
+            premium_bps = premium * 10000
+            lines.append(f"## Directional Aggression — Hyperliquid Premium")
+            lines.append(f"- **Premium**: {premium_bps:+.1f} bps ({premium:.6f})")
+            if premium > 0.0005:
+                lines.append("- Perp above index — **buyers aggressing**, bullish pressure")
+            elif premium < -0.0005:
+                lines.append("- Perp below index — **sellers aggressing**, bearish pressure")
             else:
-                lines.append("- Balanced aggression")
-            lines.append(f"- *(Coinbase volume is ~5-10% of total; Binance taker ratio provides cross-venue context)*")
+                lines.append("- Balanced — perp near index price")
             lines.append("")
     except Exception as e:
-        logger.warning(f"Binance taker ratio failed for {symbol}: {e}")
+        logger.warning(f"Hyperliquid premium failed for {symbol}: {e}")
 
     # Funding rate change (predicted - last realized)
     try:
@@ -534,19 +529,25 @@ def get_realtime_snapshot(symbol: str) -> str:
     except Exception as e:
         logger.warning(f"Realtime funding failed for {symbol}: {e}")
 
-    # 24h change from Binance taker ratio
+    # Directional aggression (Hyperliquid premium, zero cache)
     try:
-        bn = _get(BinanceClient, "binance")
-        bn_symbol = _to_binance_symbol(symbol)
-        start_24h = (now - timedelta(hours=24)).strftime("%Y-%m-%d")
-        end_24h = now.strftime("%Y-%m-%d")
-        taker_df = bn.get_taker_ratio(bn_symbol, "1h", start_24h, end_24h)
-        if not taker_df.empty and "buySellRatio" in taker_df.columns:
-            latest = float(taker_df.iloc[-1]["buySellRatio"])
+        hl = _get(HyperliquidClient, "hyperliquid")
+        hl_ctx = hl.get_asset_context(base_asset, max_age_override=0)
+        if hl_ctx:
+            premium = hl_ctx["premium"]
+            premium_bps = premium * 10000
+            day_vol = hl_ctx["dayNtlVlm"]
             lines.append(f"## Market Aggression")
-            lines.append(f"- **Binance taker ratio (latest 1h)**: {latest:.4f}")
+            lines.append(f"- **Premium**: {premium_bps:+.1f} bps ({premium:.6f})")
+            if premium > 0.0005:
+                lines.append("- Perp above index — **buyers aggressing**")
+            elif premium < -0.0005:
+                lines.append("- Perp below index — **sellers aggressing**")
+            else:
+                lines.append("- Balanced — perp near index")
+            lines.append(f"- **24h Notional Volume**: ${day_vol:,.0f}")
             lines.append("")
     except Exception as e:
-        logger.warning(f"Realtime taker ratio failed for {symbol}: {e}")
+        logger.warning(f"Realtime premium failed for {symbol}: {e}")
 
     return "\n".join(lines)

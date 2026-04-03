@@ -217,6 +217,46 @@ class HyperliquidClient(BaseDataClient):
             logger.warning(f"Hyperliquid spot price failed for {coin}: {e}")
             return None
 
+    # ── Asset Context (full snapshot) ─────────────────────────────────
+
+    def get_asset_context(
+        self, coin: str, max_age_override: int = None
+    ) -> Optional[dict]:
+        """Fetch full asset context from metaAndAssetCtxs.
+
+        Returns dict with: funding, premium, openInterest, dayNtlVlm,
+        markPx, oraclePx, prevDayPx, or None on failure.
+        """
+        payload = {"type": "metaAndAssetCtxs"}
+        try:
+            data = self._post_request(
+                payload,
+                cache_prefix="hl-meta",
+                max_age_override=max_age_override,
+            )
+            if isinstance(data, list) and len(data) >= 2:
+                meta = data[0]
+                ctxs = data[1]
+                universe = meta.get("universe", [])
+                for i, asset in enumerate(universe):
+                    if asset.get("name", "").upper() == coin.upper():
+                        if i < len(ctxs):
+                            ctx = ctxs[i]
+                            return {
+                                "coin": coin,
+                                "funding": float(ctx.get("funding", 0)),
+                                "premium": float(ctx.get("premium", 0)),
+                                "openInterest": float(ctx.get("openInterest", 0)),
+                                "dayNtlVlm": float(ctx.get("dayNtlVlm", 0)),
+                                "markPx": float(ctx.get("markPx", 0)),
+                                "oraclePx": float(ctx.get("oraclePx", 0)),
+                                "prevDayPx": float(ctx.get("prevDayPx", 0)),
+                            }
+            return None
+        except Exception as e:
+            logger.warning(f"Hyperliquid asset context failed for {coin}: {e}")
+            return None
+
     # ── Funding Rates ─────────────────────────────────────────────────
 
     def get_predicted_funding(

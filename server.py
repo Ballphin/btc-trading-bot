@@ -12,6 +12,9 @@ Provides:
 - GET  /api/backtest/stream/{id} — SSE stream of backtest progress
 - GET  /api/backtest/{id}  — Get backtest results
 - GET  /api/backtest/results — List historical backtests
+- POST /api/shadow/record  — Record a shadow (paper-trade) decision
+- GET  /api/shadow/decisions/{ticker}  — Retrieve shadow decisions
+- GET  /api/shadow/score/{ticker}      — Score shadow decisions vs outcomes
 """
 
 import asyncio
@@ -387,6 +390,34 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         print(f"[Analysis {job_id}] Analysis complete, sending done event")
         jobs[job_id]["result"] = result
         jobs[job_id]["status"] = "done"
+
+        # Auto-record shadow decision for later scoring
+        try:
+            shadow_dir = EVAL_RESULTS_DIR / "shadow" / ticker
+            shadow_dir.mkdir(parents=True, exist_ok=True)
+            shadow_entry = {
+                "ticker": ticker,
+                "date": trade_date,
+                "signal": decision_signal,
+                "price": result.get("stop_loss_price", 0),  # fallback
+                "confidence": confidence,
+                "stop_loss": stop_loss_price,
+                "take_profit": take_profit_price,
+                "reasoning": reasoning,
+                "source": "live_analysis",
+                "recorded_at": datetime.now().isoformat(),
+            }
+            # Try to get a real price for shadow record
+            try:
+                _shadow_price = _get_price_on_date(ticker, trade_date)
+                if _shadow_price:
+                    shadow_entry["price"] = _shadow_price
+            except Exception:
+                pass
+            with open(shadow_dir / "decisions.jsonl", "a") as _sf:
+                _sf.write(json.dumps(shadow_entry, default=str) + "\n")
+        except Exception as _shadow_err:
+            print(f"[Analysis {job_id}] Shadow record failed (non-fatal): {_shadow_err}")
 
         eq.put({"event": "decision", "signal": decision_signal})
         eq.put({"event": "done", "result": result})
@@ -845,6 +876,21 @@ def _run_backtest(job_id: str, ticker: str, start_date: str, end_date: str, mode
         }
         result["created_at"] = datetime.now().isoformat()
         
+        # Emit coverage warning if < 70%
+        cov = result.get("coverage", {})
+        cov_pct = cov.get("coverage_pct", 100)
+        if cov_pct < 70:
+            eq.put({
+                "event": "warning",
+                "type": "low_coverage",
+                "coverage_pct": cov_pct,
+                "dates_requested": cov.get("dates_requested", 0),
+                "dates_processed": cov.get("dates_processed", 0),
+                "message": f"Only {cov_pct:.0f}% of requested dates were processed. "
+                           f"Sharpe, Sortino, and Calmar ratios may be unreliable."
+            })
+            log(f"WARNING: Low coverage ({cov_pct:.0f}%) — metrics may be unreliable")
+        
         # Persist to disk
         log("Step 5/5: Saving results to disk...")
         eq.put({
@@ -927,6 +973,7 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             stop_loss_price = date_data.get("stop_loss_price")
             take_profit_price = date_data.get("take_profit_price")
             max_hold_days = date_data.get("max_hold_days")
+            log_source = date_data.get("source", "real_analysis")
 
             price = _get_price_on_date(ticker, trade_date)
             if price is None:
@@ -969,6 +1016,7 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
                 "position": portfolio.position_side.value,
                 "stop_loss_price": stop_loss_price,
                 "take_profit_price": take_profit_price,
+                "source": log_source,
             })
             
             eq.put({
@@ -978,6 +1026,7 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
                 "price": price,
                 "action": action,
                 "portfolio_value": portfolio.portfolio_value(price),
+                "source": log_source,
             })
             
         except Exception as e:
@@ -1020,6 +1069,10 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
         benchmark_return_pct=benchmark_return_pct,
     )
     
+    dates_requested = len(trade_dates)
+    dates_processed = len(decisions)
+    coverage_pct = (dates_processed / dates_requested * 100) if dates_requested > 0 else 0
+
     return {
         "metrics": metrics,
         "portfolio_stats": portfolio_stats,
@@ -1042,6 +1095,11 @@ def _replay_backtest(ticker: str, trade_dates: List[str], initial_capital: float
             for t in portfolio.trade_history
         ],
         "errors": errors,
+        "coverage": {
+            "dates_requested": dates_requested,
+            "dates_processed": dates_processed,
+            "coverage_pct": round(coverage_pct, 1),
+        },
     }
 
 
@@ -1313,6 +1371,11 @@ def _hybrid_backtest(job_id: str, ticker: str, trade_dates: List[str], initial_c
             "simulation_count": simulation_count,
             "total_dates": len(trade_dates),
         },
+        "coverage": {
+            "dates_requested": len(trade_dates),
+            "dates_processed": len(decisions),
+            "coverage_pct": round(len(decisions) / len(trade_dates) * 100, 1) if trade_dates else 0,
+        },
     }
 
 
@@ -1415,6 +1478,7 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
         for t in engine.portfolio.trade_history
     ]
     
+    n_decisions = len(raw_result.get("decisions", []))
     result = {
         "metrics": crypto_metrics,
         "portfolio_stats": engine.portfolio.get_stats(),
@@ -1422,6 +1486,11 @@ def _simulate_backtest(job_id: str, ticker: str, trade_dates: List[str], initial
         "equity_curve": engine.portfolio.equity_curve,
         "trade_history": trade_history,
         "errors": raw_result.get("errors", []),
+        "coverage": {
+            "dates_requested": len(trade_dates),
+            "dates_processed": n_decisions if n_decisions > 0 else len(trade_history),
+            "coverage_pct": round((n_decisions if n_decisions > 0 else len(trade_history)) / len(trade_dates) * 100, 1) if trade_dates else 0,
+        },
     }
     
     log(f"Simulation result: {len(trade_history)} trade log entries, {crypto_metrics.get('total_trades', 0)} closed trades")
@@ -1688,6 +1757,148 @@ async def get_backtest_result(job_id: str):
                 return {"job_id": job_id, "status": "completed", "result": _sanitize_json(json.load(f))}
     
     raise HTTPException(status_code=404, detail="Backtest job not found")
+
+
+# ── Shadow Mode MVP ───────────────────────────────────────────────────
+
+SHADOW_DIR = EVAL_RESULTS_DIR / "shadow"
+
+
+class ShadowDecision(BaseModel):
+    ticker: str
+    date: str  # yyyy-mm-dd
+    signal: str  # BUY, SELL, SHORT, HOLD, etc.
+    price: float
+    confidence: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    reasoning: Optional[str] = None
+    source: str = "live_analysis"  # live_analysis | manual
+
+
+@app.post("/api/shadow/record")
+async def shadow_record(decision: ShadowDecision):
+    """Record a shadow (paper-trade) decision without executing."""
+    ticker = decision.ticker.upper()
+    ticker_dir = SHADOW_DIR / ticker
+    ticker_dir.mkdir(parents=True, exist_ok=True)
+
+    entry = {
+        "ticker": ticker,
+        "date": decision.date,
+        "signal": decision.signal.upper(),
+        "price": decision.price,
+        "confidence": decision.confidence,
+        "stop_loss": decision.stop_loss,
+        "take_profit": decision.take_profit,
+        "reasoning": decision.reasoning,
+        "source": decision.source,
+        "recorded_at": datetime.now().isoformat(),
+    }
+
+    # Append to JSONL file (one line per decision, fast append)
+    log_file = ticker_dir / "decisions.jsonl"
+    with open(log_file, "a") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+    return {"status": "recorded", "ticker": ticker, "date": decision.date, "signal": entry["signal"]}
+
+
+@app.get("/api/shadow/decisions/{ticker}")
+async def shadow_decisions(ticker: str, limit: int = Query(default=100, le=500)):
+    """Retrieve shadow decisions for a ticker."""
+    ticker = ticker.upper()
+    log_file = SHADOW_DIR / ticker / "decisions.jsonl"
+    if not log_file.exists():
+        return {"ticker": ticker, "decisions": []}
+
+    decisions = []
+    for line in log_file.read_text().strip().split("\n"):
+        if line:
+            try:
+                decisions.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Most recent first
+    decisions.reverse()
+    return {"ticker": ticker, "decisions": decisions[:limit]}
+
+
+@app.get("/api/shadow/score/{ticker}")
+async def shadow_score(ticker: str):
+    """Score shadow decisions against actual market outcomes.
+
+    For each past decision, fetches the actual price N days later
+    and computes whether the signal would have been profitable.
+    """
+    ticker = ticker.upper()
+    log_file = SHADOW_DIR / ticker / "decisions.jsonl"
+    if not log_file.exists():
+        raise HTTPException(status_code=404, detail=f"No shadow decisions for {ticker}")
+
+    decisions = []
+    for line in log_file.read_text().strip().split("\n"):
+        if line:
+            try:
+                decisions.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not decisions:
+        raise HTTPException(status_code=404, detail=f"No shadow decisions for {ticker}")
+
+    scored = []
+    correct = 0
+    total_scored = 0
+
+    for d in decisions:
+        signal = d.get("signal", "HOLD")
+        entry_price = d.get("price", 0)
+        decision_date = d.get("date", "")
+        if signal == "HOLD" or entry_price <= 0:
+            continue
+
+        # Get price 7 days later for outcome
+        try:
+            outcome_date = (datetime.strptime(decision_date, "%Y-%m-%d") + timedelta(days=7)).strftime("%Y-%m-%d")
+            outcome_price = _get_price_on_date(ticker, outcome_date)
+            if outcome_price is None:
+                scored.append({**d, "outcome": "pending", "outcome_price": None, "pnl_pct": None})
+                continue
+
+            if signal in ("BUY", "OVERWEIGHT"):
+                pnl_pct = (outcome_price - entry_price) / entry_price * 100
+            elif signal in ("SHORT", "SELL"):
+                pnl_pct = (entry_price - outcome_price) / entry_price * 100
+            else:
+                pnl_pct = 0.0
+
+            is_correct = pnl_pct > 0
+            if is_correct:
+                correct += 1
+            total_scored += 1
+
+            scored.append({
+                **d,
+                "outcome": "correct" if is_correct else "incorrect",
+                "outcome_price": outcome_price,
+                "outcome_date": outcome_date,
+                "pnl_pct": round(pnl_pct, 2),
+            })
+        except Exception:
+            scored.append({**d, "outcome": "error", "outcome_price": None, "pnl_pct": None})
+
+    accuracy = (correct / total_scored * 100) if total_scored > 0 else None
+
+    return {
+        "ticker": ticker,
+        "total_decisions": len(decisions),
+        "scored": total_scored,
+        "correct": correct,
+        "accuracy_pct": round(accuracy, 1) if accuracy is not None else None,
+        "decisions": scored[:100],
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────────

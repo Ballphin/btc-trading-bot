@@ -118,6 +118,7 @@ class Portfolio:
         use_funding: bool = True,
         position_sizing: str = "fixed",  # fixed, kelly, volatility, atr_risk
         risk_per_trade: float = 0.01,  # 1% risk per trade for ATR sizing
+        slippage_bps: float = 5.0,  # Slippage in basis points (5 for BTC, 15 for alts)
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
@@ -129,6 +130,7 @@ class Portfolio:
         self.use_funding = use_funding
         self.position_sizing = position_sizing
         self.risk_per_trade = risk_per_trade
+        self.slippage_bps = slippage_bps
         
         self.current_position: Optional[Position] = None
         self.closed_positions: List[Position] = []
@@ -247,8 +249,10 @@ class Portfolio:
         # Charge funding every interval, not just on signal changes
         if hours_passed >= self.funding_interval_hours:
             self.last_funding_date = date
-            # If API found dynamic rate, use it, else default fallback
-            funding_rate = actual_rate if actual_rate is not None else 0.0001
+            # If API found dynamic rate, use it, else zero (don't fabricate costs)
+            funding_rate = actual_rate if actual_rate is not None else 0.0
+            if actual_rate is None:
+                logger.debug(f"[{date}] No funding rate data — defaulting to 0.0")
             notional = self.current_position.size * price
             funding_cost = notional * funding_rate
             
@@ -325,6 +329,15 @@ class Portfolio:
         signal = signal.upper().strip()
         action = "HOLD — no action"
         current_side = self.position_side
+
+        # Apply slippage to execution price (adverse fill simulation)
+        slippage_mult = self.slippage_bps / 10_000
+        if signal in ("BUY", "OVERWEIGHT"):
+            price = price * (1 + slippage_mult)  # buy higher
+        elif signal in ("SELL", "COVER", "UNDERWEIGHT"):
+            price = price * (1 - slippage_mult)  # sell lower
+        elif signal == "SHORT":
+            price = price * (1 - slippage_mult)  # short entry lower
         
         # Calculate funding costs first (continuous funding)
         funding_cost = self._calculate_funding(date, price, funding_rate)
