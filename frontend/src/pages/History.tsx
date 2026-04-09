@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, Activity } from 'lucide-react';
+import { ChevronRight, ChevronDown, Activity, Clock } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import { fetchTickers, fetchAnalyses, type TickerInfo, type AnalysisSummary } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
@@ -12,6 +12,7 @@ export default function History() {
   const [tickers, setTickers] = useState<TickerInfo[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchTickers().then(setTickers).catch(() => {}).finally(() => setLoading(false));
@@ -21,8 +22,30 @@ export default function History() {
     if (selectedTicker) {
       setLoading(true);
       fetchAnalyses(selectedTicker).then(setAnalyses).catch(() => setAnalyses([])).finally(() => setLoading(false));
+      setExpandedDates(new Set()); // Reset expansions when ticker changes
     }
   }, [selectedTicker]);
+
+  // Group analyses by date
+  const groupedAnalyses = useMemo(() => {
+    const groups: { date: string, items: AnalysisSummary[] }[] = [];
+    analyses.forEach(a => {
+      let group = groups.find(g => g.date === a.date);
+      if (!group) {
+        group = { date: a.date, items: [] };
+        groups.push(group);
+      }
+      group.items.push(a);
+    });
+    return groups;
+  }, [analyses]);
+
+  const toggleGroup = (date: string) => {
+    const next = new Set(expandedDates);
+    if (next.has(date)) next.delete(date);
+    else next.add(date);
+    setExpandedDates(next);
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8">
@@ -71,20 +94,73 @@ export default function History() {
           ) : (
             <div className="space-y-3">
               <h2 className="text-lg font-semibold text-white mb-4">{selectedTicker} — {analyses.length} {analyses.length === 1 ? 'analysis' : 'analyses'}</h2>
-              {analyses.map((a, i) => (
-                <Link
-                  key={a.date}
-                  to={`/history/${selectedTicker}/${a.date}`}
-                  className="glass-static px-4 py-3 flex items-center justify-between group no-underline animate-fade-in-up"
-                  style={{ display: 'flex', animationDelay: `${i * 0.03}s` }}
-                >
-                  <span className="font-medium text-white text-sm tabular-nums">{a.date}</span>
-                  <div className="flex items-center gap-3">
-                    <SignalBadge signal={a.signal} size="sm" />
-                    <ChevronRight className="w-4 h-4 text-slate-600 group-hover:text-accent-teal transition-colors" />
+              {groupedAnalyses.map((group, i) => {
+                const isSingleDaily = group.items.length === 1 && !group.items[0].time;
+                const isExpanded = expandedDates.has(group.date);
+
+                return (
+                  <div
+                    key={group.date}
+                    className="glass-static flex flex-col overflow-hidden animate-fade-in-up"
+                    style={{ animationDelay: `${i * 0.03}s` }}
+                  >
+                    {isSingleDaily ? (
+                      <Link
+                        to={`/history/${selectedTicker}/${group.items[0].candle_time || group.items[0].date}`}
+                        className="px-4 py-3 flex items-center justify-between no-underline hover:bg-white/5 transition-colors group/link"
+                      >
+                        <span className="font-medium text-white text-sm tabular-nums">{group.date}</span>
+                        <div className="flex items-center gap-3">
+                          <SignalBadge signal={group.items[0].signal} size="sm" />
+                          <ChevronRight className="w-4 h-4 text-slate-600 group-hover/link:text-accent-teal transition-colors" />
+                        </div>
+                      </Link>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => toggleGroup(group.date)}
+                          className="px-4 py-3 flex items-center justify-between w-full hover:bg-white/5 transition-colors"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-white text-sm tabular-nums">{group.date}</span>
+                            <span className="text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">
+                              {group.items.length} analyses
+                            </span>
+                          </div>
+                          {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-slate-400" />
+                          ) : (
+                            <ChevronRight className="w-4 h-4 text-slate-500" />
+                          )}
+                        </button>
+                        
+                        {isExpanded && (
+                          <div className="bg-slate-900/40 border-t border-slate-800/80 divide-y divide-slate-800/50">
+                            {group.items.map(a => (
+                              <Link
+                                key={a.candle_time || a.date}
+                                to={`/history/${selectedTicker}/${a.candle_time || a.date}`}
+                                className="px-4 py-2.5 flex items-center justify-between no-underline hover:bg-white/5 transition-colors pl-8 group/sublink"
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Clock className="w-3.5 h-3.5 text-slate-500" />
+                                  <span className="text-sm text-slate-300 tabular-nums">
+                                    {a.time || '12:00'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <SignalBadge signal={a.signal} size="sm" />
+                                  <ChevronRight className="w-4 h-4 text-slate-600 group-hover/sublink:text-accent-teal transition-colors" />
+                                </div>
+                              </Link>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                </Link>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

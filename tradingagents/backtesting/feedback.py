@@ -104,10 +104,35 @@ class BacktestFeedbackGenerator:
         lessons = []
         
         # Aggregate by (signal_type, regime)
-        signal_stats = defaultdict(lambda: {"wins": 0, "losses": 0, "total_return": 0.0, "count": 0})
+        signal_stats = defaultdict(lambda: {
+            "wins": 0, "losses": 0, "total_return": 0.0, "count": 0,
+            "stop_outs": 0,
+        })
         
         for bt in backtests:
             regime = bt.get("regime", "unknown")
+
+            # Prefer actual trade P&L from closed positions (includes stops, funding, fees)
+            trade_history = bt.get("trade_history", [])
+            if trade_history:
+                for trade in trade_history:
+                    signal = trade.get("signal", "").upper()
+                    if not signal or signal == "HOLD":
+                        continue
+                    pnl = trade.get("pnl", 0)
+                    key = (signal, regime)
+                    signal_stats[key]["count"] += 1
+                    signal_stats[key]["total_return"] += pnl / max(trade.get("entry_price", 1), 1e-9)
+                    if pnl > 0:
+                        signal_stats[key]["wins"] += 1
+                    else:
+                        signal_stats[key]["losses"] += 1
+                    # Track stop-outs separately
+                    if trade.get("exit_reason") == "stop_loss":
+                        signal_stats[key]["stop_outs"] += 1
+                continue
+
+            # Fallback: use decision price comparison (less accurate, no stop/fee accounting)
             decisions = bt.get("decisions", [])
             for i, decision in enumerate(decisions):
                 signal = decision.get("signal", "").upper()
@@ -168,6 +193,25 @@ class BacktestFeedbackGenerator:
                 "sample_size": stats["count"],
                 "confidence": "high" if stats["count"] >= 10 else "medium",
             })
+
+            # Stop-out rate lesson — tracked separately from signal accuracy
+            stop_outs = stats.get("stop_outs", 0)
+            if stop_outs > 0 and stats["count"] >= 5:
+                stop_out_rate = stop_outs / stats["count"]
+                if stop_out_rate > 0.60:
+                    lessons.append({
+                        "category": "risk_management",
+                        "subcategory": "stop_out_rate",
+                        "signal_type": signal,
+                        "regime": regime,
+                        "lesson": (
+                            f"Stops hit {stop_out_rate:.0%} of {signal} trades in {regime_label} markets for {ticker}. "
+                            f"Consider widening the ATR multiplier to avoid premature stop-outs."
+                        ),
+                        "stop_out_rate": stop_out_rate,
+                        "sample_size": stats["count"],
+                        "confidence": "high" if stats["count"] >= 10 else "medium",
+                    })
         
         return lessons
     

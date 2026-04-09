@@ -6,7 +6,7 @@ import ProgressStepper, { type StepState } from '../components/ProgressStepper';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
 import SignalBadge from '../components/SignalBadge';
-import ReactMarkdown from 'react-markdown';
+import FinalDecisionCard from '../components/FinalDecisionCard';
 import { startAnalysis, streamAnalysis, type SSEEvent } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 
@@ -295,7 +295,11 @@ export default function Analyze() {
                 <SignalBadge signal={state.decision} size="lg" confidence={state.confidence} />
               </div>
               <div className="markdown-content text-sm max-h-96 overflow-y-auto">
-                <ReactMarkdown>{state.finalReport}</ReactMarkdown>
+                <FinalDecisionCard
+                  text={state.finalReport}
+                  signal={state.decision}
+                  confidence={state.confidence}
+                />
               </div>
             </motion.div>
           )}

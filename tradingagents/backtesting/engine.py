@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 
 import yfinance as yf
 
+from tradingagents.backtesting.context import BACKTEST_MODE
+
 from tradingagents.backtesting.portfolio import Portfolio
 from tradingagents.backtesting.metrics import compute_metrics
 from tradingagents.backtesting.report import generate_report
@@ -338,6 +340,7 @@ class BacktestEngine:
             graph._rebuild_graph_for_asset(self.ticker, self.selected_analysts)
 
         # Run the pipeline on each date
+        BACKTEST_MODE.set(True)
         for i, trade_date in enumerate(trade_dates):
             logger.info(f"[{i+1}/{len(trade_dates)}] Processing {trade_date}...")
 
@@ -363,7 +366,7 @@ class BacktestEngine:
                     from tradingagents.graph.confidence import ConfidenceScorer
                     from tradingagents.backtesting.regime import detect_regime_context
                     scorer = ConfidenceScorer()
-                    regime_ctx = detect_regime_context(self.ticker)
+                    regime_ctx = detect_regime_context(self.ticker, trade_date)
                     scored = scorer.score(
                         ticker=self.ticker,
                         signal=signal,
@@ -378,7 +381,7 @@ class BacktestEngine:
                     else:
                         kelly_size = scored.get("position_size_pct", self.position_size_pct)
                 except Exception as e:
-                    logger.debug(f"Kelly sizing skipped on {trade_date}: {e}")
+                    logger.warning(f"Kelly sizing skipped on {trade_date}: {e}")
 
                 # Calculate dynamic ATR and volatility for advanced position sizing
                 atr = None
@@ -444,6 +447,9 @@ class BacktestEngine:
                 logger.error(f"Error on {trade_date}: {e}")
                 self.errors.append({"date": trade_date, "error": str(e)})
                 continue
+
+        # Reset backtest mode after the loop
+        BACKTEST_MODE.set(False)
 
         # Force close any open position at end
         if trade_dates:

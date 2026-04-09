@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Play, Clock, TrendingUp, AlertCircle, ServerOff } from 'lucide-react';
+import { Play, TrendingUp, AlertCircle, ServerOff } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 

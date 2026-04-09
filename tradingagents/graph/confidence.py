@@ -4,13 +4,20 @@ Two-tier calibration: LLM confidence is first anchored via prompt tiers, then
 adjusted against historical win rates from backtests, a regime-based volatility
 penalty, and a hedge-word penalty extracted from the reasoning text.
 
-Position sizing uses the corrected half-Kelly formula capped by a 2% portfolio
-risk target and a hold-period scalar that accounts for increased variance on
-longer-duration trades.
+Includes:
+- Cold-start overconfidence correction (MIT CSAIL, 2025)
+- Kelly sizing with Deflated Sharpe gate (Bailey & López de Prado, 2014)
+- Kelly shrinkage multiplier (Thorp & MacLean, 2011)
+- Regime-conditional signal gating
+- Portfolio-level exposure cap
 """
 
+import json
+import math
 import logging
+from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +31,7 @@ _HEDGE_WORDS = frozenset({
 _DIRECTIONAL_SIGNALS = frozenset({"BUY", "SELL", "SHORT", "COVER"})
 
 # Minimum confidence threshold per regime (gate signals below this)
+# Regime-conditional for SHORT signals (Debate 3: avoid permanently gating shorts)
 _GATE_THRESHOLDS = {
     "volatile_down": 0.58,
     "volatile_up":   0.45,
@@ -33,6 +41,20 @@ _GATE_THRESHOLDS = {
     "ranging":       0.48,
     "unknown":       0.50,
 }
+
+# SHORT-specific gate thresholds — lower bar in downtrends
+_SHORT_GATE_THRESHOLDS = {
+    "trending_down": 0.30,
+    "volatile_down": 0.30,
+    "trending_up":   0.50,
+    "volatile_up":   0.45,
+    "volatile":      0.40,
+    "ranging":       0.40,
+    "unknown":       0.45,
+}
+
+# Portfolio-level exposure cap (sum of all active positions)
+MAX_TOTAL_EXPOSURE_PCT = 0.30
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -101,8 +123,12 @@ class ConfidenceScorer:
         take_profit: Optional[float],
         signal: str,
         max_hold_days: int = 7,
+        sample_size: int = 0,
     ) -> tuple:
         """Compute position size as a fraction of portfolio using half-Kelly.
+
+        Includes Kelly shrinkage multiplier (Thorp & MacLean, 2011) that
+        reduces allocation proportional to estimation uncertainty.
 
         Returns:
             (position_size_pct: float, r_ratio: float|None, hold_scalar: float)
@@ -148,6 +174,12 @@ class ConfidenceScorer:
             return 0.0, r_ratio, 1.0
 
         half_kelly = 0.5 * f_star
+
+        # Kelly shrinkage multiplier (Thorp & MacLean, 2011)
+        # When p is estimated, not exact, shrink Kelly by the estimation variance
+        estimation_var = p * (1 - p) / max(sample_size, 5) if sample_size else 0.04
+        shrinkage = 1.0 / (1.0 + estimation_var * max(sample_size, 5))
+        half_kelly *= shrinkage
 
         # Portfolio risk cap: risk at most PORTFOLIO_RISK_TARGET per trade
         stop_pct = stop_dist / entry_price
@@ -209,6 +241,30 @@ class ConfidenceScorer:
         current_price = regime_ctx.get("current_price")
         above_sma20 = regime_ctx.get("above_sma20", True)
 
+        # ── Cold-start overconfidence correction (MIT CSAIL, 2025) ──
+        # Load calibration study result if available, otherwise use default 0.80
+        overconfidence_correction = 0.80  # default: 20% dampener
+        try:
+            cal_path = Path(f"eval_results/shadow/{ticker}/calibration.json")
+            if cal_path.exists():
+                cal = json.load(open(cal_path))
+                overconfidence_correction = cal.get("correction", 0.80)
+        except Exception:
+            pass
+
+        try:
+            from tradingagents.backtesting.scorecard import count_scored_decisions
+            scored_count = count_scored_decisions(ticker)
+        except Exception:
+            scored_count = 0
+
+        if scored_count < 60:
+            llm_confidence *= overconfidence_correction
+            logger.debug(
+                f"Cold-start confidence correction: {overconfidence_correction:.2f} "
+                f"({scored_count}/60 decisions)"
+            )
+
         # Compute R using current_price as entry proxy
         R = None
         if current_price and current_price > 0 and stop_loss and take_profit:
@@ -233,15 +289,29 @@ class ConfidenceScorer:
         win_rate = win_rate_data["win_rate"] if win_rate_data else None
         sample_size = win_rate_data["sample_size"] if win_rate_data else 0
 
-        # Kelly contamination guard: require ≥30 trades before trusting
-        # knowledge-store win rates for Kelly sizing.  With fewer trades the
-        # win-rate estimate is too noisy and may come from low-coverage or
-        # simulated backtests — fall back to fixed 15% allocation.
-        _KELLY_MIN_TRADES = 30
-        _FIXED_FALLBACK_SIZE = 0.15
+        # ── Kelly eligibility: DSR gate (Bailey & López de Prado, 2014) ──
+        # Require 60 trades AND statistically significant Sharpe at 95% confidence
+        _KELLY_MIN_TRADES = 60
+        _FIXED_FALLBACK_SIZE = 0.05  # 5% fixed allocation during cold start
         kelly_eligible = sample_size >= _KELLY_MIN_TRADES
 
-        # Two-tier calibration (always runs — it adjusts confidence, not sizing)
+        if kelly_eligible and win_rate is not None:
+            try:
+                from tradingagents.backtesting.walk_forward import compute_deflated_sharpe
+                signal_sharpe = (win_rate - 0.5) / max(
+                    0.01, math.sqrt(win_rate * (1 - win_rate) / sample_size)
+                )
+                dsr = compute_deflated_sharpe(signal_sharpe, sample_size, n_strategies=1)
+                if dsr < 0.95:
+                    kelly_eligible = False
+                    logger.debug(
+                        f"Kelly disabled for {ticker}/{signal}: DSR={dsr:.3f} < 0.95 "
+                        f"(n={sample_size})"
+                    )
+            except Exception as e:
+                logger.debug(f"DSR check failed, keeping Kelly eligible: {e}")
+
+        # Two-tier calibration (always runs — adjusts confidence, not sizing)
         calibrated, hedge_penalty = self.calibrate(
             llm_confidence=llm_confidence,
             win_rate=win_rate if kelly_eligible else None,
@@ -252,7 +322,7 @@ class ConfidenceScorer:
             reasoning=reasoning,
         )
 
-        # Position sizing: Kelly when eligible, fixed fallback otherwise
+        # ── Position sizing: Kelly when eligible, fixed fallback otherwise ──
         if kelly_eligible:
             position_size_pct, r_ratio, hold_scalar = self.kelly_position_size(
                 p=calibrated,
@@ -262,6 +332,7 @@ class ConfidenceScorer:
                 take_profit=take_profit,
                 signal=signal,
                 max_hold_days=max_hold_days,
+                sample_size=sample_size,
             )
         else:
             hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
@@ -273,9 +344,13 @@ class ConfidenceScorer:
                     f"(need {_KELLY_MIN_TRADES}), using fixed {_FIXED_FALLBACK_SIZE*100:.0f}%"
                 )
 
-        # Signal gating
+        # ── Signal gating: regime-conditional for SHORT signals ──
         gate_key = self._gate_key(regime, above_sma20)
-        gate_threshold = _GATE_THRESHOLDS.get(gate_key, 0.50)
+        sig = signal.upper()
+        if sig in ("SHORT", "SELL"):
+            gate_threshold = _SHORT_GATE_THRESHOLDS.get(gate_key, 0.45)
+        else:
+            gate_threshold = _GATE_THRESHOLDS.get(gate_key, 0.50)
         gated = bool(calibrated < gate_threshold)
 
         # Override position size to 0 when gated
@@ -294,4 +369,6 @@ class ConfidenceScorer:
             "win_rate_used": round(win_rate, 4) if win_rate is not None else None,
             "sample_size_used": sample_size,
             "regime_used": regime,
+            "overconfidence_correction": round(overconfidence_correction, 4),
+            "kelly_eligible": kelly_eligible,
         }

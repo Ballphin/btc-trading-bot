@@ -1,6 +1,8 @@
 import os
 import time
 import base64
+import logging
+import functools
 import requests
 from datetime import datetime
 from itertools import groupby
@@ -12,13 +14,17 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
+logger = logging.getLogger(__name__)
+
 KALSHI_API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 # Master list of curated macro intelligence markers
 KALSHI_SERIES_TICKERS = ["KXFEDDECISION", "KXCPI", "KXRECESS"]
 
 
+@functools.lru_cache(maxsize=1)
 def load_private_key_from_file(file_path: str):
+    """Load and cache RSA private key from PEM file (singleton)."""
     with open(file_path, "rb") as key_file:
         private_key = serialization.load_pem_private_key(
             key_file.read(),
@@ -67,14 +73,18 @@ def generate_kalshi_auth_headers(method: str, path: str) -> dict:
 
 
 def _fetch_series(series_ticker: str) -> tuple:
-    url = f"{KALSHI_API_BASE}/markets?series_ticker={series_ticker}&status=open"
+    """Fetch a single Kalshi series with proper authentication."""
+    path = f"/trade-api/v2/markets?series_ticker={series_ticker}&status=open"
+    url = KALSHI_API_BASE + f"/markets?series_ticker={series_ticker}&status=open"
     try:
-        # Public data endpoint doesn't require rigid authentication
-        r = requests.get(url, timeout=10)
+        headers = generate_kalshi_auth_headers("GET", path)
+        r = requests.get(url, headers=headers, timeout=10)
         if r.status_code == 200:
             return series_ticker, r.json().get("markets", [])
+        else:
+            logger.warning(f"Kalshi API returned {r.status_code} for {series_ticker}")
     except Exception as e:
-        pass
+        logger.warning(f"Kalshi fetch failed for {series_ticker}: {e}")
     return series_ticker, []
 
 
@@ -138,10 +148,11 @@ def get_kalshi_macro_context() -> str:
             yes_ask = m.get('yes_ask', 0)
             yes_bid = m.get('yes_bid', 0)
             
-            # Kalshi asks/bids are in cents. (e.g., 65 cents = 65% prob)
-            # They max out at 100, wait, depending on API version maybe 1.0 or 100.
-            # v2 market endpoints generally return yes_ask as an integer of cents (e.g., 65)
-            implied_prob = yes_ask
+            # Kalshi asks/bids are in cents (e.g., 65 cents = 65% prob)
+            # Use bid/ask midpoint for fair value, with Wolfers-Zitzewitz
+            # favorite-longshot correction (shrink toward 50%)
+            midpoint = (yes_ask + yes_bid) / 2.0 if yes_bid > 0 else yes_ask
+            implied_prob = 50 + 0.85 * (midpoint - 50)  # conservative W-Z correction
 
             spread = yes_ask - yes_bid
             if spread > 15:  # Spread larger than 15 cents (15%)

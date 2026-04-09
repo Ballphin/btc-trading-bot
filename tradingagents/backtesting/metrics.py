@@ -20,6 +20,7 @@ def compute_metrics(
     stops_hit: int = 0,
     takes_hit: int = 0,
     is_crypto: bool = False,
+    frequency: str = "daily",  # "daily", "4h", "1h"
 ) -> Dict[str, Any]:
     """
     Compute comprehensive backtest performance metrics with crypto enhancements.
@@ -41,7 +42,12 @@ def compute_metrics(
     Returns:
         Dict of computed metrics.
     """
-    if is_crypto:
+    # Annualization periods: frequency overrides is_crypto
+    if frequency == "4h":
+        trading_days_per_year = 2190  # 365 days * 6 four-hour periods
+    elif frequency == "1h":
+        trading_days_per_year = 8760  # 365 * 24
+    elif is_crypto:
         trading_days_per_year = 365
     if len(equity_curve) < 2:
         return _empty_metrics(initial_capital)
@@ -222,7 +228,6 @@ def compute_metrics(
     # Risk management metrics
     positions_with_hold_days = [p for p in closed_positions if hasattr(p, 'entry_date') and hasattr(p, 'exit_date') and p.exit_date]
     if positions_with_hold_days:
-        from datetime import datetime
         total_hold_days = 0
         for p in positions_with_hold_days:
             try:

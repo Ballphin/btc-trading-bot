@@ -220,3 +220,16 @@ __marimo__/
 
 # Data
 eval_results/
+
+# Private Keys and Credentials
+kalshi_private_key.pem
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+*.pub
+*secret*
+*credentials*
+*api_key*

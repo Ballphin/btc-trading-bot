@@ -57,6 +57,104 @@ EVAL_RESULTS_DIR = Path("eval_results")
 jobs: Dict[str, Dict[str, Any]] = {}
 backtest_jobs: Dict[str, Dict[str, Any]] = {}
 
+# ── Scheduler state ───────────────────────────────────────────────────
+# The 4H auto-analysis scheduler. Manually activated from the frontend.
+_SCHEDULER_TICKERS = ["BTC-USD"]  # tickers to run automatically
+_SCHEDULER_INTERVAL_HOURS = 4     # run every 4 hours, synced to UTC boundary
+_DATA_DELAY_SECONDS = 300         # 5-min offset so data APIs have the closed candle
+
+_scheduler_state: Dict[str, Any] = {
+    "enabled": False,
+    "task": None,           # asyncio.Task handle
+    "last_run": None,       # ISO string of last logical candle time run
+    "last_status": None,    # 'ok' | 'error'
+    "next_run": None,       # ISO string of next scheduled logical candle time
+    "tickers": _SCHEDULER_TICKERS,
+}
+
+
+def _next_4h_utc_boundary() -> datetime:
+    """Return the next 4-hour UTC boundary from now (00:00, 04:00, 08:00, 12:00, 16:00, 20:00)."""
+    import pytz
+    now_utc = datetime.now(pytz.utc).replace(second=0, microsecond=0)
+    # current hour snapped down to the 4H block
+    current_block = (now_utc.hour // _SCHEDULER_INTERVAL_HOURS) * _SCHEDULER_INTERVAL_HOURS
+    boundary = now_utc.replace(hour=current_block, minute=0, second=0, microsecond=0)
+    if boundary <= now_utc:
+        boundary += timedelta(hours=_SCHEDULER_INTERVAL_HOURS)
+    return boundary
+
+
+async def _auto_analysis_scheduler():
+    """Run BTC-USD analysis every 4 hours synced to UTC candle closes.
+    
+    Physical sleep targets: (next 4H UTC boundary + DATA_DELAY_SECONDS).
+    The logical candle time passed to the analysis is exactly the UTC boundary
+    (e.g. '2026-04-08T16') regardless of when the physical process runs.
+    """
+    import pytz
+    logger.info("[Scheduler] 4H auto-analysis scheduler started")
+    while _scheduler_state["enabled"]:
+        try:
+            boundary_utc = _next_4h_utc_boundary()
+            # Physical trigger = boundary + data delay
+            physical_trigger = boundary_utc + timedelta(seconds=_DATA_DELAY_SECONDS)
+            # Sleep until that moment
+            now_utc = datetime.now(pytz.utc)
+            sleep_secs = (physical_trigger - now_utc).total_seconds()
+            if sleep_secs > 0:
+                # Logical candle label (e.g. '2026-04-08T16')
+                logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
+                logical_date = boundary_utc.strftime("%Y-%m-%d")
+                _scheduler_state["next_run"] = boundary_utc.isoformat()
+                logger.info(
+                    f"[Scheduler] Next run: {logical_label} UTC (sleeping {sleep_secs:.0f}s until data ready)"
+                )
+                await asyncio.sleep(sleep_secs)
+
+            if not _scheduler_state["enabled"]:
+                break
+
+            # Recalculate logical boundary (may shift slightly if sleep overran)
+            logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
+            logical_date = boundary_utc.strftime("%Y-%m-%d")
+
+            logger.info(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label}")
+            for ticker in _SCHEDULER_TICKERS:
+                job_id = str(uuid.uuid4())[:8]
+                eq = JobEventQueue()
+                jobs[job_id] = {
+                    "ticker": ticker,
+                    "date": logical_date,
+                    "status": "running",
+                    "queue": eq,
+                    "result": None,
+                    "error": None,
+                    "scheduled": True,
+                    "candle_time": logical_label,
+                }
+                thread = threading.Thread(
+                    target=_run_analysis,
+                    args=(job_id, ticker, logical_date, False, logical_label),
+                    daemon=True,
+                )
+                thread.start()
+                logger.info(f"[Scheduler] Launched job {job_id} for {ticker} @ {logical_label}")
+
+            _scheduler_state["last_run"] = logical_label
+            _scheduler_state["last_status"] = "ok"
+
+        except asyncio.CancelledError:
+            logger.info("[Scheduler] Task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[Scheduler] Error: {e}")
+            _scheduler_state["last_status"] = f"error: {e}"
+            await asyncio.sleep(60)  # brief wait before retry
+
+    logger.info("[Scheduler] Stopped")
+
+
 # ── Background eviction of stale completed backtest jobs (HIGH 8) ─────
 _BACKTEST_JOB_TTL_HOURS = 1
 
@@ -78,6 +176,90 @@ async def _evict_old_backtest_jobs():
 @app.on_event("startup")
 async def _start_background_tasks():
     asyncio.create_task(_evict_old_backtest_jobs())
+
+
+# ── Scheduler API Endpoints ───────────────────────────────────────────
+
+@app.get("/api/scheduler/status")
+async def scheduler_status():
+    """Return current scheduler state including next run time (local + UTC)."""
+    import pytz
+    try:
+        boundary_utc = _next_4h_utc_boundary()
+        # Convert to local time for display
+        local_tz = datetime.now().astimezone().tzinfo
+        boundary_local = boundary_utc.astimezone(local_tz)
+        next_run_local = boundary_local.isoformat() if _scheduler_state["enabled"] else None
+        next_run_utc = boundary_utc.isoformat() if _scheduler_state["enabled"] else None
+    except Exception:
+        next_run_local = None
+        next_run_utc = None
+
+    return {
+        "enabled": _scheduler_state["enabled"],
+        "tickers": _scheduler_state["tickers"],
+        "interval_hours": _SCHEDULER_INTERVAL_HOURS,
+        "data_delay_seconds": _DATA_DELAY_SECONDS,
+        "last_run": _scheduler_state["last_run"],
+        "last_status": _scheduler_state["last_status"],
+        "next_run_utc": next_run_utc,
+        "next_run_local": next_run_local,
+    }
+
+
+@app.post("/api/scheduler/toggle")
+async def toggle_scheduler():
+    """Enable or disable the 4H auto-analysis scheduler. Returns new state."""
+    if _scheduler_state["enabled"]:
+        # Disable: cancel the running task
+        _scheduler_state["enabled"] = False
+        task = _scheduler_state.get("task")
+        if task and not task.done():
+            task.cancel()
+        _scheduler_state["task"] = None
+        logger.info("[Scheduler] Disabled via API")
+        return {"enabled": False, "message": "Scheduler disabled"}
+    else:
+        # Enable: start the background task (singleton guard)
+        task = _scheduler_state.get("task")
+        if task and not task.done():
+            return {"enabled": True, "message": "Already running"}
+        _scheduler_state["enabled"] = True
+        _scheduler_state["task"] = asyncio.create_task(_auto_analysis_scheduler())
+        logger.info("[Scheduler] Enabled via API")
+        return {"enabled": True, "message": "Scheduler enabled"}
+
+
+@app.post("/api/scheduler/run-now")
+async def scheduler_run_now():
+    """Immediately trigger an analysis run outside the normal schedule."""
+    import pytz
+    logical_label = datetime.now(pytz.utc).strftime("%Y-%m-%dT%H")
+    logical_date = datetime.now(pytz.utc).strftime("%Y-%m-%d")
+
+    launched = []
+    for ticker in _SCHEDULER_TICKERS:
+        job_id = str(uuid.uuid4())[:8]
+        eq = JobEventQueue()
+        jobs[job_id] = {
+            "ticker": ticker,
+            "date": logical_date,
+            "status": "running",
+            "queue": eq,
+            "result": None,
+            "error": None,
+            "scheduled": False,
+            "candle_time": logical_label,
+        }
+        thread = threading.Thread(
+            target=_run_analysis,
+            args=(job_id, ticker, logical_date, False, logical_label),
+            daemon=True,
+        )
+        thread.start()
+        launched.append({"ticker": ticker, "job_id": job_id})
+
+    return {"launched": launched, "candle_time": logical_label}
 
 
 class AnalyzeRequest(BaseModel):
@@ -191,8 +373,17 @@ def _detect_step_from_chunk(chunk: dict, seen_steps: set) -> Optional[dict]:
     return None
 
 
-def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool = False):
-    """Run the TradingAgents analysis in a background thread."""
+def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool = False, run_timestamp: str = None):
+    """Run the TradingAgents analysis in a background thread.
+    
+    Args:
+        job_id: Unique job identifier
+        ticker: Ticker symbol (e.g. 'BTC-USD')
+        trade_date: Analysis date (YYYY-MM-DD)
+        force_refresh: Clear cache before running
+        run_timestamp: Optional intraday candle label (e.g. '2026-04-08T16').
+                       When set, saves as full_states_log_2026-04-08T16.json.
+    """
     eq: JobEventQueue = jobs[job_id]["queue"]
     
     # Immediately emit a starting event
@@ -230,9 +421,13 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             "technical_indicators": "yfinance",
             "fundamental_data": "yfinance",
             "news_data": "yfinance",
+            "prediction_market_data": "kalshi",
         }
 
         ta = TradingAgentsGraph(debug=True, config=config)
+        # Set logical candle timestamp for intraday file naming (if scheduled)
+        if run_timestamp:
+            ta._run_timestamp = run_timestamp
 
         # Intercept graph streaming to emit SSE events
         init_state = ta.propagator.create_initial_state(ticker, trade_date)
@@ -395,25 +590,36 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         try:
             shadow_dir = EVAL_RESULTS_DIR / "shadow" / ticker
             shadow_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get real entry price BEFORE building shadow entry
+            _shadow_price = None
+            try:
+                _shadow_price = _get_price_on_date(ticker, trade_date)
+            except Exception:
+                pass
+
+            # Detect regime at decision time (not retroactively at scoring time)
+            _shadow_regime = "unknown"
+            try:
+                from tradingagents.backtesting.regime import detect_regime_context
+                _shadow_regime = detect_regime_context(ticker, trade_date).get("regime", "unknown")
+            except Exception:
+                pass
+
             shadow_entry = {
                 "ticker": ticker,
                 "date": trade_date,
                 "signal": decision_signal,
-                "price": result.get("stop_loss_price", 0),  # fallback
+                "price": _shadow_price,
                 "confidence": confidence,
                 "stop_loss": stop_loss_price,
                 "take_profit": take_profit_price,
                 "reasoning": reasoning,
+                "regime": _shadow_regime,
                 "source": "live_analysis",
                 "recorded_at": datetime.now().isoformat(),
+                "scored": False,
             }
-            # Try to get a real price for shadow record
-            try:
-                _shadow_price = _get_price_on_date(ticker, trade_date)
-                if _shadow_price:
-                    shadow_entry["price"] = _shadow_price
-            except Exception:
-                pass
             with open(shadow_dir / "decisions.jsonl", "a") as _sf:
                 _sf.write(json.dumps(shadow_entry, default=str) + "\n")
         except Exception as _shadow_err:
@@ -430,6 +636,51 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         eq.put({"event": "error", "message": str(e)})
+
+# ── Scorecard API Endpoints ───────────────────────────────────────────
+
+@app.get("/api/shadow/scorecard/{ticker}")
+async def get_scorecard(ticker: str):
+    """Get the full forward-test scorecard for a ticker."""
+    try:
+        from tradingagents.backtesting.scorecard import get_scorecard as _get_scorecard
+        return _get_scorecard(ticker, str(EVAL_RESULTS_DIR))
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/shadow/score/{ticker}")
+async def score_decisions(ticker: str):
+    """Trigger scoring of pending decisions against actual future prices."""
+    try:
+        from tradingagents.backtesting.scorecard import score_pending_decisions
+        result = score_pending_decisions(ticker, str(EVAL_RESULTS_DIR))
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/shadow/calibrate/{ticker}")
+async def calibrate_ticker(ticker: str):
+    """Run the 10-decision calibration study to compute overconfidence correction."""
+    try:
+        from tradingagents.backtesting.scorecard import run_calibration_study
+        result = run_calibration_study(ticker, results_dir=str(EVAL_RESULTS_DIR))
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/shadow/walk-forward/{ticker}")
+async def walk_forward_validate(ticker: str):
+    """Run walk-forward validation on existing analysis logs."""
+    try:
+        from tradingagents.backtesting.walk_forward import WalkForwardValidator
+        validator = WalkForwardValidator(ticker, str(EVAL_RESULTS_DIR))
+        result = validator.validate()
+        return result
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── API Endpoints ─────────────────────────────────────────────────────
@@ -534,7 +785,8 @@ async def list_tickers():
 def _extract_latest_date(files) -> Optional[str]:
     dates = []
     for f in files:
-        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json", f.name)
+        # Match both full_states_log_YYYY-MM-DD.json and full_states_log_YYYY-MM-DDTHH.json
+        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2}(?:T\d{2})?)\.json", f.name)
         if match:
             dates.append(match.group(1))
     return max(dates) if dates else None
@@ -542,31 +794,42 @@ def _extract_latest_date(files) -> Optional[str]:
 
 @app.get("/api/history/{ticker}")
 async def list_analyses(ticker: str):
-    """List all analysis dates for a given ticker."""
+    """List all analysis dates for a given ticker, including intraday timestamped files."""
     logs_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
     if not logs_dir.exists():
         raise HTTPException(status_code=404, detail=f"No analyses found for {ticker}")
 
     analyses = []
     for f in sorted(logs_dir.glob("full_states_log_*.json"), reverse=True):
-        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json", f.name)
-        if match:
-            analysis_date = match.group(1)
-            # Try to extract decision from log
-            try:
-                data = json.loads(f.read_text())
-                date_data = data.get(analysis_date, {})
-                decision_text = date_data.get("final_trade_decision", "")
-                # Extract signal from decision text
-                signal = _extract_signal(decision_text)
-            except Exception:
-                signal = "UNKNOWN"
+        # Match both: YYYY-MM-DD and YYYY-MM-DDTHH
+        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})(T(\d{2}))?(\.json)$", f.name)
+        if not match:
+            continue
+        analysis_date = match.group(1)
+        hour_str = match.group(3)  # e.g. '16' or None
+        candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
+        time_label = f"{hour_str}:00" if hour_str else None
 
-            analyses.append({
-                "date": analysis_date,
-                "signal": signal,
-                "file": f.name,
-            })
+        # Extract signal from nested date key in log file
+        try:
+            data = json.loads(f.read_text())
+            # Try the full candle_time key first, then the date portion
+            date_data = data.get(candle_time) or data.get(analysis_date) or {}
+            decision_text = date_data.get("final_trade_decision", "")
+            signal = _extract_signal(decision_text)
+            confidence = date_data.get("confidence")
+        except Exception:
+            signal = "UNKNOWN"
+            confidence = None
+
+        analyses.append({
+            "date": analysis_date,
+            "candle_time": candle_time,
+            "time": time_label,          # '16:00' for intraday, null for daily
+            "signal": signal,
+            "confidence": confidence,
+            "file": f.name,
+        })
 
     return {"ticker": ticker, "analyses": analyses}
 

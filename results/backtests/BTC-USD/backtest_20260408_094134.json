@@ -1,0 +1,98 @@
+{
+  "config": {
+    "ticker": "BTC-USD",
+    "start_date": "2026-03-31",
+    "end_date": "2026-04-08",
+    "frequency": "daily",
+    "initial_capital": 100000,
+    "position_size_pct": 0.25
+  },
+  "metrics": {
+    "initial_capital": 100000,
+    "final_value": 100000,
+    "total_return_pct": 0.0,
+    "total_pnl": 0.0,
+    "annualized_return_pct": 0.0,
+    "annualized_volatility_pct": 0.0,
+    "sharpe_ratio": 0.0,
+    "sortino_ratio": 0.0,
+    "max_drawdown_pct": 0.0,
+    "max_drawdown_start": "",
+    "max_drawdown_end": "",
+    "calmar_ratio": 0.0,
+    "omega_ratio": 0.0,
+    "tail_ratio": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "win_rate_pct": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0,
+    "profit_factor": null,
+    "expectancy": 0.0,
+    "total_fees": 0.0,
+    "total_funding": 0.0,
+    "fee_impact_pct": 0.0,
+    "funding_impact_pct": 0.0,
+    "liquidations": 0,
+    "avg_leverage": 1.0,
+    "leverage_adjusted_return_pct": 0.0,
+    "benchmark_return_pct": null,
+    "alpha_pct": null,
+    "alpha": 0.0,
+    "beta": 0.0,
+    "information_ratio": 0.0,
+    "up_capture": 0.0,
+    "down_capture": 0.0,
+    "start_date": "",
+    "end_date": "",
+    "n_periods": 0,
+    "sample_size_tier": "unreliable",
+    "sharpe_se": 0.0,
+    "stops_hit": 0,
+    "takes_hit": 0,
+    "avg_hold_days": 0,
+    "avg_rr_ratio": 0
+  },
+  "decisions": [],
+  "equity_curve": [],
+  "trade_history": [],
+  "errors": [
+    {
+      "date": "2026-03-31",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-01",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-02",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-03",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-04",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-05",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-06",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-07",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    },
+    {
+      "date": "2026-04-08",
+      "error": "Error code: 401 - {'error': {'message': 'Missing bearer or basic authentication in header', 'type': 'invalid_request_error', 'param': None, 'code': None}}"
+    }
+  ]
+}

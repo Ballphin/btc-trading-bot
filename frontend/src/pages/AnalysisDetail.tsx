@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
+import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle, Clock } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
 import PriceChart from '../components/PriceChart';
 import ReactMarkdown from 'react-markdown';
+import FinalDecisionCard from '../components/FinalDecisionCard';
 import { fetchAnalysis, fetchPrice, type AnalysisData, type PriceRecord } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 
@@ -155,9 +156,11 @@ export default function AnalysisDetail() {
               <h2 className="text-lg font-bold text-white">Final Decision</h2>
               <SignalBadge signal={signal} size="md" />
             </div>
-            <div className="markdown-content text-sm max-h-[500px] overflow-y-auto">
-              <ReactMarkdown>{analysis.final_trade_decision}</ReactMarkdown>
-            </div>
+            <FinalDecisionCard
+              text={analysis.final_trade_decision}
+              signal={signal}
+              confidence={analysis.confidence}
+            />
           </div>
 
           {/* Risk Parameters (if structured signal available) */}

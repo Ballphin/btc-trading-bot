@@ -259,9 +259,9 @@ class Portfolio:
             if self.current_position.side == PositionSide.SHORT:
                 return funding_cost
             elif self.current_position.side == PositionSide.LONG:
-                # Longs historically receive funding if funding is positive
-                # Hyperliquid pays out the actual fundingRate
-                return -funding_cost * 0.5
+                # Longs receive funding if funding is positive
+                # Hyperliquid pays 100% of the fundingRate to longs
+                return -funding_cost * 1.0
         
         return 0.0
 
@@ -339,6 +339,31 @@ class Portfolio:
         elif signal == "SHORT":
             price = price * (1 - slippage_mult)  # short entry lower
         
+        # ATR-adaptive stop validation — aggressive settings per user preference
+        # Floor: 1.0x ATR minimum (anything tighter is inside normal noise)
+        # Override to: 1.5x ATR (backtest) or 2.0x ATR (live thin-book hours)
+        if atr and atr > 0 and stop_loss_price and stop_loss_price > 0:
+            stop_distance = abs(price - stop_loss_price)
+            atr_multiple = stop_distance / atr
+
+            # Determine floor based on mode (backtest vs live) and liquidity
+            from tradingagents.backtesting.context import BACKTEST_MODE
+            if BACKTEST_MODE.get():
+                atr_floor = 1.5  # backtest: static aggressive
+            else:
+                _now_utc = datetime.utcnow()
+                _is_thin_book = _now_utc.hour in range(0, 8) or _now_utc.weekday() >= 5
+                atr_floor = 2.0 if _is_thin_book else 1.5
+
+            if atr_multiple < 1.0:
+                logger.warning(
+                    f"Stop {atr_multiple:.1f}x ATR inside noise, widening to {atr_floor}x ATR"
+                )
+                if signal in ("BUY", "OVERWEIGHT"):
+                    stop_loss_price = price - atr_floor * atr
+                else:
+                    stop_loss_price = price + atr_floor * atr
+
         # Calculate funding costs first (continuous funding)
         funding_cost = self._calculate_funding(date, price, funding_rate)
         if self.current_position and funding_cost != 0:

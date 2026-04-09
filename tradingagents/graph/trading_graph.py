@@ -43,6 +43,7 @@ from tradingagents.agents.utils.intraday_tools import (
     get_intraday_data,
     get_realtime_snapshot,
 )
+from tradingagents.agents.utils.prediction_tools import get_prediction_markets
 from tradingagents.dataflows.asset_detection import is_crypto
 
 from .conditional_logic import ConditionalLogic
@@ -146,6 +147,7 @@ class TradingAgentsGraph:
         self.curr_state = None
         self.ticker = None
         self.log_states_dict = {}  # date to full state dict
+        self._run_timestamp = None  # Optional intraday key e.g. '2026-04-08T16'
 
         # Set up the graph
         self.graph = self.graph_setup.setup_graph(selected_analysts)
@@ -224,6 +226,7 @@ class TradingAgentsGraph:
             get_indicators,
             get_derivatives_data,
             get_intraday_data,
+            get_prediction_markets,
         ]
         if not self.config.get("backtest_mode", False):
             market_tools.append(get_realtime_snapshot)
@@ -240,6 +243,7 @@ class TradingAgentsGraph:
                     get_crypto_news,
                     get_crypto_global_news,
                     get_macro_indicators,
+                    get_prediction_markets,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -365,12 +369,14 @@ class TradingAgentsGraph:
             self.log_states_dict[str(trade_date)]["max_hold_days"] = final_state.get("max_hold_days")
             self.log_states_dict[str(trade_date)]["reasoning"] = final_state.get("reasoning")
 
-        # Save to file
+        # Save to file — use run_timestamp for intraday files if provided
+        # e.g. run_timestamp='2026-04-08T16' → full_states_log_2026-04-08T16.json
+        file_key = self._run_timestamp if self._run_timestamp else trade_date
         directory = Path(f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/")
         directory.mkdir(parents=True, exist_ok=True)
 
         with open(
-            f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/full_states_log_{trade_date}.json",
+            f"eval_results/{self.ticker}/TradingAgentsStrategy_logs/full_states_log_{file_key}.json",
             "w",
             encoding="utf-8",
         ) as f:

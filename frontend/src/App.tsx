@@ -10,6 +10,7 @@ const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail'));
 const Backtest = lazy(() => import('./pages/Backtest'));
 const BacktestResults = lazy(() => import('./pages/BacktestResults'));
 const RecentBacktests = lazy(() => import('./pages/RecentBacktests'));
+const Scorecard = lazy(() => import('./pages/Scorecard'));
 
 function PageLoader() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
                 <Route path="/backtest/results/:id" element={<ErrorBoundary><BacktestResults /></ErrorBoundary>} />
                 <Route path="/backtest/:jobId" element={<ErrorBoundary><BacktestResults /></ErrorBoundary>} />
                 <Route path="/backtests" element={<RecentBacktests />} />
+                <Route path="/scorecard" element={<Scorecard />} />
               </Routes>
             </Suspense>
           </ErrorBoundary>
