@@ -300,7 +300,7 @@ export default function ScorecardPage() {
               </p>
               <p className="text-xs text-slate-500 mt-0.5">
                 {scheduler.enabled && scheduler.next_run_local
-                  ? `Next run: ${new Date(scheduler.next_run_local).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} local`
+                  ? `Next run: ${new Date(scheduler.next_run_local).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })} local`
                   : scheduler.last_run
                   ? `Last run: ${scheduler.last_run}`
                   : 'Enable to run BTC-USD analysis every 4 hours'}

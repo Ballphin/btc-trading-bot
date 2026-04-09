@@ -808,7 +808,10 @@ async def list_analyses(ticker: str):
         analysis_date = match.group(1)
         hour_str = match.group(3)  # e.g. '16' or None
         candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
-        time_label = f"{hour_str}:00" if hour_str else None
+        time_label = None
+        if hour_str:
+            # Emit a strict ISO 8601 UTC string to let the frontend localize it
+            time_label = f"{analysis_date}T{hour_str}:00:00Z"
 
         # Extract signal from nested date key in log file
         try:
@@ -851,7 +854,10 @@ async def get_analysis(ticker: str, analysis_date: str):
         raise HTTPException(status_code=404, detail=f"No analysis found for {ticker} on {analysis_date}")
 
     data = json.loads(log_file.read_text())
-    date_data = data.get(analysis_date, data)
+    
+    # Extract the base date to parse correctly via fallback hierarchy 
+    base_date = analysis_date.split("T")[0]
+    date_data = data.get(analysis_date) or data.get(base_date) or data
 
     return {
         "ticker": ticker,

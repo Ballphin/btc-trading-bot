@@ -145,7 +145,9 @@ export default function History() {
                                 <div className="flex items-center gap-2">
                                   <Clock className="w-3.5 h-3.5 text-slate-500" />
                                   <span className="text-sm text-slate-300 tabular-nums">
-                                    {a.time || '12:00'}
+                                    {a.time && a.time.endsWith('Z') 
+                                      ? new Date(a.time).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }) 
+                                      : a.time || '12:00 PM'}
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-3">
