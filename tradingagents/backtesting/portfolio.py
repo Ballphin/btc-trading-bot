@@ -246,15 +246,16 @@ class Portfolio:
         current_dt = datetime.strptime(date, curr_fmt)
         hours_passed = (current_dt - last_dt).total_seconds() / 3600
         
-        # Charge funding every interval, not just on signal changes
+        # Charge funding for every elapsed interval (e.g., 3 intervals for 24h at 8h cadence)
         if hours_passed >= self.funding_interval_hours:
+            n_intervals = max(1, int(hours_passed // self.funding_interval_hours))
             self.last_funding_date = date
             # If API found dynamic rate, use it, else zero (don't fabricate costs)
             funding_rate = actual_rate if actual_rate is not None else 0.0
             if actual_rate is None:
                 logger.debug(f"[{date}] No funding rate data — defaulting to 0.0")
             notional = self.current_position.size * price
-            funding_cost = notional * funding_rate
+            funding_cost = notional * funding_rate * n_intervals
             
             if self.current_position.side == PositionSide.SHORT:
                 return funding_cost
@@ -332,12 +333,12 @@ class Portfolio:
 
         # Apply slippage to execution price (adverse fill simulation)
         slippage_mult = self.slippage_bps / 10_000
-        if signal in ("BUY", "OVERWEIGHT"):
-            price = price * (1 + slippage_mult)  # buy higher
-        elif signal in ("SELL", "COVER", "UNDERWEIGHT"):
-            price = price * (1 - slippage_mult)  # sell lower
+        if signal in ("BUY", "OVERWEIGHT", "COVER"):
+            price = price * (1 + slippage_mult)  # buy higher (adverse for buys and buy-to-close)
+        elif signal in ("SELL", "UNDERWEIGHT"):
+            price = price * (1 - slippage_mult)  # sell lower (adverse for sells)
         elif signal == "SHORT":
-            price = price * (1 - slippage_mult)  # short entry lower
+            price = price * (1 - slippage_mult)  # short entry lower (adverse for short opens)
         
         # ATR-adaptive stop validation — aggressive settings per user preference
         # Floor: 1.0x ATR minimum (anything tighter is inside normal noise)

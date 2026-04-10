@@ -1,8 +1,11 @@
 """Performance metrics for backtesting: Sharpe, Sortino, drawdown, win rate, etc."""
 
+import logging
 import math
 from datetime import datetime
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 def compute_metrics(
@@ -237,8 +240,8 @@ def compute_metrics(
                 exit_dt = datetime.strptime(p.exit_date, exit_fmt)
                 hold_days = (exit_dt - entry_dt).days
                 total_hold_days += hold_days
-            except:
-                pass
+            except (ValueError, AttributeError) as e:
+                logger.debug(f"Malformed position dates: {e}")
         avg_hold_days = total_hold_days / len(positions_with_hold_days) if positions_with_hold_days else 0
     else:
         avg_hold_days = 0

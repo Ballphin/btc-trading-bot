@@ -41,3 +41,12 @@ include = ["tradingagents*", "cli*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: requires network + API keys (deselect with -m 'not live')",
+    "slow: tests that take >5s (e.g., yfinance downloads)",
+    "e2e: frontend E2E tests requiring browser + running servers",
+]
+addopts = "-ra --strict-markers"

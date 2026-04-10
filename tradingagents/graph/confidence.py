@@ -69,6 +69,9 @@ class ConfidenceScorer:
     # Portfolio risk fraction per trade (2%)
     PORTFOLIO_RISK_TARGET = 0.02
 
+    def __init__(self, results_dir: Optional[str] = None):
+        self.results_dir = Path(results_dir) if results_dir else Path("eval_results")
+
     def calibrate(
         self,
         llm_confidence: float,
@@ -176,9 +179,8 @@ class ConfidenceScorer:
         half_kelly = 0.5 * f_star
 
         # Kelly shrinkage multiplier (Thorp & MacLean, 2011)
-        # When p is estimated, not exact, shrink Kelly by the estimation variance
-        estimation_var = p * (1 - p) / max(sample_size, 5) if sample_size else 0.04
-        shrinkage = 1.0 / (1.0 + estimation_var * max(sample_size, 5))
+        # Monotonically increasing: more data → less shrinkage (closer to 1.0)
+        shrinkage = max(0.0, 1.0 - 2.0 / max(sample_size, 2))
         half_kelly *= shrinkage
 
         # Portfolio risk cap: risk at most PORTFOLIO_RISK_TARGET per trade
@@ -245,7 +247,7 @@ class ConfidenceScorer:
         # Load calibration study result if available, otherwise use default 0.80
         overconfidence_correction = 0.80  # default: 20% dampener
         try:
-            cal_path = Path(f"eval_results/shadow/{ticker}/calibration.json")
+            cal_path = self.results_dir / "shadow" / ticker / "calibration.json"
             if cal_path.exists():
                 cal = json.load(open(cal_path))
                 overconfidence_correction = cal.get("correction", 0.80)
@@ -298,9 +300,14 @@ class ConfidenceScorer:
         if kelly_eligible and win_rate is not None:
             try:
                 from tradingagents.backtesting.walk_forward import compute_deflated_sharpe
-                signal_sharpe = (win_rate - 0.5) / max(
-                    0.01, math.sqrt(win_rate * (1 - win_rate) / sample_size)
-                )
+                # Use Kelly edge as numerator: p*R - (1-p), not win_rate - 0.5
+                # This correctly evaluates profitability for low-winrate/high-R systems
+                _R_for_dsr = R if R is not None and R > 0 else 1.0
+                kelly_edge = win_rate * _R_for_dsr - (1 - win_rate)
+                se_kelly = max(0.01, _R_for_dsr * math.sqrt(
+                    win_rate * (1 - win_rate) / sample_size
+                ))
+                signal_sharpe = kelly_edge / se_kelly
                 dsr = compute_deflated_sharpe(signal_sharpe, sample_size, n_strategies=1)
                 if dsr < 0.95:
                     kelly_eligible = False

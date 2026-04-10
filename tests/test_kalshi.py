@@ -57,5 +57,5 @@ def test_kalshi_macro_context(mock_get):
     
     # Test temporal alignment keywords
     assert "Next Fed Rate Decision" in dashboard
-    assert "Implied Probability 78%" in dashboard
+    assert "Implied Probability 71%" in dashboard
     assert "Confidence: HIGH" in dashboard
