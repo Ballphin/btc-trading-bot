@@ -96,6 +96,15 @@ function formatVol(value: number) {
   return `${value}`;
 }
 
+function formatAxisDate(v: string) {
+  if (!v) return '';
+  if (v.includes('T')) {
+    const match = v.match(/(\d{2}-\d{2})T(\d{2}):/);
+    if (match) return `${match[1]} ${match[2]}:00`;
+  }
+  return v.slice(5);
+}
+
 interface TooltipProps {
   active?: boolean;
   payload?: Array<{ payload: PriceRecord }>;
@@ -147,7 +156,7 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
             tick={{ fill: '#64748b', fontSize: 11 }}
             tickLine={false}
             axisLine={{ stroke: 'rgba(255,255,255,0.06)' }}
-            tickFormatter={(v: string) => v.slice(5)}
+            tickFormatter={formatAxisDate}
           />
           <YAxis
             yAxisId="price"
@@ -209,16 +218,24 @@ export default function PriceChart({ data, signals = [], height = 400 }: Props) 
 
           {/* Grouped Signal Reference Lines */}
           {groupedSignals.map((s, i) => (
-            <ReferenceLine
-              key={`line-${i}`}
-              yAxisId="price"
-              y={s.price}
-              stroke={SIGNAL_COLORS[s.signal] || '#94a3b8'}
-              strokeDasharray="3 3"
-              strokeWidth={1}
-              opacity={0.6}
-              ifOverflow="extendDomain"
-            />
+            <g key={`reference-group-${i}`}>
+              <ReferenceLine
+                yAxisId="price"
+                y={s.price}
+                stroke={SIGNAL_COLORS[s.signal] || '#94a3b8'}
+                strokeDasharray="3 3"
+                strokeWidth={1}
+                opacity={0.6}
+                ifOverflow="extendDomain"
+              />
+              <ReferenceLine
+                x={s.startDate}
+                stroke={SIGNAL_COLORS[s.signal] || '#94a3b8'}
+                strokeDasharray="3 3"
+                strokeWidth={1}
+                opacity={0.4}
+              />
+            </g>
           ))}
 
           {/* Grouped Signal Dot Markers with Labels */}

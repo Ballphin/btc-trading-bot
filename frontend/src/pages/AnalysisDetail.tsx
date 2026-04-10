@@ -55,7 +55,7 @@ export default function AnalysisDetail() {
     setLoading(true);
     Promise.all([
       fetchAnalysis(ticker, date).catch(() => null),
-      fetchPrice(ticker, 90).catch(() => []),
+      fetchPrice(ticker, 30, '4h').catch(() => []),
     ]).then(([a, p]) => {
       setAnalysis(a);
       setPriceData(p);
@@ -157,14 +157,15 @@ export default function AnalysisDetail() {
               <SignalBadge signal={signal} size="md" />
             </div>
             <FinalDecisionCard
-              text={analysis.final_trade_decision}
-              signal={signal}
+              text={analysis.trader_investment_decision || analysis.final_trade_decision}
+              signal={analysis.decision}
               confidence={analysis.confidence}
+              rRatio={analysis.r_ratio}
             />
           </div>
 
-          {/* Risk Parameters (if structured signal available) */}
-          {(analysis.stop_loss_price !== undefined || analysis.take_profit_price !== undefined) && (
+          {/* Risk Parameters (if any metrics exists) */}
+          {(analysis.stop_loss_price !== undefined || analysis.take_profit_price !== undefined || analysis.confidence !== undefined || analysis.r_ratio != null || analysis.position_size_pct !== undefined) && (
             <div>
               <h3 className="text-sm font-medium text-slate-400 mb-3">Risk Parameters</h3>
 
@@ -197,7 +198,7 @@ export default function AnalysisDetail() {
                     <p className="text-sm font-medium text-green-400">${analysis.take_profit_price.toLocaleString()}</p>
                   </div>
                 )}
-                {analysis.confidence !== undefined && (
+                {analysis.confidence != null && (
                   <div className="glass p-4">
                     <p className="text-xs text-slate-500 mb-1">Conviction</p>
                     <div className="flex items-center gap-1.5 mb-1">
@@ -224,7 +225,7 @@ export default function AnalysisDetail() {
                     </div>
                   </div>
                 )}
-                {analysis.position_size_pct !== undefined && (
+                {analysis.position_size_pct != null && (
                   <div className="glass p-4">
                     <p className="text-xs text-slate-500 mb-1">Suggested Size</p>
                     <p className={`text-sm font-medium ${
@@ -237,26 +238,30 @@ export default function AnalysisDetail() {
                     </p>
                   </div>
                 )}
-                {analysis.r_ratio != null && (
-                  <div className="glass p-4">
-                    <p className="text-xs text-slate-500 mb-1">R:R Ratio</p>
-                    <div className="flex items-center gap-1">
-                      <p className={`text-sm font-medium ${
-                        analysis.r_ratio >= 2.0 ? 'text-green-400' :
-                        analysis.r_ratio >= 1.0 ? 'text-yellow-400' :
-                        'text-red-400'
-                      }`}>{analysis.r_ratio.toFixed(2)}:1</p>
-                      {analysis.r_ratio >= 2.0 ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
-                      ) : analysis.r_ratio >= 1.0 ? (
-                        <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-red-400" />
-                      )}
-                    </div>
+                <div className="glass p-4">
+                  <p className="text-xs text-slate-500 mb-1">R:R Ratio</p>
+                  <div className="flex items-center gap-1">
+                    {analysis.r_ratio != null ? (
+                      <>
+                        <p className={`text-sm font-medium ${
+                          analysis.r_ratio >= 2.0 ? 'text-green-400' :
+                          analysis.r_ratio >= 1.0 ? 'text-yellow-400' :
+                          'text-red-400'
+                        }`}>{analysis.r_ratio.toFixed(2)}:1</p>
+                        {analysis.r_ratio >= 2.0 ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                        ) : analysis.r_ratio >= 1.0 ? (
+                          <AlertTriangle className="w-3.5 h-3.5 text-yellow-400" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-red-400" />
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-sm font-medium text-slate-400">N/A</p>
+                    )}
                   </div>
-                )}
-                {analysis.max_hold_days !== undefined && (
+                </div>
+                {analysis.max_hold_days != null && (
                   <div className="glass p-4">
                     <p className="text-xs text-slate-500 mb-1">Max Hold</p>
                     <p className="text-sm font-medium text-white">{analysis.max_hold_days} days</p>

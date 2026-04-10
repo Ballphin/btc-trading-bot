@@ -37,9 +37,10 @@ interface Props {
   text: string;
   signal?: string;
   confidence?: number;
+  rRatio?: number | null;
 }
 
-export default function FinalDecisionCard({ text, signal, confidence }: Props) {
+export default function FinalDecisionCard({ text, signal, confidence, rRatio: backendRRatio }: Props) {
   const parsed = tryParseJson(text);
 
   if (parsed) {
@@ -47,7 +48,8 @@ export default function FinalDecisionCard({ text, signal, confidence }: Props) {
     const conf = parsed.confidence ?? confidence;
     const sl = parsed.stop_loss_price;
     const tp = parsed.take_profit_price;
-    const rRatio = sl && tp && sl > 0 && tp > 0 ? Math.abs(tp - sl) / Math.abs(sl) : null;
+    // Prefer backend r_ratio, else null (we can't correctly compute without entry_price)
+    const rRatio = backendRRatio ?? null;
 
     const signalColor =
       sig === 'BUY' || sig === 'COVER' ? 'text-green-400' :

@@ -24,6 +24,7 @@ import os
 import re
 import threading
 import uuid
+import requests
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -546,10 +547,9 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             print(f"[Analysis {job_id}] Confidence scorer error (non-fatal): {_score_err}")
             import traceback; traceback.print_exc()
 
-        # Build result
         result = {
             "ticker": ticker,
-            "date": trade_date,
+            "date": run_timestamp if run_timestamp else trade_date,
             "decision": decision_signal,
             "stop_loss_price": stop_loss_price,
             "take_profit_price": take_profit_price,
@@ -582,9 +582,19 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             "final_trade_decision": final_state.get("final_trade_decision", ""),
         }
 
+        # Embed all the processed structural risk parameters BACK into the trace history and save it identically
+        final_state.update(result)
+        ta._log_state(run_timestamp if run_timestamp else trade_date, final_state)
+
         print(f"[Analysis {job_id}] Analysis complete, sending done event")
         jobs[job_id]["result"] = result
         jobs[job_id]["status"] = "done"
+
+        # Dispatch Telegram push notification
+        try:
+            _send_telegram_alert(result)
+        except Exception as e:
+            print(f"[Analysis {job_id}] Telegram alert warning: {e}")
 
         # Auto-record shadow decision for later scoring
         try:
@@ -845,10 +855,77 @@ def _extract_signal(text: str) -> str:
             return signal
     return "UNKNOWN"
 
+def _send_telegram_alert(result: dict):
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+        
+    signal = result.get("decision", "UNKNOWN")
+    signal_emoji = "🛑" if signal in ["SHORT", "SELL"] else "🟢" if signal in ["BUY", "COVER"] else "⚖️"
+    conf = result.get("confidence", 0)
+    
+    # Ensure stop loss / take profit handle empty paths
+    sl = result.get("stop_loss_price")
+    tp = result.get("take_profit_price")
+    sl_str = f"${float(sl):,.2f}" if sl else "N/A"
+    tp_str = f"${float(tp):,.2f}" if tp else "N/A"
+    sizing = result.get("position_size_pct", 0)
+    
+    raw_date = result.get('date', '')
+    try:
+        from datetime import datetime, timezone
+        # If timestamp ends at hours, append minutes/seconds so fromisoformat works consistently
+        normalized_raw = raw_date
+        if "T" in normalized_raw:
+            parts = normalized_raw.split("T")
+            if ":" not in parts[1]:
+                normalized_raw = f"{parts[0]}T{parts[1]}:00:00"
+        
+        # Parse it as UTC explicitly (scheduler drops raw local/UTC depending, assume UTC as defined by YFinance constraints)
+        dt = datetime.fromisoformat(normalized_raw.replace("Z", ""))
+        dt = dt.replace(tzinfo=timezone.utc)
+        
+        # Localize to system timezone
+        local_dt = dt.astimezone()
+        fmt_date = local_dt.strftime("%b %d, %Y at %I:%M %p")
+    except Exception:
+        fmt_date = raw_date
+
+    rr_value = result.get("r_ratio")
+    rr_prefix = f"R:R Ratio: {rr_value:.2f}:1 | " if rr_value is not None else "R:R Ratio: N/A | "
+    conviction = result.get("conviction_label", "MODERATE")
+    
+    msg = (
+        f"🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
+        f"🗓 <b>Time:</b> {fmt_date} \n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>Decision:</b> {signal_emoji} {signal}\n"
+        f"⚖️ <b>Confidence:</b> {conf * 100:.1f}%\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💰 <b>Action Plan:</b>\n"
+        f"• <b>Size:</b> {sizing * 100:.1f}%\n"
+        f"• <b>Stop Loss:</b> {sl_str}\n"
+        f"• <b>Take Profit:</b> {tp_str}\n"
+        f"• <b>Hold:</b> {result.get('max_hold_days', 'N/A')} Period(s)\n\n"
+        "📈 <b>Metrics:</b>\n"
+        f"{rr_prefix}Conviction: {conviction}\n\n"
+        "📝 <b>Bot Reasoning:</b>\n"
+        f"<code>{result.get('final_trade_decision')}</code>"
+    )
+    
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": msg,
+        "parse_mode": "HTML"
+    }
+    requests.post(url, json=payload, timeout=10)
+
 
 @app.get("/api/history/{ticker}/{analysis_date}")
 async def get_analysis(ticker: str, analysis_date: str):
-    """Return full log JSON for a specific analysis."""
+    """Return full log JSON for a specific analysis, augmented with risk parameters."""
     log_file = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{analysis_date}.json"
     if not log_file.exists():
         raise HTTPException(status_code=404, detail=f"No analysis found for {ticker} on {analysis_date}")
@@ -858,6 +935,69 @@ async def get_analysis(ticker: str, analysis_date: str):
     # Extract the base date to parse correctly via fallback hierarchy 
     base_date = analysis_date.split("T")[0]
     date_data = data.get(analysis_date) or data.get(base_date) or data
+
+    # Reconstruct risk parameters that are normally only present during live run
+    decision_text = date_data.get("final_trade_decision", "")
+    
+    # NEW FIX: Strongly prefer explicit parameters saved via the live Telegram injection
+    decision_signal = date_data.get("decision")
+    stop_loss_price = date_data.get("stop_loss_price")
+    take_profit_price = date_data.get("take_profit_price")
+    confidence = date_data.get("confidence")
+    max_hold_days = date_data.get("max_hold_days")
+
+    if not decision_signal:
+        try:
+            parsed = json.loads(decision_text)
+            decision_signal = _extract_signal(parsed.get("signal", ""))
+            stop_loss_price = parsed.get("stop_loss_price")
+            take_profit_price = parsed.get("take_profit_price")
+            confidence = parsed.get("confidence")
+            max_hold_days = parsed.get("max_hold_days")
+        except Exception:
+            decision_signal = _extract_signal(str(decision_text).upper())
+
+    try:
+        from tradingagents.graph.confidence import ConfidenceScorer
+        from tradingagents.backtesting.regime import detect_regime_context
+        from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_asset
+
+        regime_ctx = detect_regime_context(ticker, analysis_date)
+        
+        # Apply crypto guards
+        if _is_crypto_asset(ticker):
+            if max_hold_days and max_hold_days > 7:
+                max_hold_days = 7
+            if decision_signal in ('SHORT', 'SELL') and regime_ctx.get('current_price') and stop_loss_price:
+                max_crypto_stop = regime_ctx['current_price'] * 1.12
+                if stop_loss_price > max_crypto_stop:
+                    stop_loss_price = max_crypto_stop
+
+        scored = ConfidenceScorer().score(
+            llm_confidence=confidence if confidence is not None else 0.50,
+            ticker=ticker,
+            signal=decision_signal,
+            knowledge_store=None,
+            regime_ctx=regime_ctx,
+            stop_loss=stop_loss_price,
+            take_profit=take_profit_price,
+            max_hold_days=max_hold_days if max_hold_days is not None else 3
+        )
+
+        date_data["decision"] = decision_signal
+        date_data["stop_loss_price"] = stop_loss_price
+        date_data["take_profit_price"] = take_profit_price
+        date_data["confidence"] = confidence if confidence is not None else 0.50
+        date_data["max_hold_days"] = max_hold_days
+        date_data["position_size_pct"] = scored.get("position_size_pct")
+        date_data["conviction_label"] = scored.get("conviction_label")
+        date_data["r_ratio"] = scored.get("r_ratio")
+        date_data["gated"] = scored.get("gated", False)
+        date_data["r_ratio_warning"] = scored.get("r_ratio_warning", False)
+        date_data["hold_period_scalar"] = scored.get("hold_period_scalar")
+        date_data["hedge_penalty_applied"] = scored.get("hedge_penalty_applied")
+    except Exception as e:
+        print(f"Failed to rebuild risk parameters for history {analysis_date}: {e}")
 
     return {
         "ticker": ticker,
@@ -869,16 +1009,19 @@ async def get_analysis(ticker: str, analysis_date: str):
 # ── Price Data Endpoint ──────────────────────────────────────────────
 
 @app.get("/api/price/{ticker}")
-async def get_price(ticker: str, days: int = 90):
+async def get_price(ticker: str, days: int = 90, interval: str = "1d"):
     """Fetch OHLCV + SMA data for chart rendering."""
     try:
-        # Fetch extra data for SMA computation
-        fetch_days = days + 200
-        end_dt = datetime.now()
-        start_dt = end_dt - timedelta(days=fetch_days)
-
         stock = yf.Ticker(ticker)
-        hist = stock.history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"))
+        
+        if interval == "4h":
+            # For 4h, max period is 60d. 60d has enough 4h candles (360) for a 200 SMA
+            hist = stock.history(period="60d", interval="4h")
+        else:
+            fetch_days = days + 200
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=fetch_days)
+            hist = stock.history(start=start_dt.strftime("%Y-%m-%d"), end=end_dt.strftime("%Y-%m-%d"), interval="1d")
 
         if hist.empty:
             raise HTTPException(status_code=404, detail=f"No price data for {ticker}")
@@ -887,13 +1030,16 @@ async def get_price(ticker: str, days: int = 90):
         hist["SMA50"] = hist["Close"].rolling(window=50).mean()
         hist["SMA200"] = hist["Close"].rolling(window=200).mean()
 
-        # Trim to requested days
-        hist = hist.tail(days)
+        # Trim to requested chunks (each day has ~6 chunks of 4 hours)
+        tail_candles = days * 6 if interval == "4h" else days
+        hist = hist.tail(tail_candles)
 
         records = []
         for idx, row in hist.iterrows():
+            # For 4h, datetime includes hour/min. Ensure frontend UI gracefully parses it
+            dt_str = idx.strftime("%Y-%m-%dT%H:00:00Z") if interval == "4h" else idx.strftime("%Y-%m-%d")
             records.append({
-                "date": idx.strftime("%Y-%m-%d"),
+                "date": dt_str,
                 "open": round(row["Open"], 2),
                 "high": round(row["High"], 2),
                 "low": round(row["Low"], 2),
