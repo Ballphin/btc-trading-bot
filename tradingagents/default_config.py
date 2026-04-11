@@ -29,6 +29,7 @@ DEFAULT_CONFIG = {
     "ensemble_enabled_providers": ["openrouter"],  # Only these get ensemble
     "ensemble_disabled_providers": ["deepseek"],  # Never ensemble these
     "openrouter_fallback_model": "anthropic/claude-3.5-sonnet",  # BLOCKER FIX: Retry diversity
+    "openrouter_max_tokens": 4096,       # Avoid oversized token budgets on limited OpenRouter credits
     
     # Debate and discussion settings
     "max_debate_rounds": 1,

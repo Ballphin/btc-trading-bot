@@ -51,9 +51,10 @@ export default function History() {
   const groupedAnalyses = useMemo(() => {
     const groups: { date: string, items: AnalysisSummary[] }[] = [];
     analyses.forEach(a => {
-      let group = groups.find(g => g.date === a.date);
+      const groupDate = a.local_date || a.date;
+      let group = groups.find(g => g.date === groupDate);
       if (!group) {
-        group = { date: a.date, items: [] };
+        group = { date: groupDate, items: [] };
         groups.push(group);
       }
       group.items.push(a);

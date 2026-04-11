@@ -558,6 +558,13 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 consensus_result = loop.run_until_complete(orchestrator.analyze(ticker, trade_date))
             finally:
                 loop.close()
+
+            if consensus_result.ensemble_metadata.get("error") == "no_valid_ensemble_results":
+                message = "All ensemble runs failed (provider returned no valid outputs)."
+                jobs[job_id]["status"] = "error"
+                jobs[job_id]["error"] = message
+                eq.put({"event": "error", "message": message})
+                return
             
             # Convert ConsensusResult to result dict
             result = _ensemble_result_to_dict(consensus_result, ticker, run_timestamp or trade_date)
@@ -989,9 +996,15 @@ async def list_analyses(ticker: str):
         hour_str = match.group(3)  # e.g. '16' or None
         candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
         time_label = None
+        local_date = analysis_date
         if hour_str:
             # Emit a strict ISO 8601 UTC string to let the frontend localize it
             time_label = f"{analysis_date}T{hour_str}:00:00Z"
+            try:
+                utc_dt = datetime.fromisoformat(time_label.replace("Z", "+00:00"))
+                local_date = utc_dt.astimezone().strftime("%Y-%m-%d")
+            except Exception:
+                local_date = analysis_date
 
         # Extract signal from nested date key in log file
         try:
@@ -1007,6 +1020,7 @@ async def list_analyses(ticker: str):
 
         analyses.append({
             "date": analysis_date,
+            "local_date": local_date,
             "candle_time": candle_time,
             "time": time_label,          # '16:00' for intraday, null for daily
             "signal": signal,

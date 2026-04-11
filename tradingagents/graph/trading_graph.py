@@ -177,6 +177,9 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
+        elif provider == "openrouter":
+            kwargs["max_tokens"] = self.config.get("openrouter_max_tokens", 4096)
+
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:

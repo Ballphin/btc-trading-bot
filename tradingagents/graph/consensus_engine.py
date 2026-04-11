@@ -86,6 +86,38 @@ class ConsensusEngine:
         Returns:
             ConsensusResult with averaged parameters
         """
+        if not results:
+            return ConsensusResult(
+                signal="HOLD",
+                confidence=0.0,
+                stop_loss_price=round(entry_price * 0.95, 2),
+                take_profit_price=round(entry_price * 1.05, 2),
+                max_hold_days=1,
+                reasoning="No valid ensemble outputs were produced.",
+                individual_results=[],
+                divergence_metrics={
+                    "confidence_range": 0.0,
+                    "signal_agreement": 0.0,
+                    "r_ratio_consensus": 0.0,
+                    "stop_loss_range_pct": 0.0,
+                    "take_profit_range_pct": 0.0,
+                },
+                ensemble_metadata={
+                    "runs": 0,
+                    "valid_runs": 0,
+                    "retry_count": 0,
+                    "entry_price_snapshot": entry_price,
+                    "error": "no_valid_ensemble_results",
+                    "divergence_metrics": {
+                        "confidence_range": 0.0,
+                        "signal_agreement": 0.0,
+                        "r_ratio_consensus": 0.0,
+                        "stop_loss_range_pct": 0.0,
+                        "take_profit_range_pct": 0.0,
+                    },
+                },
+            )
+
         # Extract signals and confidences
         signals = [r.get("signal", "HOLD") for r in results]
         confidences = [r.get("confidence", 0.5) for r in results]
