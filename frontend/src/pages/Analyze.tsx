@@ -188,7 +188,11 @@ export default function Analyze() {
   }, [ticker]);
 
   // Auto-start on mount (ref guard prevents Strict Mode double-fire)
-  useEffect(() => { start(); }, [start]);
+  useEffect(() => {
+    queueMicrotask(() => {
+      void start();
+    });
+  }, [start]);
 
   // SSE stream
   useEffect(() => {

@@ -10,4 +10,20 @@ export default defineConfig({
       '/api': 'http://localhost:8000',
     },
   },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.ts',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      include: ['src/lib/**/*.ts', 'src/components/**/*.tsx', 'src/pages/**/*.tsx'],
+      thresholds: {
+        statements: 70,
+        lines: 70,
+        functions: 65,
+        branches: 60,
+      },
+    },
+  },
 })

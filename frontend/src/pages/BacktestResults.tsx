@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, TrendingUp, BarChart3, Download, Brain, ChevronDown, ChevronUp } from 'lucide-react';
-import { API_BASE_URL, type BacktestResult, type PriceRecord, fetchPrice } from '../lib/api';
+import { API_BASE_URL, type BacktestResult, type PriceRecord, type BacktestDecision, type TradeRecord, fetchPrice } from '../lib/api';
 import PriceChart from '../components/PriceChart';
 import EquityCurveChart from '../components/EquityCurveChart';
 import useDocumentTitle from '../hooks/useDocumentTitle';
@@ -22,6 +22,42 @@ interface StatusStep {
   timestamp: string;
 }
 
+interface StreamDecision {
+  date: string;
+  signal: string;
+  price?: number;
+}
+
+interface BacktestLesson {
+  category?: string;
+  confidence?: string;
+  regime?: string;
+  lesson: string;
+  win_rate?: number;
+  avg_return?: number;
+  sample_size?: number;
+}
+
+interface BacktestStreamEvent {
+  event: 'status' | 'progress' | 'decision' | 'complete' | 'warning' | 'error' | 'ping';
+  step?: number;
+  total_steps?: number;
+  status?: string;
+  details?: string;
+  current?: number;
+  total?: number;
+  date?: string;
+  signal?: string;
+  price?: number;
+  result?: BacktestResult;
+  type?: string;
+  requested?: string;
+  actual?: string;
+  message?: string;
+}
+
+type TradeRow = TradeRecord & { action?: string; position?: string; kelly_size?: number | null };
+
 export default function BacktestResults() {
   const { jobId } = useParams<{ jobId: string }>();
   const [job, setJob] = useState<BacktestJob | null>(null);
@@ -29,12 +65,12 @@ export default function BacktestResults() {
   useDocumentTitle(resultTicker0 ? `${resultTicker0} Backtest` : 'Backtest Results');
   const [priceData, setPriceData] = useState<PriceRecord[]>([]);
   const [progress, setProgress] = useState({ current: 0, total: 0, date: '' });
-  const [decisions, setDecisions] = useState<any[]>([]);
+  const [decisions, setDecisions] = useState<StreamDecision[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [statusSteps, setStatusSteps] = useState<StatusStep[]>([]);
   const [currentStep, setCurrentStep] = useState(0);
-  const [lessons, setLessons] = useState<any[]>([]);
+  const [lessons, setLessons] = useState<BacktestLesson[]>([]);
   const [lessonsExpanded, setLessonsExpanded] = useState(true);
   const [dateRangeWarning, setDateRangeWarning] = useState<{ requested: string; actual: string } | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -90,14 +126,14 @@ export default function BacktestResults() {
       const eventSource = new EventSource(`${API_BASE_URL}/backtest/stream/${jobId}`);
       eventSourceRef.current = eventSource;
 
-    const handleEvent = (eventData: any) => {
+    const handleEvent = (eventData: BacktestStreamEvent) => {
       try {
         switch (eventData.event) {
-          case 'status':
+          case 'status': {
             const step: StatusStep = {
-              step: eventData.step,
-              total_steps: eventData.total_steps,
-              status: eventData.status,
+              step: eventData.step || 0,
+              total_steps: eventData.total_steps || 0,
+              status: eventData.status || 'Running',
               details: eventData.details,
               timestamp: new Date().toISOString(),
             };
@@ -105,19 +141,27 @@ export default function BacktestResults() {
               const filtered = prev.filter((s) => s.step !== step.step);
               return [...filtered, step].sort((a, b) => a.step - b.step);
             });
-            setCurrentStep(eventData.step);
+            setCurrentStep(eventData.step || 0);
             break;
+          }
           
           case 'progress':
             setProgress({
-              current: eventData.current,
-              total: eventData.total,
-              date: eventData.date,
+              current: eventData.current || 0,
+              total: eventData.total || 0,
+              date: eventData.date || '',
             });
             break;
           
           case 'decision':
-            setDecisions((prev) => [...prev, eventData]);
+            setDecisions((prev) => [
+              ...prev,
+              {
+                date: eventData.date || '',
+                signal: eventData.signal || 'HOLD',
+                price: eventData.price,
+              },
+            ]);
             break;
           
           case 'complete':
@@ -142,7 +186,7 @@ export default function BacktestResults() {
           
           case 'warning':
             if (eventData.type === 'date_range_adjusted') {
-              setDateRangeWarning({ requested: eventData.requested, actual: eventData.actual });
+              setDateRangeWarning({ requested: eventData.requested || '', actual: eventData.actual || '' });
             }
             break;
 
@@ -376,7 +420,7 @@ export default function BacktestResults() {
   const ticker = config?.ticker || 'UNKNOWN';
 
   // Prepare signal markers for price chart
-  const signalMarkers = resultDecisions?.map((d: any) => ({
+  const signalMarkers = resultDecisions?.map((d: BacktestDecision) => ({
     date: d.date,
     signal: d.signal,
     price: d.price,
@@ -489,7 +533,7 @@ export default function BacktestResults() {
               <p className="text-sm text-slate-400 mb-3">
                 These insights are derived from historical backtest performance and are fed into future LLM decisions.
               </p>
-              {lessons.map((lesson: any, i: number) => {
+              {lessons.map((lesson, i: number) => {
                 const category = (lesson.category || 'general').replace(/_/g, ' ');
                 const confidence = lesson.confidence || 'medium';
                 const regime = lesson.regime ? lesson.regime.replace(/_/g, ' ') : null;
@@ -665,7 +709,9 @@ export default function BacktestResults() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
-              {trade_history?.map((trade: any, idx: number) => (
+              {trade_history?.map((trade: TradeRow, idx: number) => {
+                const openPnl = trade.unrealized_pnl ?? 0;
+                return (
                 <tr key={idx} className="hover:bg-slate-700/30">
                   <td className="px-4 py-3 text-sm text-slate-300">{trade.date}</td>
                   <td className="px-4 py-3">
@@ -685,20 +731,20 @@ export default function BacktestResults() {
                     ${trade.price?.toLocaleString()}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-400 truncate max-w-xs">
-                    {trade.action}
+                    {trade.action_taken || trade.action}
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-300 text-right">
                     ${trade.portfolio_value?.toLocaleString()}
                   </td>
-                  <td className={`px-4 py-3 text-sm text-right font-medium ${trade.unrealized_pnl > 0 ? 'text-green-400' : trade.unrealized_pnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
-                    ${trade.unrealized_pnl?.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) || '0.00'}
+                  <td className={`px-4 py-3 text-sm text-right font-medium ${openPnl > 0 ? 'text-green-400' : openPnl < 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                    ${openPnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
                   </td>
                   <td className="px-4 py-3 text-sm text-right text-slate-400">
                     {trade.kelly_size != null ? `${(trade.kelly_size * 100).toFixed(1)}%` : '—'}
                   </td>
-                  <td className="px-4 py-3 text-sm text-slate-400">{trade.position}</td>
+                  <td className="px-4 py-3 text-sm text-slate-400">{trade.position || trade.position_side}</td>
                 </tr>
-              ))}
+              )})}
             </tbody>
           </table>
         </div>

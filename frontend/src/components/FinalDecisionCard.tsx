@@ -1,7 +1,5 @@
-import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import { CheckCircle2, AlertTriangle, XCircle, TrendingDown, TrendingUp, Minus } from 'lucide-react';
-import SignalBadge from './SignalBadge';
 
 interface StructuredDecision {
   signal: string;

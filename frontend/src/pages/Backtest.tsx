@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Play, TrendingUp, AlertCircle, ServerOff } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
@@ -11,6 +11,14 @@ const FREQUENCIES = [
   { value: 'biweekly', label: 'Bi-weekly' },
   { value: 'monthly', label: 'Monthly' },
 ];
+
+interface ActiveBacktest {
+  job_id: string;
+  ticker: string;
+  start_date: string;
+  end_date: string;
+  mode: string;
+}
 
 export default function Backtest() {
   useDocumentTitle('Backtest Strategy');
@@ -41,7 +49,7 @@ export default function Backtest() {
   const [useFunding, setUseFunding] = useState(true);
   
   // Active backtests (running)
-  const [activeBacktests, setActiveBacktests] = useState<any[]>([]);
+  const [activeBacktests, setActiveBacktests] = useState<ActiveBacktest[]>([]);
 
   const isCrypto = ticker.includes('-USD') || ticker.includes('-USDT') || ticker.includes('-BTC');
 
@@ -99,7 +107,7 @@ export default function Backtest() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     
     // Check server before submitting

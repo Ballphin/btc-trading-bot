@@ -5,6 +5,7 @@ import sys
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+import pytest
 
 # Test imports
 try:
@@ -15,6 +16,26 @@ try:
 except Exception as e:
     print(f"✗ Import error: {e}")
     sys.exit(1)
+
+
+@pytest.fixture
+def portfolio():
+    return test_portfolio_with_risk_management()
+
+
+@pytest.fixture
+def metrics(portfolio):
+    return compute_metrics(
+        equity_curve=portfolio.equity_curve,
+        closed_positions=portfolio.closed_positions,
+        initial_capital=portfolio.initial_capital,
+        total_fees=portfolio.total_fees_paid,
+        total_funding=portfolio.total_funding_paid,
+        liquidations=portfolio.liquidations,
+        leverage=portfolio.leverage,
+        stops_hit=portfolio.stops_hit,
+        takes_hit=portfolio.takes_hit,
+    )
 
 def test_portfolio_with_risk_management():
     """Test Portfolio with stop loss, take profit, and time exits."""

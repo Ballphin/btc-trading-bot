@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle, Clock } from 'lucide-react';
+import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
@@ -47,20 +47,29 @@ export default function AnalysisDetail() {
   const navigate = useNavigate();
   const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
   const [priceData, setPriceData] = useState<PriceRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [analysisKey, setAnalysisKey] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'reports' | 'debates'>('overview');
+  const requestKey = ticker && date ? `${ticker}:${date}` : '';
+  const loading = Boolean(requestKey) && analysisKey !== requestKey;
 
   useEffect(() => {
-    if (!ticker || !date) return;
-    setLoading(true);
+    if (!ticker || !date || !requestKey) return;
+    let cancelled = false;
+
     Promise.all([
       fetchAnalysis(ticker, date).catch(() => null),
       fetchPrice(ticker, 30, '4h').catch(() => []),
     ]).then(([a, p]) => {
+      if (cancelled) return;
       setAnalysis(a);
       setPriceData(p);
-    }).finally(() => setLoading(false));
-  }, [ticker, date]);
+      setAnalysisKey(requestKey);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker, date, requestKey]);
 
   if (loading) {
     return (
@@ -158,7 +167,7 @@ export default function AnalysisDetail() {
             </div>
             <FinalDecisionCard
               text={analysis.trader_investment_decision || analysis.final_trade_decision}
-              signal={analysis.decision}
+              signal={signal}
               confidence={analysis.confidence}
               rRatio={analysis.r_ratio}
             />

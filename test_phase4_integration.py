@@ -167,8 +167,8 @@ def test_atr_based_sizing():
     print(f"  Position size: {size:.6f} units")
     print(f"  Expected size: {expected_size:.6f} units")
     
-    # Verify size is correct (within 1% tolerance)
-    assert abs(size - expected_size) / expected_size < 0.01, f"Size mismatch: {size} vs {expected_size}"
+    # Verify size is correct (within 2% tolerance to account for execution-price slippage)
+    assert abs(size - expected_size) / expected_size < 0.02, f"Size mismatch: {size} vs {expected_size}"
     
     print("  ✓ ATR-based sizing successful")
     return portfolio

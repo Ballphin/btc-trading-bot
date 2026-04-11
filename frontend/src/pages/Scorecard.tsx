@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Target, TrendingUp, TrendingDown, BarChart3, RefreshCw, AlertCircle, CheckCircle2, XCircle, Activity, Zap, Shield, Clock, PlayCircle, StopCircle } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LineChart, Line, CartesianGrid, Legend } from 'recharts';
@@ -94,7 +95,7 @@ const SIGNAL_COLORS: Record<string, string> = {
 };
 
 function StatCard({ label, value, sub, icon: Icon, color = 'text-white' }: {
-  label: string; value: string | number; sub?: string; icon: any; color?: string;
+  label: string; value: string | number; sub?: string; icon: LucideIcon; color?: string;
 }) {
   return (
     <div className="glass-static p-4 flex flex-col gap-1">
@@ -160,7 +161,7 @@ export default function ScorecardPage() {
       const data = await res.json();
       setScheduler(prev => prev ? { ...prev, enabled: data.enabled } : null);
       await fetchSchedulerStatus();
-    } catch (err) {
+    } catch {
       setError('Failed to toggle scheduler');
     } finally {
       setSchedulerToggling(false);
@@ -311,7 +312,11 @@ export default function ScorecardPage() {
             {scheduler.enabled && (
               <button
                 onClick={async () => {
-                  try { await fetch(`${API_BASE_URL}/scheduler/run-now`, { method: 'POST' }); } catch {}
+                  try {
+                    await fetch(`${API_BASE_URL}/scheduler/run-now`, { method: 'POST' });
+                  } catch {
+                    setError('Failed to trigger scheduler run');
+                  }
                 }}
                 className="px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-700 text-slate-300 hover:text-white hover:bg-slate-600 transition-colors"
               >

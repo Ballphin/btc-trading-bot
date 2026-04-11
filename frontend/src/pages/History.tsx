@@ -11,18 +11,39 @@ export default function History() {
   const navigate = useNavigate();
   const [tickers, setTickers] = useState<TickerInfo[]>([]);
   const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [tickersLoading, setTickersLoading] = useState(true);
+  const [loadedTicker, setLoadedTicker] = useState<string | null>(null);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
+  const loading = tickersLoading || (!!selectedTicker && loadedTicker !== selectedTicker);
 
   useEffect(() => {
-    fetchTickers().then(setTickers).catch(() => {}).finally(() => setLoading(false));
+    fetchTickers().then(setTickers).catch(() => {}).finally(() => setTickersLoading(false));
   }, []);
 
   useEffect(() => {
     if (selectedTicker) {
-      setLoading(true);
-      fetchAnalyses(selectedTicker).then(setAnalyses).catch(() => setAnalyses([])).finally(() => setLoading(false));
-      setExpandedDates(new Set()); // Reset expansions when ticker changes
+      let cancelled = false;
+      queueMicrotask(() => {
+        if (!cancelled) setExpandedDates(new Set());
+      }); // Reset expansions when ticker changes
+
+      fetchAnalyses(selectedTicker)
+        .then((items) => {
+          if (cancelled) return;
+          setAnalyses(items);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setAnalyses([]);
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setLoadedTicker(selectedTicker);
+        });
+
+      return () => {
+        cancelled = true;
+      };
     }
   }, [selectedTicker]);
 
