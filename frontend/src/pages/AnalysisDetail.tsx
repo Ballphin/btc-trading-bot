@@ -90,6 +90,9 @@ export default function AnalysisDetail() {
     );
   }
 
+  // SSE FIX: Format date with error boundary - use API formatted date or fallback
+  const displayDate = analysis.date_formatted || date;
+
   const signal = extractSignal(analysis.final_trade_decision);
 
   // Try to extract entry price from trader investment decision or final decision
@@ -124,7 +127,7 @@ export default function AnalysisDetail() {
         </button>
         <div className="flex-1">
           <h1 className="text-2xl font-bold text-white">{ticker}</h1>
-          <p className="text-sm text-slate-500">{date}</p>
+          <p className="text-sm text-slate-500">{displayDate}</p>
         </div>
         <SignalBadge signal={signal} size="lg" />
       </div>

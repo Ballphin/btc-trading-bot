@@ -98,8 +98,9 @@ class ConfidenceScorer:
                 breakeven_p = 0.50
 
             raw_multiplier = win_rate / breakeven_p if breakeven_p > 0 else 1.0
-            # Weight towards 1.0 (no adjustment) for small samples
-            weight = min(1.0, sample_size / 20.0)
+            # SQR FIX: Use square root law for sample size weighting (more statistically sound)
+            # weight = sqrt(sample_size / 30) where 30 is the baseline for full weight
+            weight = min(1.0, math.sqrt(sample_size / 30.0))
             effective_multiplier = 1.0 + (raw_multiplier - 1.0) * weight
             calibrated = _clamp(calibrated * effective_multiplier, 0.30, 0.95)
 
@@ -127,6 +128,8 @@ class ConfidenceScorer:
         signal: str,
         max_hold_days: int = 7,
         sample_size: int = 0,
+        leverage: float = 1.0,
+        liquidation_price: Optional[float] = None,
     ) -> tuple:
         """Compute position size as a fraction of portfolio using half-Kelly.
 
@@ -189,6 +192,14 @@ class ConfidenceScorer:
 
         # Hold-period scalar: longer holds have higher variance, scale down
         hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))
+
+        # WCT FIX: Liquidation guard for crypto leverage
+        # Position size capped at liquidation threshold to prevent forced liquidation
+        if liquidation_price and leverage > 1 and entry_price:
+            liq_distance = abs(entry_price - liquidation_price) / entry_price
+            if liq_distance > 0:
+                max_position_liq = self.PORTFOLIO_RISK_TARGET / (liq_distance * leverage)
+                half_kelly = min(half_kelly, max_position_liq)
 
         size = _clamp(min(half_kelly, vol_cap) * hold_scalar, 0.0, 1.0)
         return size, r_ratio, hold_scalar
@@ -330,6 +341,10 @@ class ConfidenceScorer:
         )
 
         # ── Position sizing: Kelly when eligible, fixed fallback otherwise ──
+        # TODO: Get actual leverage and liquidation_price from caller for crypto assets
+        leverage = 1.0  # Default to spot (no leverage)
+        liquidation_price = None  # No liquidation for spot
+        
         if kelly_eligible:
             position_size_pct, r_ratio, hold_scalar = self.kelly_position_size(
                 p=calibrated,
@@ -340,6 +355,8 @@ class ConfidenceScorer:
                 signal=signal,
                 max_hold_days=max_hold_days,
                 sample_size=sample_size,
+                leverage=leverage,
+                liquidation_price=liquidation_price,
             )
         else:
             hold_scalar = min(1.0, self.HOLD_BASELINE_DAYS / max(max_hold_days, 1))

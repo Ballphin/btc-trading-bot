@@ -17,6 +17,19 @@ DEFAULT_CONFIG = {
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
     "llm_temperature": 0.4,             # 0.0=deterministic, 0.4=modest diversity
+    
+    # Ensemble analysis settings
+    "enable_ensemble": True,             # Auto-enabled for OpenRouter
+    "ensemble_runs": 3,                  # Number of parallel analyses
+    "ensemble_max_retries": 2,           # Re-run attempts on divergence
+    "ensemble_divergence_range_threshold": 0.20,  # HIGH FIX: Range threshold (not std)
+    "ensemble_timeout_per_run": 300,     # 5 minutes per run (BLOCKER FIX)
+    "ensemble_max_total_time": 30,       # 30s before stale warning (BLOCKER FIX)
+    "ensemble_temperature_variation": 0.05,  # +/- temp spread across runs
+    "ensemble_enabled_providers": ["openrouter"],  # Only these get ensemble
+    "ensemble_disabled_providers": ["deepseek"],  # Never ensemble these
+    "openrouter_fallback_model": "anthropic/claude-3.5-sonnet",  # BLOCKER FIX: Retry diversity
+    
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Search, Clock, ArrowRight } from 'lucide-react';
 import { fetchTickers, type TickerInfo } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+import ModelSelectorTicker from '../components/ModelSelectorTicker';
 
 const QUICK_TICKERS = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'NVDA', 'AAPL', 'TSLA'];
 
@@ -12,6 +13,18 @@ export default function Home() {
   const [query, setQuery] = useState('');
   const [tickers, setTickers] = useState<TickerInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  
+  // HIGH FIX: Model configuration state
+  type Provider = 'openrouter' | 'deepseek' | 'openai' | 'anthropic';
+  const [modelConfig, setModelConfig] = useState<{
+    provider: Provider;
+    model: string;
+    parallelMode: boolean;
+  }>({
+    provider: 'openrouter',
+    model: 'qwen/qwen3.6-plus',
+    parallelMode: true,
+  });
 
   useEffect(() => {
     fetchTickers().then(setTickers).catch(() => {}).finally(() => setLoading(false));
@@ -20,13 +33,29 @@ export default function Home() {
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     const ticker = query.trim().toUpperCase();
-    if (ticker) navigate(`/analyze/${ticker}`);
-  }, [query, navigate]);
+    if (ticker) {
+      // HIGH FIX: Pass model config to analysis page
+      navigate(`/analyze/${ticker}`, { state: { modelConfig } });
+    }
+  }, [query, navigate, modelConfig]);
 
-  const handleQuick = (ticker: string) => navigate(`/analyze/${ticker}`);
+  // HIGH FIX: Pass model config when navigating
+  const handleQuick = (ticker: string) => {
+    navigate(`/analyze/${ticker}`, { state: { modelConfig } });
+  };
+  
+  const handleConfigChange = (newConfig: typeof modelConfig) => {
+    setModelConfig(newConfig);
+  };
 
   return (
     <div className="min-h-[calc(100vh-3.5rem)] flex flex-col">
+      {/* HIGH FIX: Model Selector Ticker */}
+      <ModelSelectorTicker 
+        currentTicker={query.toUpperCase() || undefined}
+        onConfigChange={handleConfigChange}
+      />
+      
       {/* Hero */}
       <div className="flex-1 flex flex-col items-center justify-center px-6 py-20">
         <div className="text-center max-w-2xl animate-fade-in-up">

@@ -120,7 +120,17 @@ async def _auto_analysis_scheduler():
             logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
             logical_date = boundary_utc.strftime("%Y-%m-%d")
 
-            logger.info(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label}")
+            # Check if ensemble mode will be used
+            from tradingagents.default_config import DEFAULT_CONFIG
+            from tradingagents.graph.ensemble_orchestrator import should_use_ensemble
+            current_provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
+            ensemble_active = should_use_ensemble(DEFAULT_CONFIG, current_provider)
+            
+            if ensemble_active:
+                logger.info(f"[Scheduler] Running ENSEMBLE auto-analysis (3x parallel) for {_SCHEDULER_TICKERS} @ {logical_label}")
+            else:
+                logger.info(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label} (provider: {current_provider})")
+            
             for ticker in _SCHEDULER_TICKERS:
                 job_id = str(uuid.uuid4())[:8]
                 eq = JobEventQueue()
@@ -144,13 +154,23 @@ async def _auto_analysis_scheduler():
 
             _scheduler_state["last_run"] = logical_label
             _scheduler_state["last_status"] = "ok"
+            _scheduler_state["error_count"] = 0  # Reset on success
 
         except asyncio.CancelledError:
             logger.info("[Scheduler] Task cancelled")
             break
         except Exception as e:
-            logger.error(f"[Scheduler] Error: {e}")
+            error_count = _scheduler_state.get("error_count", 0) + 1
+            _scheduler_state["error_count"] = error_count
+            logger.error(f"[Scheduler] Error ({error_count}/3): {e}")
             _scheduler_state["last_status"] = f"error: {e}"
+            
+            # BLOCKER FIX: Circuit breaker - disable after 3 consecutive errors
+            if error_count >= 3:
+                _scheduler_state["enabled"] = False
+                logger.error("[Scheduler] DISABLED after 3 consecutive errors")
+                break
+            
             await asyncio.sleep(60)  # brief wait before retry
 
     logger.info("[Scheduler] Stopped")
@@ -261,6 +281,103 @@ async def scheduler_run_now():
         launched.append({"ticker": ticker, "job_id": job_id})
 
     return {"launched": launched, "candle_time": logical_label}
+
+
+# ── Model Configuration API Endpoints ──────────────────────────────────
+
+class ModelConfigRequest(BaseModel):
+    """Request model for updating model configuration."""
+    provider: str
+    model: str
+    parallel_mode: bool = True
+
+
+@app.get("/api/model/config")
+async def get_model_config():
+    """Get current model configuration including ensemble settings."""
+    from tradingagents.default_config import DEFAULT_CONFIG
+    
+    return {
+        "provider": DEFAULT_CONFIG.get("llm_provider", "openrouter"),
+        "model": DEFAULT_CONFIG.get("deep_think_llm", "qwen/qwen3.6-plus"),
+        "ensemble_enabled": DEFAULT_CONFIG.get("enable_ensemble", True),
+        "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs", 3),
+        "ensemble_providers": DEFAULT_CONFIG.get("ensemble_enabled_providers", ["openrouter"]),
+        "single_run_providers": DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"]),
+        "fallback_model": DEFAULT_CONFIG.get("openrouter_fallback_model", "anthropic/claude-3.5-sonnet"),
+    }
+
+
+@app.post("/api/model/config")
+async def set_model_config(req: ModelConfigRequest):
+    """Update model configuration for session (non-persistent).
+    
+    Note: Ensemble is auto-disabled for providers in ensemble_disabled_providers.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+    
+    # Update configuration
+    DEFAULT_CONFIG["llm_provider"] = req.provider
+    DEFAULT_CONFIG["deep_think_llm"] = req.model
+    
+    # Check if provider supports ensemble
+    disabled_providers = DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"])
+    enabled_providers = DEFAULT_CONFIG.get("ensemble_enabled_providers", ["openrouter"])
+    
+    if req.provider.lower() in disabled_providers:
+        DEFAULT_CONFIG["enable_ensemble"] = False
+        ensemble_active = False
+        message = f"Ensemble disabled (not supported for {req.provider})"
+    elif req.provider.lower() in enabled_providers:
+        DEFAULT_CONFIG["enable_ensemble"] = req.parallel_mode
+        ensemble_active = req.parallel_mode
+        message = f"Ensemble {'enabled' if req.parallel_mode else 'disabled'} for {req.provider}"
+    else:
+        # Default to user preference
+        DEFAULT_CONFIG["enable_ensemble"] = req.parallel_mode
+        ensemble_active = req.parallel_mode
+        message = f"Configuration updated"
+    
+    return {
+        "status": "ok",
+        "provider": req.provider,
+        "model": req.model,
+        "ensemble_active": ensemble_active,
+        "message": message,
+    }
+
+
+@app.get("/api/model/providers")
+async def get_available_providers():
+    """Get list of available LLM providers and their models."""
+    return {
+        "providers": [
+            {
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "models": ["qwen/qwen3.6-plus", "anthropic/claude-3.5-sonnet", "openai/gpt-4o"],
+                "ensemble_supported": True,
+            },
+            {
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "models": ["deepseek-chat", "deepseek-coder"],
+                "ensemble_supported": False,
+            },
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "models": ["gpt-5.2", "gpt-5-mini"],
+                "ensemble_supported": False,
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "models": ["claude-3-5-sonnet-20241022"],
+                "ensemble_supported": False,
+            },
+        ]
+    }
 
 
 class AnalyzeRequest(BaseModel):
@@ -411,11 +528,64 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
     try:
         from tradingagents.default_config import DEFAULT_CONFIG
         from tradingagents.graph.trading_graph import TradingAgentsGraph
+        from tradingagents.graph.ensemble_orchestrator import (
+            EnsembleAnalysisOrchestrator, should_use_ensemble
+        )
 
         config = DEFAULT_CONFIG.copy()
-        config["llm_provider"] = "deepseek"
-        config["deep_think_llm"] = "deepseek-reasoner"
-        config["quick_think_llm"] = "deepseek-chat"
+        
+        # Check if we should use ensemble mode
+        current_provider = config.get("llm_provider", "deepseek")
+        use_ensemble = should_use_ensemble(config, current_provider)
+        
+        if use_ensemble:
+            # HIGH FIX: Use ensemble orchestrator for OpenRouter
+            print(f"[Analysis {job_id}] Ensemble mode enabled for {current_provider}")
+            eq.put({"event": "agent_start", "agent": "Ensemble Analysis (3x parallel)", "step": 0, "total": 9})
+            
+            orchestrator = EnsembleAnalysisOrchestrator(
+                config=config,
+                provider=current_provider,
+                model=config.get("deep_think_llm", "qwen/qwen3.6-plus"),
+                parallel_runs=config.get("ensemble_runs", 3),
+            )
+            
+            # BLOCKER FIX: Run ensemble in thread-safe async manner
+            import asyncio
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                consensus_result = loop.run_until_complete(orchestrator.analyze(ticker, trade_date))
+            finally:
+                loop.close()
+            
+            # Convert ConsensusResult to result dict
+            result = _ensemble_result_to_dict(consensus_result, ticker, run_timestamp or trade_date)
+            
+            # Log and complete
+            print(f"[Analysis {job_id}] Ensemble complete: {consensus_result.signal} "
+                  f"(conf={consensus_result.confidence:.2f}, "
+                  f"agreement={consensus_result.divergence_metrics.get('signal_agreement', 0):.0%})")
+            
+            jobs[job_id]["result"] = result
+            jobs[job_id]["status"] = "done"
+            
+            # Dispatch Telegram
+            try:
+                _send_telegram_alert(result)
+            except Exception as e:
+                print(f"[Analysis {job_id}] Telegram alert warning: {e}")
+            
+            # Signal completion
+            eq.put({"event": "done"})
+            return
+        
+        # Standard single-run mode (existing logic)
+        # Only set defaults if not already configured (respect user's model selection)
+        if not config.get("llm_provider") or config["llm_provider"] == "openai":
+            config["llm_provider"] = "deepseek"
+            config["deep_think_llm"] = "deepseek-reasoner"
+            config["quick_think_llm"] = "deepseek-chat"
         config["max_debate_rounds"] = 1
         config["data_vendors"] = {
             "core_stock_apis": "yfinance",
@@ -855,6 +1025,73 @@ def _extract_signal(text: str) -> str:
             return signal
     return "UNKNOWN"
 
+
+def _ensemble_result_to_dict(consensus_result, ticker: str, date: str) -> dict:
+    """Convert ConsensusResult to standard result dict format.
+    
+    Args:
+        consensus_result: ConsensusResult from ensemble orchestrator
+        ticker: Ticker symbol
+        date: Analysis date
+        
+    Returns:
+        Result dict compatible with existing system
+    """
+    # Build ensemble metadata for Telegram and history
+    individual_signals = [
+        {
+            "signal": r.get("signal", "HOLD"),
+            "confidence": r.get("confidence", 0.5),
+        }
+        for r in consensus_result.individual_results
+    ]
+    
+    ensemble_metadata = {
+        "runs": consensus_result.ensemble_metadata.get("runs", 3),
+        "valid_runs": consensus_result.ensemble_metadata.get("valid_runs", 3),
+        "retry_count": consensus_result.ensemble_metadata.get("retry_count", 0),
+        "divergence_metrics": consensus_result.divergence_metrics,
+        "individual_signals": individual_signals,
+        "entry_price_snapshot": consensus_result.ensemble_metadata.get("entry_price_snapshot"),
+        "stale_price_warning": consensus_result.ensemble_metadata.get("stale_price_warning", False),
+    }
+    
+    # Determine conviction label from confidence
+    confidence = consensus_result.confidence
+    if confidence >= 0.80:
+        conviction_label = "VERY HIGH"
+    elif confidence >= 0.65:
+        conviction_label = "HIGH"
+    elif confidence >= 0.50:
+        conviction_label = "MODERATE"
+    else:
+        conviction_label = "LOW"
+    
+    return {
+        "ticker": ticker,
+        "date": date,
+        "decision": consensus_result.signal,
+        "stop_loss_price": consensus_result.stop_loss_price,
+        "take_profit_price": consensus_result.take_profit_price,
+        "confidence": confidence,
+        "max_hold_days": consensus_result.max_hold_days,
+        "reasoning": consensus_result.reasoning,
+        "position_size_pct": None,  # Will be computed by ConfidenceScorer
+        "conviction_label": conviction_label,
+        "gated": False,  # Will be computed by ConfidenceScorer
+        "r_ratio": consensus_result.divergence_metrics.get("r_ratio_consensus"),
+        "r_ratio_warning": False,
+        "hold_period_scalar": None,
+        "hedge_penalty_applied": 0,
+        "ensemble_metadata": ensemble_metadata,
+        # Reports will be from best individual result
+        "market_report": consensus_result.individual_results[0].get("market_report", "") if consensus_result.individual_results else "",
+        "sentiment_report": consensus_result.individual_results[0].get("sentiment_report", "") if consensus_result.individual_results else "",
+        "news_report": consensus_result.individual_results[0].get("news_report", "") if consensus_result.individual_results else "",
+        "fundamentals_report": consensus_result.individual_results[0].get("fundamentals_report", "") if consensus_result.individual_results else "",
+        "final_trade_decision": consensus_result.reasoning,
+    }
+
 def _send_telegram_alert(result: dict):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -896,9 +1133,42 @@ def _send_telegram_alert(result: dict):
     rr_prefix = f"R:R Ratio: {rr_value:.2f}:1 | " if rr_value is not None else "R:R Ratio: N/A | "
     conviction = result.get("conviction_label", "MODERATE")
     
+    # HIGH FIX: Add ensemble metadata section to Telegram
+    ensemble_meta = result.get("ensemble_metadata", {})
+    ensemble_section = ""
+    if ensemble_meta:
+        runs = ensemble_meta.get("runs", 1)
+        valid = ensemble_meta.get("valid_runs", runs)
+        retries = ensemble_meta.get("retry_count", 0)
+        
+        ensemble_section = f"\n� <b>Ensemble:</b> {valid}/{runs} runs"
+        if retries > 0:
+            ensemble_section += f" (retries: {retries})"
+        
+        # Show divergence metrics
+        div = ensemble_meta.get("divergence_metrics", {})
+        if "confidence_range" in div:
+            ensemble_section += f" | Range: {div['confidence_range']:.1%}"
+        if "signal_agreement" in div:
+            ensemble_section += f" | Agreement: {div['signal_agreement']:.0%}"
+        
+        # HIGH FIX: Show individual signals
+        individual = ensemble_meta.get("individual_signals", [])
+        if individual:
+            sig_strs = []
+            for sig in individual:
+                emoji = "🟢" if sig["signal"] in ["BUY", "COVER"] else "🔴" if sig["signal"] in ["SHORT", "SELL"] else "⚖️"
+                sig_strs.append(f"{emoji}{sig['signal']} {sig['confidence']:.0%}")
+            ensemble_section += f"\n📊 <b>Individual:</b> {' | '.join(sig_strs)}"
+        
+        # BLOCKER FIX: Stale price warning
+        if ensemble_meta.get("stale_price_warning"):
+            ensemble_section += "\n⚠️ <i>Warning: Prices may be stale due to slow execution</i>"
+    
     msg = (
-        f"🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
-        f"🗓 <b>Time:</b> {fmt_date} \n"
+        f"�🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
+        f"🗓 <b>Time:</b> {fmt_date} "
+        f"{ensemble_section}\n"  # HIGH FIX: Added ensemble section
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>Decision:</b> {signal_emoji} {signal}\n"
         f"⚖️ <b>Confidence:</b> {conf * 100:.1f}%\n"
@@ -961,8 +1231,12 @@ async def get_analysis(ticker: str, analysis_date: str):
         from tradingagents.graph.confidence import ConfidenceScorer
         from tradingagents.backtesting.regime import detect_regime_context
         from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_asset
+        from tradingagents.backtesting.knowledge_store import BacktestKnowledgeStore
 
         regime_ctx = detect_regime_context(ticker, analysis_date)
+        
+        # Load actual knowledge store for calibration (BLOCKER FIX: was None)
+        ks = BacktestKnowledgeStore(str(EVAL_RESULTS_DIR))
         
         # Apply crypto guards
         if _is_crypto_asset(ticker):
@@ -973,11 +1247,11 @@ async def get_analysis(ticker: str, analysis_date: str):
                 if stop_loss_price > max_crypto_stop:
                     stop_loss_price = max_crypto_stop
 
-        scored = ConfidenceScorer().score(
+        scored = ConfidenceScorer(results_dir=str(EVAL_RESULTS_DIR)).score(
             llm_confidence=confidence if confidence is not None else 0.50,
             ticker=ticker,
             signal=decision_signal,
-            knowledge_store=None,
+            knowledge_store=ks,
             regime_ctx=regime_ctx,
             stop_loss=stop_loss_price,
             take_profit=take_profit_price,
@@ -999,9 +1273,20 @@ async def get_analysis(ticker: str, analysis_date: str):
     except Exception as e:
         print(f"Failed to rebuild risk parameters for history {analysis_date}: {e}")
 
+    # Add formatted local time with AM/PM for display
+    try:
+        from datetime import timezone
+        analysis_dt = datetime.fromisoformat(analysis_date.replace("Z", ""))
+        analysis_dt = analysis_dt.replace(tzinfo=timezone.utc)
+        local_dt = analysis_dt.astimezone()
+        date_formatted = local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
+    except Exception:
+        date_formatted = analysis_date
+
     return {
         "ticker": ticker,
         "date": analysis_date,
+        "date_formatted": date_formatted,
         "data": date_data,
     }
 
