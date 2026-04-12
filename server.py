@@ -387,7 +387,7 @@ async def get_available_providers():
 class AnalyzeRequest(BaseModel):
     ticker: str
     date: Optional[str] = None
-    force_refresh: bool = False
+    force_refresh: Optional[bool] = None  # None = default to True, False = explicitly disabled
 
 
 class BacktestRequest(BaseModel):
@@ -721,7 +721,6 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                         "step": 0,
                         "content": f"Rate limited by provider, retrying in {int(delay)}s...",
                     })
-                    import time
                     time.sleep(delay)
                     continue
                 else:
@@ -888,7 +887,6 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
     except Exception as e:
         print(f"[Analysis {job_id}] ERROR: {e}")
         import traceback
-        import time
         traceback.print_exc()
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
@@ -1012,8 +1010,17 @@ async def stream_analysis(job_id: str):
     async def event_generator():
         while True:
             try:
-                event = await asyncio.wait_for(eq.get(), timeout=15)
-                yield {"event": event.get("event", "message"), "data": json.dumps(event)}
+                event = await asyncio.wait_for(eq.get(), timeout=30)
+                try:
+                    event_data = json.dumps(event, default=str)
+                    yield {"event": event.get("event", "message"), "data": event_data}
+                except (TypeError, ValueError) as e:
+                    logger.error(f"[SSE {job_id}] Failed to serialize event: {e}")
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"event": "error", "message": f"Event serialization failed: {e}"}),
+                    }
+                    break
                 if event.get("event") in ("done", "error"):
                     break
             except asyncio.TimeoutError:
@@ -1022,6 +1029,13 @@ async def stream_analysis(job_id: str):
                     "event": "heartbeat",
                     "data": json.dumps({"event": "heartbeat", "elapsed": elapsed}),
                 }
+            except Exception as e:
+                logger.error(f"[SSE {job_id}] Unexpected error in event generator: {e}")
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"event": "error", "message": f"Stream error: {e}"}),
+                }
+                break
 
     return EventSourceResponse(event_generator())
 
@@ -1222,11 +1236,127 @@ def _ensemble_result_to_dict(consensus_result, ticker: str, date: str) -> dict:
     }
 
 def _send_telegram_alert(result: dict):
+    """Send Telegram alert for analysis completion.
+    
+    Guarantees alerts are sent for all analysis types (manual, scheduled, ensemble)
+    with proper formatting and correct timestamps.
+    """
+    # Use module-level logger via sys.modules for proper test mocking
+    import sys
+    _logger = sys.modules[__name__].logger
+    
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
+        _logger.warning("Telegram not configured: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing")
         return
+    
+    def _escape_html(text: str) -> str:
+        """Escape HTML special characters for Telegram HTML parse mode."""
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    def _format_reasoning(decision_text: str) -> str:
+        """Parse and format decision reasoning for Telegram display."""
+        if not decision_text:
+            return "<i>No reasoning provided</i>"
         
+        # Try to parse as JSON
+        try:
+            # Strip markdown fences if present
+            cleaned = decision_text.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                if len(lines) > 2:
+                    cleaned = "\n".join(lines[1:-1]) if lines[-1].startswith("```") else "\n".join(lines[1:])
+            
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                # Extract structured fields
+                reasoning = parsed.get("reasoning", "")
+                signal = parsed.get("signal", "")
+                confidence = parsed.get("confidence")
+                max_hold = parsed.get("max_hold_days")
+                
+                parts = []
+                if reasoning:
+                    # Truncate long reasoning to fit Telegram limits
+                    max_len = 800
+                    reason_text = reasoning[:max_len] + "..." if len(reasoning) > max_len else reasoning
+                    parts.append(f"<b>Analysis:</b> {_escape_html(reason_text)}")
+                
+                if signal:
+                    parts.append(f"<b>Signal:</b> {signal}")
+                if confidence is not None:
+                    parts.append(f"<b>Confidence:</b> {confidence * 100:.1f}%")
+                if max_hold:
+                    parts.append(f"<b>Max Hold:</b> {max_hold} days")
+                
+                return "\n".join(parts) if parts else f"<code>{_escape_html(decision_text[:500])}</code>"
+        except (json.JSONDecodeError, ValueError):
+            pass
+        
+        # Not JSON - treat as plain text/markdown
+        # Strip markdown code fences
+        cleaned = decision_text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.split("\n")
+            if len(lines) > 2 and lines[-1].startswith("```"):
+                cleaned = "\n".join(lines[1:-1])
+            elif lines[0].startswith("```"):
+                cleaned = "\n".join(lines[1:])
+        
+        # Truncate and escape
+        max_len = 1000
+        if len(cleaned) > max_len:
+            cleaned = cleaned[:max_len] + "...\n\n<i>(truncated for Telegram)</i>"
+        
+        return _escape_html(cleaned)
+    
+    def _parse_timestamp(raw_date: str) -> str:
+        """Parse various timestamp formats and return formatted local time."""
+        if not raw_date:
+            return "Unknown"
+        
+        try:
+            from datetime import datetime
+            import re
+            
+            # Format 1: New manual format YYYY-MM-DD-HH-MM-AM/PM
+            new_format_match = re.match(r"(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(AM|PM)", raw_date)
+            if new_format_match:
+                date_part = new_format_match.group(1)
+                hour_12 = int(new_format_match.group(2))
+                minute = new_format_match.group(3)
+                am_pm = new_format_match.group(4)
+                return f"{date_part} at {hour_12}:{minute} {am_pm}"
+            
+            # Format 2: Scheduler format YYYY-MM-DDTHH
+            if "T" in raw_date and ":" not in raw_date:
+                from datetime import timezone
+                normalized = f"{raw_date}:00:00"
+                dt = datetime.fromisoformat(normalized.replace("Z", ""))
+                dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt.astimezone()
+                return local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
+            
+            # Format 3: ISO format YYYY-MM-DDTHH:MM:SS
+            if "T" in raw_date:
+                from datetime import timezone
+                dt = datetime.fromisoformat(raw_date.replace("Z", "").replace("+00:00", ""))
+                dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt.astimezone()
+                return local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
+            
+            # Format 4: Simple date YYYY-MM-DD
+            if re.match(r"\d{4}-\d{2}-\d{2}$", raw_date):
+                dt = datetime.strptime(raw_date, "%Y-%m-%d")
+                return dt.strftime("%b %d, %Y")
+            
+            return raw_date
+        except Exception as e:
+            _logger.debug(f"Failed to parse timestamp {raw_date}: {e}")
+            return raw_date
+    
     signal = result.get("decision", "UNKNOWN")
     signal_emoji = "🛑" if signal in ["SHORT", "SELL"] else "🟢" if signal in ["BUY", "COVER"] else "⚖️"
     conf = result.get("confidence", 0)
@@ -1238,31 +1368,15 @@ def _send_telegram_alert(result: dict):
     tp_str = f"${float(tp):,.2f}" if tp else "N/A"
     sizing = result.get("position_size_pct", 0)
     
+    # Parse timestamp with new format support
     raw_date = result.get('date', '')
-    try:
-        from datetime import datetime, timezone
-        # If timestamp ends at hours, append minutes/seconds so fromisoformat works consistently
-        normalized_raw = raw_date
-        if "T" in normalized_raw:
-            parts = normalized_raw.split("T")
-            if ":" not in parts[1]:
-                normalized_raw = f"{parts[0]}T{parts[1]}:00:00"
-        
-        # Parse it as UTC explicitly (scheduler drops raw local/UTC depending, assume UTC as defined by YFinance constraints)
-        dt = datetime.fromisoformat(normalized_raw.replace("Z", ""))
-        dt = dt.replace(tzinfo=timezone.utc)
-        
-        # Localize to system timezone
-        local_dt = dt.astimezone()
-        fmt_date = local_dt.strftime("%b %d, %Y at %I:%M %p")
-    except Exception:
-        fmt_date = raw_date
-
+    fmt_date = _parse_timestamp(raw_date)
+    
     rr_value = result.get("r_ratio")
     rr_prefix = f"R:R Ratio: {rr_value:.2f}:1 | " if rr_value is not None else "R:R Ratio: N/A | "
     conviction = result.get("conviction_label", "MODERATE")
     
-    # HIGH FIX: Add ensemble metadata section to Telegram
+    # Ensemble metadata section
     ensemble_meta = result.get("ensemble_metadata", {})
     ensemble_section = ""
     if ensemble_meta:
@@ -1270,7 +1384,7 @@ def _send_telegram_alert(result: dict):
         valid = ensemble_meta.get("valid_runs", runs)
         retries = ensemble_meta.get("retry_count", 0)
         
-        ensemble_section = f"\n� <b>Ensemble:</b> {valid}/{runs} runs"
+        ensemble_section = f"\n🔀 <b>Ensemble:</b> {valid}/{runs} runs"
         if retries > 0:
             ensemble_section += f" (retries: {retries})"
         
@@ -1281,7 +1395,7 @@ def _send_telegram_alert(result: dict):
         if "signal_agreement" in div:
             ensemble_section += f" | Agreement: {div['signal_agreement']:.0%}"
         
-        # HIGH FIX: Show individual signals
+        # Show individual signals
         individual = ensemble_meta.get("individual_signals", [])
         if individual:
             sig_strs = []
@@ -1290,14 +1404,18 @@ def _send_telegram_alert(result: dict):
                 sig_strs.append(f"{emoji}{sig['signal']} {sig['confidence']:.0%}")
             ensemble_section += f"\n📊 <b>Individual:</b> {' | '.join(sig_strs)}"
         
-        # BLOCKER FIX: Stale price warning
+        # Stale price warning
         if ensemble_meta.get("stale_price_warning"):
             ensemble_section += "\n⚠️ <i>Warning: Prices may be stale due to slow execution</i>"
     
+    # Format reasoning section
+    decision_text = result.get("final_trade_decision", "")
+    reasoning_section = _format_reasoning(decision_text)
+    
     msg = (
-        f"�🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
-        f"🗓 <b>Time:</b> {fmt_date} "
-        f"{ensemble_section}\n"  # HIGH FIX: Added ensemble section
+        f"🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
+        f"🗓 <b>Time:</b> {fmt_date}"
+        f"{ensemble_section}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🎯 <b>Decision:</b> {signal_emoji} {signal}\n"
         f"⚖️ <b>Confidence:</b> {conf * 100:.1f}%\n"
@@ -1310,7 +1428,7 @@ def _send_telegram_alert(result: dict):
         "📈 <b>Metrics:</b>\n"
         f"{rr_prefix}Conviction: {conviction}\n\n"
         "📝 <b>Bot Reasoning:</b>\n"
-        f"<code>{result.get('final_trade_decision')}</code>"
+        f"{reasoning_section}"
     )
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -1319,7 +1437,13 @@ def _send_telegram_alert(result: dict):
         "text": msg,
         "parse_mode": "HTML"
     }
-    requests.post(url, json=payload, timeout=10)
+    
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        _logger.info(f"Telegram alert sent for {result.get('ticker')} @ {raw_date}")
+    except requests.exceptions.RequestException as e:
+        _logger.error(f"Failed to send Telegram alert: {e}")
 
 
 @app.get("/api/history/{ticker}/{analysis_date}")

@@ -307,8 +307,26 @@ def get_onchain_data(symbol: str, curr_date: str) -> str:
     """
     BGeometrics on-chain metrics: MVRV, SOPR, exchange netflows, reserves, NUPL.
 
+    NOTE: These metrics are Bitcoin-specific. For non-BTC assets,
+    returns a message indicating on-chain data is not available.
+
     Returns formatted markdown report.
     """
+    base = _normalize_symbol(symbol)
+
+    # BGeometrics only provides Bitcoin on-chain metrics
+    if base != "BTC":
+        return (
+            f"# On-Chain Analysis for {symbol}\n\n"
+            f"On-chain metrics (MVRV, SOPR, exchange flows, NUPL) are only "
+            f"available for Bitcoin. These metrics are derived from Bitcoin's "
+            f"UTXO-based blockchain and do not apply to {symbol}.\n\n"
+            f"For {symbol} analysis, focus on:\n"
+            f"- Technical indicators and price action\n"
+            f"- Derivatives data (funding rates, open interest)\n"
+            f"- Market sentiment and macro context\n"
+        )
+
     bg = _get(BGeometricsClient, "bgeometrics")
     return bg.get_onchain_summary(curr_date, look_back_days=60)
 

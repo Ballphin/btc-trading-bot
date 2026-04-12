@@ -5,7 +5,7 @@ Uses POST requests to https://api.hyperliquid.xyz/info.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -128,7 +128,7 @@ class HyperliquidClient(BaseDataClient):
             DataFrame[timestamp, open, high, low, close, volume] sorted ascending.
         """
         if not start or not end:
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=30)
         else:
             start_dt = datetime.strptime(start, "%Y-%m-%d")
@@ -312,7 +312,7 @@ class HyperliquidClient(BaseDataClient):
             DataFrame[timestamp, funding_rate] sorted ascending.
         """
         if not start or not end:
-            end_dt = datetime.utcnow()
+            end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=30)
         else:
             start_dt = datetime.strptime(start, "%Y-%m-%d")
@@ -359,8 +359,8 @@ class HyperliquidClient(BaseDataClient):
         """
         df = self.get_funding_history(
             coin,
-            start=(datetime.utcnow() - timedelta(days=2)).strftime("%Y-%m-%d"),
-            end=datetime.utcnow().strftime("%Y-%m-%d"),
+            start=(datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d"),
+            end=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             max_age_override=max_age_override,
         )
         if df.empty:
