@@ -318,10 +318,16 @@ class EnsembleAnalysisOrchestrator:
             member_config["deep_think_llm"] = model_override
         
         # Create graph
+        analysts = selected_analysts or ["market", "social", "news", "fundamentals"]
         graph = TradingAgentsGraph(
-            selected_analysts=selected_analysts or ["market", "social", "news", "fundamentals"],
+            selected_analysts=analysts,
             config=member_config,
         )
+        
+        # Rebuild graph with crypto tools if needed
+        from tradingagents.dataflows.asset_detection import is_crypto
+        if is_crypto(ticker):
+            graph._rebuild_graph_for_asset(ticker, analysts)
         
         # BLOCKER FIX: Run blocking propagate in thread pool with retry for 429s
         logger.info(f"Ensemble member {member_id}: starting graph.propagate for {ticker}")
@@ -343,9 +349,11 @@ class EnsembleAnalysisOrchestrator:
                     await asyncio.sleep(wait)
                     # Rebuild graph for fresh state
                     graph = TradingAgentsGraph(
-                        selected_analysts=selected_analysts or ["market", "social", "news", "fundamentals"],
+                        selected_analysts=analysts,
                         config=member_config,
                     )
+                    if is_crypto(ticker):
+                        graph._rebuild_graph_for_asset(ticker, analysts)
                 else:
                     raise
         
@@ -380,12 +388,23 @@ class EnsembleAnalysisOrchestrator:
     def _get_current_price(self, ticker: str) -> float:
         """Get current price for ticker for ensemble snapshot.
         
-        Args:
-            ticker: Ticker symbol
-            
-        Returns:
-            Current price
+        Uses Hyperliquid live spot for crypto (zero-cache), yfinance for equities.
+        Falls back to yfinance if Hyperliquid fails.
         """
+        from tradingagents.dataflows.asset_detection import is_crypto
+        
+        # Try Hyperliquid first for crypto (live mid price, not yesterday's close)
+        if is_crypto(ticker):
+            try:
+                from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+                hl = HyperliquidClient()
+                base = ticker.replace("-USD", "").replace("USDT", "").upper()
+                price = hl.get_spot_price(base, max_age_override=0)
+                if price and price > 0:
+                    return price
+            except Exception as e:
+                logger.warning(f"Hyperliquid spot price failed for {ticker}, falling back to yfinance: {e}")
+        
         try:
             import yfinance as yf
             data = yf.download(ticker, period="1d", progress=False)
@@ -395,7 +414,7 @@ class EnsembleAnalysisOrchestrator:
             return float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
         except Exception as e:
             logger.warning(f"Could not get current price for {ticker}: {e}")
-            return 100.0  # Default fallback
+            return 100.0
 
 
 def should_use_ensemble(config: Dict[str, Any], provider: str) -> bool:

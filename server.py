@@ -633,6 +633,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             "news_data": "yfinance",
             "prediction_market_data": "kalshi",
         }
+        # Preserve crypto vendor config for crypto assets
+        config.setdefault("crypto_vendors", DEFAULT_CONFIG.get("crypto_vendors", {}))
 
         ta = TradingAgentsGraph(debug=True, config=config)
         # Set logical candle timestamp for intraday file naming (if scheduled)

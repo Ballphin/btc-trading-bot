@@ -6,7 +6,8 @@ so the vendor routing system in interface.py can swap them in transparently.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from stockstats import wrap
@@ -19,6 +20,32 @@ from tradingagents.dataflows.fear_greed_client import FearGreedClient
 from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
 
 logger = logging.getLogger(__name__)
+
+
+def _get_display_tz() -> ZoneInfo:
+    """Return the configured display timezone (default US/Eastern)."""
+    try:
+        from tradingagents.dataflows.config import get_config
+        tz_name = get_config().get("display_timezone", "US/Eastern")
+    except Exception:
+        tz_name = "US/Eastern"
+    return ZoneInfo(tz_name)
+
+
+def _fmt_ts_local(utc_dt: datetime, fmt: str = "%Y-%m-%d %H:%M %Z") -> str:
+    """Format a UTC datetime into the display timezone."""
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    return utc_dt.astimezone(_get_display_tz()).strftime(fmt)
+
+
+def _is_current_date(date_str: str) -> bool:
+    """Check if a date string refers to today or the future (live query)."""
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return d >= datetime.now(timezone.utc).date()
+    except ValueError:
+        return False
 
 # Lazy-initialized singletons
 _clients = {}
@@ -76,11 +103,15 @@ def get_crypto_price_data(
     base_asset = _normalize_symbol(symbol)
     granularity = _TIMEFRAME_GRANULARITY.get(timeframe, 86400)
 
+    # Use short cache TTL for live (current-day) queries
+    cache_override = 120 if _is_current_date(end_date) else None
+
     # Try Hyperliquid first (better altcoin coverage, no rate limits)
     df = pd.DataFrame()
     try:
         hl = _get(HyperliquidClient, "hyperliquid")
-        df = hl.get_ohlcv(base_asset, timeframe, start_date, end_date)
+        df = hl.get_ohlcv(base_asset, timeframe, start_date, end_date,
+                          max_age_override=cache_override)
     except Exception as e:
         logger.warning(f"Hyperliquid OHLCV failed for {symbol}, falling back to Coinbase: {e}")
 
@@ -93,12 +124,13 @@ def get_crypto_price_data(
     if df.empty:
         return f"No OHLCV data available for {symbol} ({start_date} to {end_date}, {timeframe})"
 
-    # Format to match yfinance output style
+    # Format to match yfinance output style, converting to display timezone
     df_display = df.copy()
+    display_tz = _get_display_tz()
     if timeframe == "1d":
         df_display["timestamp"] = df_display["timestamp"].dt.strftime("%Y-%m-%d")
     else:
-        df_display["timestamp"] = df_display["timestamp"].dt.strftime("%Y-%m-%d %H:%M")
+        df_display["timestamp"] = df_display["timestamp"].dt.tz_localize("UTC").dt.tz_convert(display_tz).dt.strftime("%Y-%m-%d %H:%M %Z")
     df_display = df_display.rename(columns={
         "timestamp": "Date",
         "open": "Open",
@@ -107,7 +139,8 @@ def get_crypto_price_data(
         "close": "Close",
         "volume": "Volume",
     })
-    header = f"# {symbol} OHLCV ({timeframe} bars) — {start_date} to {end_date}\n"
+    tz_label = datetime.now(timezone.utc).astimezone(display_tz).strftime("%Z")
+    header = f"# {symbol} OHLCV ({timeframe} bars) — {start_date} to {end_date} (times in {tz_label})\n"
     return header + df_display.to_string(index=False)
 
 
@@ -129,14 +162,19 @@ def get_crypto_indicators(
 
     # Fetch enough history for indicator calculation
     start = (
-        datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days + 60)
+        datetime.strptime(curr_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        - timedelta(days=look_back_days + 60)
     ).strftime("%Y-%m-%d")
+
+    # Use short cache TTL for live (current-day) queries
+    cache_override = 120 if _is_current_date(curr_date) else None
 
     # Try Hyperliquid first, fall back to Coinbase
     df = pd.DataFrame()
     try:
         hl = _get(HyperliquidClient, "hyperliquid")
-        df = hl.get_ohlcv(base_asset, timeframe, start, curr_date)
+        df = hl.get_ohlcv(base_asset, timeframe, start, curr_date,
+                          max_age_override=cache_override)
     except Exception as e:
         logger.warning(f"Hyperliquid indicators failed for {symbol}, falling back: {e}")
 
@@ -375,17 +413,17 @@ def get_intraday_summary(symbol: str, curr_date: str) -> str:
 
     base_asset = _normalize_symbol(symbol)
 
-    # Date range: 24h ending at curr_date EOD
-    end_dt = datetime.strptime(curr_date, "%Y-%m-%d") + timedelta(days=1)
+    # Date range: 24h ending at curr_date EOD (UTC)
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
     start_dt = end_dt - timedelta(hours=24)
     start_str = start_dt.strftime("%Y-%m-%d")
     end_str = end_dt.strftime("%Y-%m-%d")
 
-    # Fetch 1H candles — Hyperliquid primary, Coinbase fallback
+    # Always bypass cache for intraday summary (live context)
     df = pd.DataFrame()
     try:
         hl = _get(HyperliquidClient, "hyperliquid")
-        df = hl.get_ohlcv(base_asset, "1h", start_str, end_str)
+        df = hl.get_ohlcv(base_asset, "1h", start_str, end_str, max_age_override=0)
     except Exception as e:
         logger.warning(f"Hyperliquid 1H failed for {symbol}: {e}")
 
@@ -400,8 +438,12 @@ def get_intraday_summary(symbol: str, curr_date: str) -> str:
     if df.empty:
         return f"Intraday data unavailable for {symbol} on {curr_date}"
 
+    # Display timezone for report headers
+    display_tz = _get_display_tz()
+    end_local = end_dt.astimezone(display_tz).strftime("%Y-%m-%d %H:%M %Z")
+
     lines = [
-        f"# Intraday Summary: {symbol} (24h ending {curr_date})",
+        f"# Intraday Summary: {symbol} (24h ending {end_local})",
         f"**Bars**: {len(df)} hourly candles",
         "",
     ]
@@ -492,10 +534,11 @@ def get_realtime_snapshot(symbol: str) -> str:
         return f"Realtime snapshot not available for {symbol} (equities not supported). Use get_stock_data."
 
     base_asset = _normalize_symbol(symbol)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
+    now_local = _fmt_ts_local(now, "%Y-%m-%d %H:%M:%S %Z")
     lines = [
         f"# Realtime Snapshot: {symbol}",
-        f"**Timestamp (UTC)**: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Timestamp**: {now_local}",
         "",
     ]
 

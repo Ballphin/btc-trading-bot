@@ -131,8 +131,8 @@ class HyperliquidClient(BaseDataClient):
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=30)
         else:
-            start_dt = datetime.strptime(start, "%Y-%m-%d")
-            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
         interval_sec = _INTERVAL_SECONDS.get(interval, 86400)
         all_candles = []
@@ -315,8 +315,8 @@ class HyperliquidClient(BaseDataClient):
             end_dt = datetime.now(timezone.utc)
             start_dt = end_dt - timedelta(days=30)
         else:
-            start_dt = datetime.strptime(start, "%Y-%m-%d")
-            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_dt = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
         start_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)

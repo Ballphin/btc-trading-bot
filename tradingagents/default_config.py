@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
     },
     # Asset type: "auto" detects from ticker, or force "equity" / "crypto"
     "asset_type": "auto",
+    # Display timezone for report timestamps (IANA name, e.g. "US/Eastern", "UTC")
+    "display_timezone": "US/Eastern",
     # Backtest mode: disables realtime/zero-cache tools to prevent look-ahead bias
     "backtest_mode": False,
     # Per-asset-type vendor configuration for crypto assets
