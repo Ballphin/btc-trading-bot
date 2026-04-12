@@ -179,6 +179,7 @@ class TradingAgentsGraph:
 
         elif provider == "openrouter":
             kwargs["max_tokens"] = self.config.get("openrouter_max_tokens", 4096)
+            kwargs["max_retries"] = self.config.get("openrouter_max_retries", 10)
 
         return kwargs
 

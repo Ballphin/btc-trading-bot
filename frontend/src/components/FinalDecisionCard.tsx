@@ -88,7 +88,13 @@ export default function FinalDecisionCard({ text, signal, confidence, rRatio: ba
 
         {/* Price Levels Grid */}
         {(sl || tp || parsed.max_hold_days) && (
-          <div className="grid grid-cols-3 gap-3">
+          <div className={`grid gap-3 ${
+            (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (parsed.max_hold_days ? 1 : 0) === 1
+              ? 'grid-cols-1 max-w-xs'
+              : (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (parsed.max_hold_days ? 1 : 0) === 2
+                ? 'grid-cols-2 max-w-md'
+                : 'grid-cols-3'
+          }`}>
             {sl && sl > 0 && (
               <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20">
                 <p className="text-xs text-slate-500 mb-1 flex items-center gap-1">

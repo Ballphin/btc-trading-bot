@@ -368,18 +368,10 @@ class ConfidenceScorer:
                     f"(need {_KELLY_MIN_TRADES}), using fixed {_FIXED_FALLBACK_SIZE*100:.0f}%"
                 )
 
-        # ── Signal gating: regime-conditional for SHORT signals ──
-        gate_key = self._gate_key(regime, above_sma20)
-        sig = signal.upper()
-        if sig in ("SHORT", "SELL"):
-            gate_threshold = _SHORT_GATE_THRESHOLDS.get(gate_key, 0.45)
-        else:
-            gate_threshold = _GATE_THRESHOLDS.get(gate_key, 0.50)
-        gated = bool(calibrated < gate_threshold)
-
-        # Override position size to 0 when gated
-        if gated:
-            position_size_pct = 0.0
+        # ── Signal gating: DISABLED - always show trade parameters ──
+        # Previously gated signals below regime thresholds; now always display
+        # trade parameters regardless of confidence level
+        gated = False
 
         return {
             "confidence": round(calibrated, 4),

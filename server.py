@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 import requests
 from datetime import date, datetime, timedelta
@@ -146,7 +147,7 @@ async def _auto_analysis_scheduler():
                 }
                 thread = threading.Thread(
                     target=_run_analysis,
-                    args=(job_id, ticker, logical_date, False, logical_label),
+                    args=(job_id, ticker, logical_date, True, logical_label),
                     daemon=True,
                 )
                 thread.start()
@@ -274,7 +275,7 @@ async def scheduler_run_now():
         }
         thread = threading.Thread(
             target=_run_analysis,
-            args=(job_id, ticker, logical_date, False, logical_label),
+            args=(job_id, ticker, logical_date, True, logical_label),
             daemon=True,
         )
         thread.start()
@@ -319,6 +320,9 @@ async def set_model_config(req: ModelConfigRequest):
     # Update configuration
     DEFAULT_CONFIG["llm_provider"] = req.provider
     DEFAULT_CONFIG["deep_think_llm"] = req.model
+    # For third-party providers, quick_think must also use the selected model
+    # (the OpenAI default gpt-5-mini would be routed through the provider and billed)
+    DEFAULT_CONFIG["quick_think_llm"] = req.model
     
     # Check if provider supports ensemble
     disabled_providers = DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"])
@@ -540,15 +544,39 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         
         if use_ensemble:
             # HIGH FIX: Use ensemble orchestrator for OpenRouter
-            print(f"[Analysis {job_id}] Ensemble mode enabled for {current_provider}")
-            eq.put({"event": "agent_start", "agent": "Ensemble Analysis (3x parallel)", "step": 0, "total": 9})
+            n_runs = config.get("ensemble_runs", 3)
+            print(f"[Analysis {job_id}] Ensemble mode enabled for {current_provider} ({n_runs} members)")
+            eq.put({"event": "agent_start", "agent": "Ensemble Analysis", "step": 0, "total": 9})
+            
+            # Emit progress: data gathering phase
+            eq.put({"event": "agent_start", "agent": "Market Analyst", "step": 1, "total": 9})
+            eq.put({"event": "agent_start", "agent": "Social Media Analyst", "step": 2, "total": 9})
+            eq.put({"event": "agent_start", "agent": "News Analyst", "step": 3, "total": 9})
+            eq.put({"event": "agent_start", "agent": "Fundamentals Analyst", "step": 4, "total": 9})
             
             orchestrator = EnsembleAnalysisOrchestrator(
                 config=config,
                 provider=current_provider,
                 model=config.get("deep_think_llm", "qwen/qwen3.6-plus"),
-                parallel_runs=config.get("ensemble_runs", 3),
+                parallel_runs=n_runs,
             )
+            
+            # Pass event queue so orchestrator can emit member-level progress
+            orchestrator._event_queue = eq
+            
+            # Background heartbeat thread: emits every 10s so the frontend
+            # knows the analysis is alive even when LLM calls take minutes
+            heartbeat_stop = threading.Event()
+            ensemble_start = time.time()
+            def _heartbeat_emitter():
+                while not heartbeat_stop.is_set():
+                    heartbeat_stop.wait(10)
+                    if heartbeat_stop.is_set():
+                        break
+                    elapsed = int(time.time() - ensemble_start)
+                    eq.put({"event": "heartbeat", "elapsed": elapsed})
+            heartbeat_thread = threading.Thread(target=_heartbeat_emitter, daemon=True)
+            heartbeat_thread.start()
             
             # BLOCKER FIX: Run ensemble in thread-safe async manner
             import asyncio
@@ -558,6 +586,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 consensus_result = loop.run_until_complete(orchestrator.analyze(ticker, trade_date))
             finally:
                 loop.close()
+                heartbeat_stop.set()
 
             if consensus_result.ensemble_metadata.get("error") == "no_valid_ensemble_results":
                 message = "All ensemble runs failed (provider returned no valid outputs)."
@@ -583,8 +612,11 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             except Exception as e:
                 print(f"[Analysis {job_id}] Telegram alert warning: {e}")
             
-            # Signal completion
-            eq.put({"event": "done"})
+            # Emit decision event for the signal badge
+            eq.put({"event": "decision", "signal": result.get("decision", "HOLD")})
+            
+            # Signal completion with full result so frontend can populate UI
+            eq.put({"event": "done", "result": result})
             return
         
         # Standard single-run mode (existing logic)
@@ -635,32 +667,69 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         reports_cache = {}  # Track reports to avoid duplicates
         trace = []
 
-        for chunk in ta.graph.stream(init_state, **args):
-            # Detect step progress based on what fields are present
-            step_info = _detect_step_from_chunk(chunk, seen_steps)
-            
-            if step_info and step_info["key"] not in seen_steps:
-                seen_steps.add(step_info["key"])
-                print(f"[Analysis {job_id}] Step completed: {step_info['label']}", flush=True)
-                eq.put({
-                    "event": "agent_start",
-                    "agent": step_info["label"],
-                    "step": step_info["step"],
-                    "total": TOTAL_STEPS,
-                })
+        # Retry logic for rate-limited requests
+        max_retries = config.get("ensemble_max_retries", 2)
+        base_delay = 2.0
+        stream_success = False
+        
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    print(f"[Analysis {job_id}] Retry attempt {attempt}/{max_retries}")
+                
+                trace = []
+                for chunk in ta.graph.stream(init_state, **args):
+                    trace.append(chunk)
+                    
+                    # Detect step progress based on what fields are present
+                    step_info = _detect_step_from_chunk(chunk, seen_steps)
+                    
+                    if step_info and step_info["key"] not in seen_steps:
+                        seen_steps.add(step_info["key"])
+                        print(f"[Analysis {job_id}] Step completed: {step_info['label']}", flush=True)
+                        eq.put({
+                            "event": "agent_start",
+                            "agent": step_info["label"],
+                            "step": step_info["step"],
+                            "total": TOTAL_STEPS,
+                        })
 
-            # Check for report fields to emit
-            for report_key in ["market_report", "sentiment_report", "news_report", "fundamentals_report"]:
-                report = chunk.get(report_key, "")
-                if report and report != reports_cache.get(report_key):
-                    reports_cache[report_key] = report
+                    # Check for report fields to emit
+                    for report_key in ["market_report", "sentiment_report", "news_report", "fundamentals_report"]:
+                        report = chunk.get(report_key, "")
+                        if report and report != reports_cache.get(report_key):
+                            reports_cache[report_key] = report
+                            eq.put({
+                                "event": "agent_report",
+                                "report_key": report_key,
+                                "report": report[:5000],
+                            })
+                
+                # Success - break out of retry loop
+                stream_success = True
+                break
+                
+            except Exception as stream_err:
+                error_str = str(stream_err)
+                is_rate_limit = "429" in error_str or "rate-limit" in error_str.lower()
+                
+                if is_rate_limit and attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    print(f"[Analysis {job_id}] Rate limited (attempt {attempt + 1}), waiting {delay}s before retry...")
                     eq.put({
-                        "event": "agent_report",
-                        "report_key": report_key,
-                        "report": report[:5000],
+                        "event": "agent_update",
+                        "step": 0,
+                        "content": f"Rate limited by provider, retrying in {int(delay)}s...",
                     })
-
-            trace.append(chunk)
+                    import time
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Not a rate limit or out of retries - re-raise
+                    raise
+        
+        if not stream_success:
+            raise RuntimeError("Failed to complete analysis after all retries")
 
         # Extract final state
         final_state = trace[-1] if trace else {}
@@ -819,10 +888,22 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
     except Exception as e:
         print(f"[Analysis {job_id}] ERROR: {e}")
         import traceback
+        import time
         traceback.print_exc()
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
-        eq.put({"event": "error", "message": str(e)})
+        
+        # Parse error for better user message
+        error_str = str(e)
+        is_rate_limit = "429" in error_str or "rate-limit" in error_str.lower()
+        if is_rate_limit:
+            user_message = "Rate limited by provider. The free model has strict limits. Try again shortly or switch to a non-free model."
+        else:
+            user_message = f"Analysis failed: {str(e)[:200]}"
+        
+        eq.put({"event": "error", "message": user_message})
+        # Small delay to ensure error event is flushed before thread ends
+        time.sleep(0.5)
 
 # ── Scorecard API Endpoints ───────────────────────────────────────────
 
@@ -895,20 +976,27 @@ async def start_analysis(req: AnalyzeRequest):
     job_id = str(uuid.uuid4())[:8]
     eq = JobEventQueue()
 
+    # Generate unique local timestamp for manual runs: YYYY-MM-DD-HH-MM-AM/PM
+    now_local = datetime.now()
+    am_pm = now_local.strftime("%p")  # AM or PM
+    run_timestamp = now_local.strftime(f"%Y-%m-%d-%I-%M-{am_pm}")
+
     jobs[job_id] = {
         "ticker": ticker,
-        "date": trade_date,
+        "date": run_timestamp,  # Use timestamped key for history
+        "trade_date": trade_date,  # Original trade date for data lookup
         "status": "running",
         "queue": eq,
         "result": None,
         "error": None,
     }
 
-    # Start analysis in background thread
-    thread = threading.Thread(target=_run_analysis, args=(job_id, ticker, trade_date, req.force_refresh), daemon=True)
+    # Start analysis in background thread with force_refresh=True by default for live runs
+    force_refresh = True if req.force_refresh is None else req.force_refresh
+    thread = threading.Thread(target=_run_analysis, args=(job_id, ticker, trade_date, force_refresh, run_timestamp), daemon=True)
     thread.start()
 
-    return {"job_id": job_id, "ticker": ticker, "date": trade_date}
+    return {"job_id": job_id, "ticker": ticker, "date": run_timestamp}
 
 
 @app.get("/api/stream/{job_id}")
@@ -919,15 +1007,21 @@ async def stream_analysis(job_id: str):
     eq: JobEventQueue = jobs[job_id]["queue"]
     eq.set_loop(asyncio.get_event_loop())
 
+    stream_start = time.time()
+
     async def event_generator():
         while True:
             try:
-                event = await asyncio.wait_for(eq.get(), timeout=120)
+                event = await asyncio.wait_for(eq.get(), timeout=15)
                 yield {"event": event.get("event", "message"), "data": json.dumps(event)}
                 if event.get("event") in ("done", "error"):
                     break
             except asyncio.TimeoutError:
-                yield {"event": "ping", "data": "{}"}
+                elapsed = int(time.time() - stream_start)
+                yield {
+                    "event": "heartbeat",
+                    "data": json.dumps({"event": "heartbeat", "elapsed": elapsed}),
+                }
 
     return EventSourceResponse(event_generator())
 
@@ -988,28 +1082,49 @@ async def list_analyses(ticker: str):
 
     analyses = []
     for f in sorted(logs_dir.glob("full_states_log_*.json"), reverse=True):
-        # Match both: YYYY-MM-DD and YYYY-MM-DDTHH
-        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})(T(\d{2}))?(\.json)$", f.name)
-        if not match:
+        # Match three formats:
+        # 1. Legacy daily: YYYY-MM-DD
+        # 2. Legacy hourly: YYYY-MM-DDTHH
+        # 3. New manual format: YYYY-MM-DD-HH-MM-AM/PM
+        legacy_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})(T(\d{2}))?(\.json)$", f.name)
+        new_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(AM|PM)\.json$", f.name)
+
+        if new_match:
+            # New format: YYYY-MM-DD-HH-MM-AM/PM
+            analysis_date = new_match.group(1)
+            hour_12 = int(new_match.group(2))
+            minute = new_match.group(3)
+            am_pm = new_match.group(4)
+            # Convert to 24-hour for internal use
+            hour_24 = hour_12 if am_pm == "AM" else (hour_12 % 12) + 12
+            if hour_12 == 12 and am_pm == "AM":
+                hour_24 = 0  # Midnight
+            candle_time = f"{analysis_date}-{new_match.group(2)}-{minute}-{am_pm}"
+            # Format for display: HH:MM AM/PM
+            time_label = f"{hour_12}:{minute} {am_pm}"
+            local_date = analysis_date
+        elif legacy_match:
+            # Legacy formats
+            analysis_date = legacy_match.group(1)
+            hour_str = legacy_match.group(3)  # e.g. '16' or None
+            candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
+            time_label = None
+            local_date = analysis_date
+            if hour_str:
+                # Emit a strict ISO 8601 UTC string to let the frontend localize it
+                time_label = f"{analysis_date}T{hour_str}:00:00Z"
+                try:
+                    utc_dt = datetime.fromisoformat(time_label.replace("Z", "+00:00"))
+                    local_date = utc_dt.astimezone().strftime("%Y-%m-%d")
+                except Exception:
+                    local_date = analysis_date
+        else:
             continue
-        analysis_date = match.group(1)
-        hour_str = match.group(3)  # e.g. '16' or None
-        candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
-        time_label = None
-        local_date = analysis_date
-        if hour_str:
-            # Emit a strict ISO 8601 UTC string to let the frontend localize it
-            time_label = f"{analysis_date}T{hour_str}:00:00Z"
-            try:
-                utc_dt = datetime.fromisoformat(time_label.replace("Z", "+00:00"))
-                local_date = utc_dt.astimezone().strftime("%Y-%m-%d")
-            except Exception:
-                local_date = analysis_date
 
         # Extract signal from nested date key in log file
         try:
             data = json.loads(f.read_text())
-            # Try the full candle_time key first, then the date portion
+            # Try multiple key formats: new format, candle_time, analysis_date
             date_data = data.get(candle_time) or data.get(analysis_date) or {}
             decision_text = date_data.get("final_trade_decision", "")
             signal = _extract_signal(decision_text)
@@ -1022,7 +1137,7 @@ async def list_analyses(ticker: str):
             "date": analysis_date,
             "local_date": local_date,
             "candle_time": candle_time,
-            "time": time_label,          # '16:00' for intraday, null for daily
+            "time": time_label,
             "signal": signal,
             "confidence": confidence,
             "file": f.name,
@@ -1215,9 +1330,15 @@ async def get_analysis(ticker: str, analysis_date: str):
         raise HTTPException(status_code=404, detail=f"No analysis found for {ticker} on {analysis_date}")
 
     data = json.loads(log_file.read_text())
-    
-    # Extract the base date to parse correctly via fallback hierarchy 
-    base_date = analysis_date.split("T")[0]
+
+    # Extract the base date to parse correctly via fallback hierarchy
+    # Handle both legacy format (YYYY-MM-DDTHH) and new format (YYYY-MM-DD-HH-MM-AM/PM)
+    if "-" in analysis_date and "T" not in analysis_date:
+        # New format with dashes - extract YYYY-MM-DD portion (first 10 chars)
+        base_date = analysis_date[:10] if len(analysis_date) >= 10 else analysis_date
+    else:
+        # Legacy format with T separator
+        base_date = analysis_date.split("T")[0]
     date_data = data.get(analysis_date) or data.get(base_date) or data
 
     # Reconstruct risk parameters that are normally only present during live run
@@ -1290,10 +1411,22 @@ async def get_analysis(ticker: str, analysis_date: str):
     # Add formatted local time with AM/PM for display
     try:
         from datetime import timezone
-        analysis_dt = datetime.fromisoformat(analysis_date.replace("Z", ""))
-        analysis_dt = analysis_dt.replace(tzinfo=timezone.utc)
-        local_dt = analysis_dt.astimezone()
-        date_formatted = local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
+        # Handle new format: YYYY-MM-DD-HH-MM-AM/PM
+        new_format_match = re.match(r"(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(AM|PM)", analysis_date)
+        if new_format_match:
+            # Already in desired display format
+            date_part = new_format_match.group(1)
+            hour = new_format_match.group(2)
+            minute = new_format_match.group(3)
+            am_pm = new_format_match.group(4)
+            # Convert to nicer display format
+            date_formatted = f"{date_part} at {hour}:{minute} {am_pm}"
+        else:
+            # Legacy format with T separator
+            analysis_dt = datetime.fromisoformat(analysis_date.replace("Z", ""))
+            analysis_dt = analysis_dt.replace(tzinfo=timezone.utc)
+            local_dt = analysis_dt.astimezone()
+            date_formatted = local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
     except Exception:
         date_formatted = analysis_date
 

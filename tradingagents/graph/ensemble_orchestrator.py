@@ -60,7 +60,8 @@ class EnsembleAnalysisOrchestrator:
         self.model = model
         self.parallel_runs = parallel_runs
         self.max_retries = config.get("ensemble_max_retries", 2)
-        self.timeout_per_run = config.get("ensemble_timeout_per_run", 300)  # 5 minutes
+        # Free-tier models need longer; default 600s
+        self.timeout_per_run = config.get("ensemble_timeout_per_run", 600)
         self.max_ensemble_time = config.get("ensemble_max_total_time", 30)  # 30 seconds
         
         # Temperature variation for diversity
@@ -104,21 +105,55 @@ class EnsembleAnalysisOrchestrator:
                     current_model = fallback
                     logger.info(f"Retry {attempt}: Switching to fallback model {current_model}")
             
-            # Run parallel with timeout protection
-            tasks = [
-                self._run_with_timeout(
-                    member_id=i,
-                    ticker=ticker,
-                    trade_date=trade_date,
-                    entry_price=entry_price,
-                    temperature=self.temperatures[i % len(self.temperatures)],
-                    selected_analysts=selected_analysts,
-                    model_override=current_model if attempt > 0 else None,
-                )
-                for i in range(self.parallel_runs)
-            ]
+            # Run ensemble members — sequential for free-tier (rate limits),
+            # parallel for paid models
+            is_free_model = ":free" in self.model.lower()
             
-            results = await asyncio.gather(*tasks)
+            # Progress event helper
+            eq = getattr(self, "_event_queue", None)
+            def _emit_member_done(member_id, signal, error=None):
+                if eq:
+                    # Steps 5-7 map to ensemble members completing (after analysts 1-4)
+                    step = min(5 + member_id, 8)
+                    label = f"Ensemble Member {member_id + 1}"
+                    if error:
+                        label += f" (failed)"
+                    else:
+                        label += f" → {signal}"
+                    eq.put({"event": "agent_start", "agent": label, "step": step, "total": 9})
+            
+            if is_free_model:
+                # Sequential execution to stay within rate limits (20 req/min)
+                results = []
+                for i in range(self.parallel_runs):
+                    result = await self._run_with_timeout(
+                        member_id=i,
+                        ticker=ticker,
+                        trade_date=trade_date,
+                        entry_price=entry_price,
+                        temperature=self.temperatures[i % len(self.temperatures)],
+                        selected_analysts=selected_analysts,
+                        model_override=current_model if attempt > 0 else None,
+                    )
+                    results.append(result)
+                    _emit_member_done(i, result.signal, result.error)
+            else:
+                # Parallel execution for paid models with higher rate limits
+                tasks = [
+                    self._run_with_timeout(
+                        member_id=i,
+                        ticker=ticker,
+                        trade_date=trade_date,
+                        entry_price=entry_price,
+                        temperature=self.temperatures[i % len(self.temperatures)],
+                        selected_analysts=selected_analysts,
+                        model_override=current_model if attempt > 0 else None,
+                    )
+                    for i in range(self.parallel_runs)
+                ]
+                results = await asyncio.gather(*tasks)
+                for i, r in enumerate(results):
+                    _emit_member_done(i, r.signal, r.error)
             
             # Filter out timeouts/errors
             valid_results = [r for r in results if r.error is None]
@@ -128,8 +163,9 @@ class EnsembleAnalysisOrchestrator:
                 logger.warning(f"{len(error_results)} ensemble members failed: "
                              f"{[r.error for r in error_results]}")
             
-            if len(valid_results) < 2:
-                logger.warning(f"Only {len(valid_results)} valid results, need at least 2 for consensus")
+            min_required = min(2, self.parallel_runs)
+            if len(valid_results) < min_required:
+                logger.warning(f"Only {len(valid_results)} valid results, need at least {min_required} for consensus")
                 if attempt < self.max_retries:
                     continue
                 else:
@@ -287,12 +323,34 @@ class EnsembleAnalysisOrchestrator:
             config=member_config,
         )
         
-        # BLOCKER FIX: Run blocking propagate in thread pool
+        # BLOCKER FIX: Run blocking propagate in thread pool with retry for 429s
+        logger.info(f"Ensemble member {member_id}: starting graph.propagate for {ticker}")
+        print(f"Ensemble member {member_id}: starting graph.propagate for {ticker}", flush=True)
         loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            final_state, signal_word = await loop.run_in_executor(
-                pool, graph.propagate, ticker, trade_date
-            )
+        
+        max_propagate_retries = 5
+        for retry in range(max_propagate_retries):
+            try:
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    final_state, signal_word = await loop.run_in_executor(
+                        pool, graph.propagate, ticker, trade_date
+                    )
+                break  # Success
+            except Exception as e:
+                if "429" in str(e) and retry < max_propagate_retries - 1:
+                    wait = 30 * (retry + 1)  # 30s, 60s, 90s, 120s
+                    print(f"Ensemble member {member_id}: rate limited, waiting {wait}s (retry {retry + 1}/{max_propagate_retries})", flush=True)
+                    await asyncio.sleep(wait)
+                    # Rebuild graph for fresh state
+                    graph = TradingAgentsGraph(
+                        selected_analysts=selected_analysts or ["market", "social", "news", "fundamentals"],
+                        config=member_config,
+                    )
+                else:
+                    raise
+        
+        logger.info(f"Ensemble member {member_id}: propagate complete, signal={signal_word}")
+        print(f"Ensemble member {member_id}: propagate complete, signal={signal_word}", flush=True)
         
         # Extract structured signal if available
         processed_signal = graph.process_signal(final_state.get("final_trade_decision", ""))
@@ -329,9 +387,12 @@ class EnsembleAnalysisOrchestrator:
             Current price
         """
         try:
-            from tradingagents.dataflows import get_stock_data
-            data = get_stock_data(ticker, period="1d")
-            return data["Close"].iloc[-1]
+            import yfinance as yf
+            data = yf.download(ticker, period="1d", progress=False)
+            if data.empty:
+                raise ValueError("No data returned")
+            close = data["Close"].iloc[-1]
+            return float(close.iloc[0]) if hasattr(close, 'iloc') else float(close)
         except Exception as e:
             logger.warning(f"Could not get current price for {ticker}: {e}")
             return 100.0  # Default fallback
@@ -347,15 +408,14 @@ def should_use_ensemble(config: Dict[str, Any], provider: str) -> bool:
     Returns:
         True if ensemble should be used
     """
+    # User's explicit toggle takes priority
+    if not config.get("enable_ensemble", False):
+        return False
+    
     # Explicitly disabled providers
     disabled = config.get("ensemble_disabled_providers", ["deepseek"])
     if provider.lower() in disabled:
         return False
     
-    # Explicitly enabled providers
-    enabled = config.get("ensemble_enabled_providers", ["openrouter"])
-    if provider.lower() in enabled:
-        return True
-    
     # Default to global setting
-    return config.get("enable_ensemble", False)
+    return True

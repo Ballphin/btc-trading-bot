@@ -181,19 +181,12 @@ export default function AnalysisDetail() {
             <div>
               <h3 className="text-sm font-medium text-slate-400 mb-3">Risk Parameters</h3>
 
-              {/* Warnings */}
-              {(analysis.gated || analysis.r_ratio_warning) && (
+              {/* Warnings - only show R:R warning */}
+              {analysis.r_ratio_warning && (
                 <div className="flex flex-col gap-2 mb-3">
-                  {analysis.gated && (
-                    <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
-                      <span className="text-red-400 text-xs font-medium">⚠ Signal Gated — Confidence below regime threshold. Position size was 0%.</span>
-                    </div>
-                  )}
-                  {analysis.r_ratio_warning && (
-                    <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
-                      <span className="text-amber-400 text-xs font-medium">⚠ Unfavorable R:R — Risk exceeded potential reward on this trade.</span>
-                    </div>
-                  )}
+                  <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                    <span className="text-amber-400 text-xs font-medium">⚠ Unfavorable R:R — Risk exceeded potential reward on this trade.</span>
+                  </div>
                 </div>
               )}
 
@@ -241,12 +234,11 @@ export default function AnalysisDetail() {
                   <div className="glass p-4">
                     <p className="text-xs text-slate-500 mb-1">Suggested Size</p>
                     <p className={`text-sm font-medium ${
-                      analysis.gated ? 'text-red-400' :
                       analysis.position_size_pct > 0.5 ? 'text-green-400' :
                       analysis.position_size_pct > 0.2 ? 'text-yellow-400' :
                       'text-slate-300'
                     }`}>
-                      {analysis.gated ? 'GATED' : `${(analysis.position_size_pct * 100).toFixed(1)}%`}
+                      {`${(analysis.position_size_pct * 100).toFixed(1)}%`}
                     </p>
                   </div>
                 )}

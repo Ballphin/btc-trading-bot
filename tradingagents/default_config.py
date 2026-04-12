@@ -23,12 +23,12 @@ DEFAULT_CONFIG = {
     "ensemble_runs": 3,                  # Number of parallel analyses
     "ensemble_max_retries": 2,           # Re-run attempts on divergence
     "ensemble_divergence_range_threshold": 0.20,  # HIGH FIX: Range threshold (not std)
-    "ensemble_timeout_per_run": 300,     # 5 minutes per run (BLOCKER FIX)
+    "ensemble_timeout_per_run": 600,     # 10 minutes per run (free-tier models are slower)
     "ensemble_max_total_time": 30,       # 30s before stale warning (BLOCKER FIX)
     "ensemble_temperature_variation": 0.05,  # +/- temp spread across runs
     "ensemble_enabled_providers": ["openrouter"],  # Only these get ensemble
     "ensemble_disabled_providers": ["deepseek"],  # Never ensemble these
-    "openrouter_fallback_model": "anthropic/claude-3.5-sonnet",  # BLOCKER FIX: Retry diversity
+    "openrouter_fallback_model": "google/gemma-4-31b-it:free",  # BLOCKER FIX: Retry diversity (free tier)
     "openrouter_max_tokens": 4096,       # Avoid oversized token budgets on limited OpenRouter credits
     
     # Debate and discussion settings

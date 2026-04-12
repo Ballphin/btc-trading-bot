@@ -1,5 +1,6 @@
+import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { CheckCircle, Loader2, Circle, AlertCircle } from 'lucide-react';
+import { CheckCircle, Loader2, Circle, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export interface StepState {
@@ -13,10 +14,36 @@ interface Props {
   steps: StepState[];
   currentStep: number;
   totalSteps: number;
+  isRunning?: boolean;
+  lastHeartbeat?: number;
+  startTime?: number;
 }
 
-export default function ProgressStepper({ steps, currentStep, totalSteps }: Props) {
+function formatElapsed(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (min === 0) return `${sec}s`;
+  return `${min}m ${sec}s`;
+}
+
+export default function ProgressStepper({ steps, currentStep, totalSteps, isRunning, lastHeartbeat, startTime }: Props) {
   const pct = totalSteps > 0 ? Math.round((currentStep / totalSteps) * 100) : 0;
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isRunning]);
+
+  const elapsed = startTime ? now - startTime : 0;
+  const sinceBeat = lastHeartbeat ? now - lastHeartbeat : Infinity;
+
+  // Connection health: green < 30s, amber 30-120s, red > 120s
+  let connStatus: 'alive' | 'stale' | 'lost' = 'alive';
+  if (sinceBeat > 120_000) connStatus = 'lost';
+  else if (sinceBeat > 30_000) connStatus = 'stale';
 
   return (
     <div className="space-y-4">
@@ -34,6 +61,36 @@ export default function ProgressStepper({ steps, currentStep, totalSteps }: Prop
             transition={{ duration: 0.5, ease: 'easeOut' }}
           />
         </div>
+
+        {/* Connection status badge */}
+        {isRunning && (
+          <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/5">
+            <div className="flex items-center gap-2">
+              {connStatus === 'alive' && (
+                <>
+                  <span className="relative flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                  </span>
+                  <span className="text-xs text-emerald-400 font-medium">AI Processing</span>
+                </>
+              )}
+              {connStatus === 'stale' && (
+                <>
+                  <Wifi className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-xs text-amber-400 font-medium">Waiting for response...</span>
+                </>
+              )}
+              {connStatus === 'lost' && (
+                <>
+                  <WifiOff className="w-3.5 h-3.5 text-red-400" />
+                  <span className="text-xs text-red-400 font-medium">Connection may be lost</span>
+                </>
+              )}
+            </div>
+            <span className="text-xs text-slate-500 font-mono">{formatElapsed(elapsed)}</span>
+          </div>
+        )}
       </div>
 
       {/* Steps */}

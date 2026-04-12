@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Cpu, RefreshCw, DollarSign } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Cpu, RefreshCw, DollarSign, Save, Check } from 'lucide-react';
 
 interface ModelConfig {
   provider: 'openrouter' | 'deepseek' | 'openai' | 'anthropic';
@@ -13,7 +13,7 @@ interface ModelSelectorTickerProps {
 }
 
 const PROVIDER_MODELS: Record<string, string[]> = {
-  openrouter: ['qwen/qwen3.6-plus', 'anthropic/claude-3.5-sonnet', 'openai/gpt-4o'],
+  openrouter: ['google/gemma-4-26b-a4b-it', 'google/gemma-4-26b-a4b-it:free', 'google/gemma-4-31b-it', 'google/gemma-4-31b-it:free', 'qwen/qwen3.6-plus', 'anthropic/claude-3.5-sonnet', 'openai/gpt-4o'],
   deepseek: ['deepseek-chat', 'deepseek-coder'],
   openai: ['gpt-5.2', 'gpt-5-mini'],
   anthropic: ['claude-3-5-sonnet-20241022'],
@@ -32,45 +32,35 @@ const ENSEMBLE_DISABLED_PROVIDERS = ['deepseek'];
 export default function ModelSelectorTicker({ currentTicker, onConfigChange }: ModelSelectorTickerProps) {
   const [config, setConfig] = useState<ModelConfig>({
     provider: 'openrouter',
-    model: 'qwen/qwen3.6-plus',
+    model: 'google/gemma-4-26b-a4b-it',
     parallelMode: true,
   });
+  const [savedConfig, setSavedConfig] = useState<ModelConfig>(config);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
 
-  // HIGH FIX: Load from localStorage on mount
+  const isDirty = config.provider !== savedConfig.provider
+    || config.model !== savedConfig.model
+    || config.parallelMode !== savedConfig.parallelMode;
+
+  // Load config on mount
   useEffect(() => {
     const saved = localStorage.getItem('modelConfig');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         setConfig(parsed);
+        setSavedConfig(parsed);
         onConfigChange?.(parsed);
       } catch (e) {
         console.error('Failed to parse saved model config:', e);
       }
     } else {
-      // Fetch from API if no localStorage
       fetchModelConfig();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // HIGH FIX: Persist to localStorage on change
-  useEffect(() => {
-    localStorage.setItem('modelConfig', JSON.stringify(config));
-    onConfigChange?.(config);
-  }, [config, onConfigChange]);
-
-  // Auto-disable parallel for certain providers
-  useEffect(() => {
-    if (ENSEMBLE_DISABLED_PROVIDERS.includes(config.provider)) {
-      setConfig(c => ({ ...c, parallelMode: false }));
-    } else if (ENSEMBLE_ENABLED_PROVIDERS.includes(config.provider)) {
-      // Auto-enable for OpenRouter if not explicitly disabled
-      setConfig(c => ({ ...c, parallelMode: true }));
-    }
-  }, [config.provider]);
 
   const fetchModelConfig = async () => {
     try {
@@ -79,17 +69,18 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
         const data = await res.json();
         const newConfig: ModelConfig = {
           provider: data.provider || 'openrouter',
-          model: data.model || 'qwen/qwen3.6-plus',
+          model: data.model || 'google/gemma-4-26b-a4b-it',
           parallelMode: data.ensemble_enabled ?? true,
         };
         setConfig(newConfig);
+        setSavedConfig(newConfig);
       }
     } catch (e) {
       console.error('Failed to fetch model config:', e);
     }
   };
 
-  const saveModelConfig = async () => {
+  const handleSave = useCallback(async () => {
     setIsLoading(true);
     try {
       const res = await fetch('/api/model/config', {
@@ -101,7 +92,13 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
           parallel_mode: config.parallelMode,
         }),
       });
-      if (!res.ok) {
+      if (res.ok) {
+        setSavedConfig(config);
+        localStorage.setItem('modelConfig', JSON.stringify(config));
+        onConfigChange?.(config);
+        setJustSaved(true);
+        setTimeout(() => setJustSaved(false), 2000);
+      } else {
         console.error('Failed to save model config');
       }
     } catch (e) {
@@ -109,7 +106,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [config, onConfigChange]);
 
   const handleProviderChange = (provider: string) => {
     const newProvider = provider as ModelConfig['provider'];
@@ -117,29 +114,20 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
     const newModel = models[0];
     const canEnsemble = !ENSEMBLE_DISABLED_PROVIDERS.includes(newProvider);
     
-    const newConfig: ModelConfig = {
+    setConfig({
       provider: newProvider,
       model: newModel,
       parallelMode: canEnsemble && ENSEMBLE_ENABLED_PROVIDERS.includes(newProvider),
-    };
-    
-    setConfig(newConfig);
-    saveModelConfig();
+    });
   };
 
   const handleModelChange = (model: string) => {
-    const newConfig = { ...config, model };
-    setConfig(newConfig);
-    saveModelConfig();
+    setConfig(prev => ({ ...prev, model }));
   };
 
   const handleParallelToggle = () => {
-    if (ENSEMBLE_DISABLED_PROVIDERS.includes(config.provider)) {
-      return; // Cannot enable for DeepSeek
-    }
-    const newConfig = { ...config, parallelMode: !config.parallelMode };
-    setConfig(newConfig);
-    saveModelConfig();
+    if (ENSEMBLE_DISABLED_PROVIDERS.includes(config.provider)) return;
+    setConfig(prev => ({ ...prev, parallelMode: !prev.parallelMode }));
   };
 
   const isEnsembleDisabled = ENSEMBLE_DISABLED_PROVIDERS.includes(config.provider);
@@ -200,7 +188,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
         <div className="flex-1" />
         
         <div className="flex items-center gap-1 text-slate-500 text-[10px]">
-          {isLoading && <span className="text-amber-400">Saving...</span>}
+          {isDirty && <span className="text-amber-400 font-medium">● unsaved</span>}
           <span>{isExpanded ? '▼ click to close' : '▶ click to change'}</span>
         </div>
       </div>
@@ -274,6 +262,31 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
               )}
             </div>
 
+            {/* Save Button */}
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] text-slate-500 uppercase tracking-wider">&nbsp;</label>
+              <button
+                onClick={handleSave}
+                disabled={!isDirty && !justSaved}
+                className={`flex items-center gap-1.5 px-4 py-1.5 rounded text-xs font-semibold transition-all ${
+                  justSaved
+                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                    : isDirty
+                    ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/40 hover:bg-accent-cyan/30 shadow-[0_0_12px_rgba(6,214,160,0.15)]'
+                    : 'bg-navy-900 text-slate-500 border border-white/5 cursor-default'
+                }`}
+              >
+                {isLoading ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : justSaved ? (
+                  <Check className="w-3.5 h-3.5" />
+                ) : (
+                  <Save className="w-3.5 h-3.5" />
+                )}
+                {isLoading ? 'Saving...' : justSaved ? 'Saved!' : isDirty ? 'Save' : 'Saved'}
+              </button>
+            </div>
+
             {/* Info Box */}
             <div className="flex-1 ml-4 p-2 bg-navy-900/50 rounded border border-white/5">
               <p className="text-[10px] text-slate-400 leading-relaxed">
@@ -282,6 +295,9 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
                 {config.parallelMode 
                   ? ' Currently active for this ticker.' 
                   : ' Disabled - single analysis will run.'}
+                {isDirty && (
+                  <span className="block mt-1 text-amber-400 font-medium">⚠ Unsaved changes — click Save to apply.</span>
+                )}
               </p>
             </div>
           </div>

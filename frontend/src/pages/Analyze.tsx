@@ -48,6 +48,8 @@ interface State {
   rRatioWarning?: boolean;
   holdPeriodScalar?: number;
   hedgePenaltyApplied?: number;
+  lastHeartbeat: number;
+  startTime: number;
 }
 
 type Action =
@@ -57,7 +59,8 @@ type Action =
   | { type: 'REPORT'; key: string; content: string }
   | { type: 'DECISION'; signal: string }
   | { type: 'DONE'; result: Record<string, unknown> }
-  | { type: 'ERROR'; message: string };
+  | { type: 'ERROR'; message: string }
+  | { type: 'HEARTBEAT' };
 
 const STEP_KEY_MAP: Record<number, string> = {
   1: 'market', 2: 'social', 3: 'news', 4: 'fundamentals',
@@ -67,7 +70,7 @@ const STEP_KEY_MAP: Record<number, string> = {
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'START':
-      return { ...state, status: 'running', steps: INITIAL_STEPS.map(s => ({ ...s, status: 'pending' as const })), currentStep: 0 };
+      return { ...state, status: 'running', steps: INITIAL_STEPS.map(s => ({ ...s, status: 'pending' as const })), currentStep: 0, startTime: Date.now(), lastHeartbeat: Date.now() };
     case 'AGENT_START': {
       const stepKey = STEP_KEY_MAP[action.step];
       const steps = state.steps.map(s => {
@@ -136,6 +139,8 @@ function reducer(state: State, action: Action): State {
     }
     case 'ERROR':
       return { ...state, status: 'error', error: action.message };
+    case 'HEARTBEAT':
+      return { ...state, lastHeartbeat: Date.now() };
     default:
       return state;
   }
@@ -165,6 +170,8 @@ const initialState: State = {
   rRatioWarning: undefined,
   holdPeriodScalar: undefined,
   hedgePenaltyApplied: undefined,
+  lastHeartbeat: 0,
+  startTime: 0,
 };
 
 export default function Analyze() {
@@ -217,6 +224,9 @@ export default function Analyze() {
         case 'error':
           dispatch({ type: 'ERROR', message: e.message || 'Unknown error' });
           break;
+        case 'heartbeat':
+          dispatch({ type: 'HEARTBEAT' });
+          break;
       }
     });
     return close;
@@ -250,7 +260,14 @@ export default function Analyze() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Progress */}
         <div className="lg:col-span-1">
-          <ProgressStepper steps={state.steps} currentStep={state.currentStep} totalSteps={9} />
+          <ProgressStepper
+            steps={state.steps}
+            currentStep={state.currentStep}
+            totalSteps={9}
+            isRunning={state.status === 'running'}
+            lastHeartbeat={state.lastHeartbeat}
+            startTime={state.startTime}
+          />
         </div>
 
         {/* Right: Reports */}
@@ -294,17 +311,13 @@ export default function Analyze() {
               animate={{ opacity: 1, scale: 1 }}
               className="glass p-6"
             >
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-bold text-white">Final Decision</h3>
-                <SignalBadge signal={state.decision} size="lg" confidence={state.confidence} />
-              </div>
-              <div className="markdown-content text-sm max-h-96 overflow-y-auto">
-                <FinalDecisionCard
-                  text={state.finalReport}
-                  signal={state.decision}
-                  confidence={state.confidence}
-                />
-              </div>
+              <h3 className="text-lg font-bold text-white mb-4">Final Decision</h3>
+              <FinalDecisionCard
+                text={state.finalReport}
+                signal={state.decision}
+                confidence={state.confidence}
+                rRatio={state.rRatio}
+              />
             </motion.div>
           )}
 
@@ -317,19 +330,12 @@ export default function Analyze() {
             >
               <h3 className="text-lg font-bold text-white mb-4">Trade Parameters</h3>
 
-              {/* Warnings row */}
-              {(state.gated || state.rRatioWarning) && (
+              {/* Warnings row - only show R:R warning, not gating */}
+              {state.rRatioWarning && (
                 <div className="flex flex-col gap-2 mb-4">
-                  {state.gated && (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30">
-                      <span className="text-red-400 text-sm font-medium">⚠ Signal Gated — Confidence below regime threshold. Position size set to 0%.</span>
-                    </div>
-                  )}
-                  {state.rRatioWarning && (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
-                      <span className="text-amber-400 text-sm font-medium">⚠ Unfavorable R:R — You risk more than you stand to gain on this trade.</span>
-                    </div>
-                  )}
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
+                    <span className="text-amber-400 text-sm font-medium">⚠ Unfavorable R:R — You risk more than you stand to gain on this trade.</span>
+                  </div>
                 </div>
               )}
 
@@ -383,21 +389,18 @@ export default function Analyze() {
                 <div className="bg-slate-800/50 rounded-lg p-4">
                   <p className="text-xs text-slate-400 mb-1">Suggested Size</p>
                   <p className={`text-lg font-semibold ${
-                    state.gated ? 'text-red-400' :
                     (state.positionSizePct || 0) > 0.5 ? 'text-green-400' :
                     (state.positionSizePct || 0) > 0.2 ? 'text-yellow-400' :
                     'text-slate-300'
                   }`}>
-                    {state.gated ? 'GATED' : `${((state.positionSizePct || 0) * 100).toFixed(1)}%`}
+                    {`${((state.positionSizePct || 0) * 100).toFixed(1)}%`}
                   </p>
-                  {!state.gated && (
-                    <div className="mt-1.5 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-accent-teal transition-all"
-                        style={{ width: `${Math.min((state.positionSizePct || 0) * 100, 100)}%` }}
-                      />
-                    </div>
-                  )}
+                  <div className="mt-1.5 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-accent-teal transition-all"
+                      style={{ width: `${Math.min((state.positionSizePct || 0) * 100, 100)}%` }}
+                    />
+                  </div>
                 </div>
 
                 {/* R:R Ratio */}
