@@ -598,6 +598,29 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             # Convert ConsensusResult to result dict
             result = _ensemble_result_to_dict(consensus_result, ticker, run_timestamp or trade_date)
             
+            # Persist structured fields into the log file so history page reads them
+            try:
+                file_key = run_timestamp or trade_date
+                log_path = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{file_key}.json"
+                if log_path.exists():
+                    log_data = json.loads(log_path.read_text())
+                    date_key = next(iter(log_data), file_key)
+                    entry = log_data.get(date_key, {})
+                    entry["decision"] = result.get("decision")
+                    entry["signal"] = result.get("decision")
+                    entry["confidence"] = result.get("confidence")
+                    entry["stop_loss_price"] = result.get("stop_loss_price")
+                    entry["take_profit_price"] = result.get("take_profit_price")
+                    entry["max_hold_days"] = result.get("max_hold_days")
+                    entry["reasoning"] = result.get("reasoning")
+                    entry["conviction_label"] = result.get("conviction_label")
+                    entry["position_size_pct"] = result.get("position_size_pct")
+                    entry["r_ratio"] = result.get("r_ratio")
+                    log_data[date_key] = entry
+                    log_path.write_text(json.dumps(log_data, indent=4))
+            except Exception as _log_err:
+                print(f"[Analysis {job_id}] Failed to persist ensemble fields to log (non-fatal): {_log_err}")
+            
             # Log and complete
             print(f"[Analysis {job_id}] Ensemble complete: {consensus_result.signal} "
                   f"(conf={consensus_result.confidence:.2f}, "
@@ -831,6 +854,9 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
 
         # Embed all the processed structural risk parameters BACK into the trace history and save it identically
         final_state.update(result)
+        # _log_state checks for "signal" key to persist structured fields; result uses "decision"
+        if "signal" not in final_state and "decision" in result:
+            final_state["signal"] = result["decision"]
         ta._log_state(run_timestamp if run_timestamp else trade_date, final_state)
 
         print(f"[Analysis {job_id}] Analysis complete, sending done event")
@@ -1273,25 +1299,13 @@ def _send_telegram_alert(result: dict):
             
             parsed = json.loads(cleaned)
             if isinstance(parsed, dict):
-                # Extract structured fields
                 reasoning = parsed.get("reasoning", "")
-                signal = parsed.get("signal", "")
-                confidence = parsed.get("confidence")
-                max_hold = parsed.get("max_hold_days")
                 
                 parts = []
                 if reasoning:
-                    # Truncate long reasoning to fit Telegram limits
                     max_len = 800
                     reason_text = reasoning[:max_len] + "..." if len(reasoning) > max_len else reasoning
                     parts.append(f"<b>Analysis:</b> {_escape_html(reason_text)}")
-                
-                if signal:
-                    parts.append(f"<b>Signal:</b> {signal}")
-                if confidence is not None:
-                    parts.append(f"<b>Confidence:</b> {confidence * 100:.1f}%")
-                if max_hold:
-                    parts.append(f"<b>Max Hold:</b> {max_hold} days")
                 
                 return "\n".join(parts) if parts else f"<code>{_escape_html(decision_text[:500])}</code>"
         except (json.JSONDecodeError, ValueError):
@@ -1479,12 +1493,17 @@ async def get_analysis(ticker: str, analysis_date: str):
 
     if not decision_signal:
         try:
-            parsed = json.loads(decision_text)
+            cleaned = decision_text.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                if len(lines) > 2:
+                    cleaned = "\n".join(lines[1:-1]) if lines[-1].strip().startswith("```") else "\n".join(lines[1:])
+            parsed = json.loads(cleaned)
             decision_signal = _extract_signal(parsed.get("signal", ""))
-            stop_loss_price = parsed.get("stop_loss_price")
-            take_profit_price = parsed.get("take_profit_price")
-            confidence = parsed.get("confidence")
-            max_hold_days = parsed.get("max_hold_days")
+            stop_loss_price = stop_loss_price or parsed.get("stop_loss_price")
+            take_profit_price = take_profit_price or parsed.get("take_profit_price")
+            confidence = confidence if confidence is not None else parsed.get("confidence")
+            max_hold_days = max_hold_days if max_hold_days is not None else parsed.get("max_hold_days")
         except Exception:
             decision_signal = _extract_signal(str(decision_text).upper())
 
@@ -1522,7 +1541,7 @@ async def get_analysis(ticker: str, analysis_date: str):
         date_data["decision"] = decision_signal
         date_data["stop_loss_price"] = stop_loss_price
         date_data["take_profit_price"] = take_profit_price
-        date_data["confidence"] = confidence if confidence is not None else 0.50
+        date_data["confidence"] = scored.get("confidence", confidence if confidence is not None else 0.50)
         date_data["max_hold_days"] = max_hold_days
         date_data["position_size_pct"] = scored.get("position_size_pct")
         date_data["conviction_label"] = scored.get("conviction_label")
