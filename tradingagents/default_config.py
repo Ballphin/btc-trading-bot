@@ -19,11 +19,13 @@ DEFAULT_CONFIG = {
     "llm_temperature": 0.4,             # 0.0=deterministic, 0.4=modest diversity
     
     # Ensemble analysis settings
-    "enable_ensemble": True,             # Auto-enabled for OpenRouter
-    "ensemble_runs": 3,                  # Number of parallel analyses
-    "ensemble_max_retries": 2,           # Re-run attempts on divergence
+    "enable_ensemble": True,             # User/UI can disable; OpenRouter-only when on
+    "ensemble_runs": 1,                  # Safe default (raise for consensus diversity if needed)
+    "ensemble_max_retries": 1,           # Re-run attempts on divergence
     "ensemble_divergence_range_threshold": 0.20,  # HIGH FIX: Range threshold (not std)
     "ensemble_timeout_per_run": 600,     # 10 minutes per run (free-tier models are slower)
+    # Single full-graph analysis timeout (seconds); used by streaming path / policy
+    "timeout_per_run": 600,
     "ensemble_max_total_time": 30,       # 30s before stale warning (BLOCKER FIX)
     "ensemble_temperature_variation": 0.05,  # +/- temp spread across runs
     "ensemble_enabled_providers": ["openrouter"],  # Only these get ensemble

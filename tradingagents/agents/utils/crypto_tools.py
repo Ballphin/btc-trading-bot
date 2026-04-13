@@ -4,6 +4,8 @@ These tools are used by crypto-aware analysts and route through
 the vendor routing system in interface.py.
 """
 
+import re
+import logging
 from langchain_core.tools import tool
 from typing import Annotated
 
@@ -12,6 +14,26 @@ from tradingagents.dataflows.crypto_news_scraper import (
     get_crypto_news as _scraper_news,
     get_crypto_global_news as _scraper_global,
 )
+
+logger = logging.getLogger(__name__)
+
+_DATE_RE = re.compile(r"^\d{4}-\d{4}-\d{2}-\d{2}$")
+
+def _sanitize_date(raw: str) -> str:
+    """Fix common LLM date-formatting errors (e.g. '2026-2026-04-13' → '2026-04-13')."""
+    if raw and _DATE_RE.match(raw):
+        fixed = raw[5:]
+        logger.warning("Sanitized malformed date %r → %r", raw, fixed)
+        # #region agent log
+        import json as _j, time as _t
+        try:
+            with open("/Users/daniel/Desktop/TradingAgents/.cursor/debug-f18c74.log", "a") as _f:
+                _f.write(_j.dumps({"sessionId":"f18c74","hypothesisId":"H1","location":"crypto_tools.py:_sanitize_date","message":"Date sanitized","data":{"raw":raw,"fixed":fixed},"timestamp":int(_t.time()*1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        return fixed
+    return raw
 
 
 @tool
@@ -30,7 +52,7 @@ def get_derivatives_data(
     Returns:
         Formatted report of derivatives market data
     """
-    return route_to_vendor("get_derivatives_data", symbol, curr_date)
+    return route_to_vendor("get_derivatives_data", symbol, _sanitize_date(curr_date))
 
 
 @tool
@@ -46,7 +68,7 @@ def get_macro_indicators(
     Returns:
         Formatted report of macroeconomic indicators
     """
-    return route_to_vendor("get_macro_indicators", curr_date)
+    return route_to_vendor("get_macro_indicators", _sanitize_date(curr_date))
 
 
 @tool
@@ -62,7 +84,7 @@ def get_sentiment_data(
     Returns:
         Formatted sentiment report with current reading and trend
     """
-    return route_to_vendor("get_sentiment_data", curr_date)
+    return route_to_vendor("get_sentiment_data", _sanitize_date(curr_date))
 
 
 @tool
@@ -83,7 +105,7 @@ def get_crypto_news(
     Returns:
         Formatted markdown report of crypto news articles
     """
-    return _scraper_news(ticker, start_date, end_date)
+    return _scraper_news(ticker, _sanitize_date(start_date), _sanitize_date(end_date))
 
 
 @tool
@@ -105,7 +127,7 @@ def get_onchain_data(
     Returns:
         Formatted report of on-chain metrics and network fundamentals
     """
-    return route_to_vendor("get_fundamentals", symbol, curr_date, curr_date)
+    return route_to_vendor("get_fundamentals", symbol, _sanitize_date(curr_date))
 
 
 @tool
@@ -126,4 +148,4 @@ def get_crypto_global_news(
     Returns:
         Formatted markdown report of global crypto news
     """
-    return _scraper_global(curr_date, look_back_days, limit)
+    return _scraper_global(_sanitize_date(curr_date), look_back_days, limit)

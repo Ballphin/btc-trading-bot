@@ -17,6 +17,24 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 logger = logging.getLogger(__name__)
 
 
+def _is_fatal_provider_error(msg: Optional[str]) -> bool:
+    """Auth / configuration failures that should abort immediately (not rate limits)."""
+    if not msg:
+        return False
+    m = str(msg).lower()
+    needles = (
+        "401",
+        "403",
+        "invalid api key",
+        "incorrect api key",
+        "unauthorized",
+        "authentication",
+        "access denied",
+        "forbidden",
+    )
+    return any(n in m for n in needles)
+
+
 @dataclass
 class EnsembleMemberResult:
     """Result from a single ensemble member run."""
@@ -62,6 +80,10 @@ class EnsembleAnalysisOrchestrator:
         self.max_retries = config.get("ensemble_max_retries", 2)
         # Free-tier models need longer; default 600s
         self.timeout_per_run = config.get("ensemble_timeout_per_run", 600)
+        self.timeout_per_run_sequential = config.get("ensemble_timeout_per_run_sequential", 300)
+        self.sequential_fallback_runs = max(
+            1, int(config.get("ensemble_sequential_fallback_runs", 1))
+        )
         self.max_ensemble_time = config.get("ensemble_max_total_time", 30)  # 30 seconds
         
         # Temperature variation for diversity
@@ -90,42 +112,39 @@ class EnsembleAnalysisOrchestrator:
         Returns:
             ConsensusResult with averaged parameters and metadata
         """
-        # BLOCKER FIX: Snapshot price at start for consistency
         entry_price = self._get_current_price(ticker)
         ensemble_start_time = time.time()
-        
+
+        force_sequential = False
+
         for attempt in range(self.max_retries + 1):
             logger.info(f"Ensemble attempt {attempt + 1}/{self.max_retries + 1} for {ticker}")
-            
-            # BLOCKER FIX: Use fallback model on retry for diversity
+
             current_model = self.model
             if attempt > 0:
                 fallback = self.config.get("openrouter_fallback_model")
                 if fallback:
                     current_model = fallback
                     logger.info(f"Retry {attempt}: Switching to fallback model {current_model}")
-            
-            # Run ensemble members — sequential for free-tier (rate limits),
-            # parallel for paid models
+
             is_free_model = ":free" in self.model.lower()
-            
-            # Progress event helper
-            eq = getattr(self, "_event_queue", None)
-            def _emit_member_done(member_id, signal, error=None):
-                if eq:
-                    # Steps 5-7 map to ensemble members completing (after analysts 1-4)
-                    step = min(5 + member_id, 8)
-                    label = f"Ensemble Member {member_id + 1}"
-                    if error:
-                        label += f" (failed)"
-                    else:
-                        label += f" → {signal}"
-                    eq.put({"event": "agent_start", "agent": label, "step": step, "total": 9})
-            
-            if is_free_model:
-                # Sequential execution to stay within rate limits (20 req/min)
+            run_sequential = is_free_model or force_sequential
+
+            if run_sequential:
+                if force_sequential:
+                    logger.info("Running members sequentially (rate-limit fallback)")
+                runs_this_attempt = (
+                    min(self.parallel_runs, self.sequential_fallback_runs)
+                    if force_sequential
+                    else self.parallel_runs
+                )
+                timeout_this_attempt = (
+                    min(self.timeout_per_run, self.timeout_per_run_sequential)
+                    if force_sequential
+                    else self.timeout_per_run
+                )
                 results = []
-                for i in range(self.parallel_runs):
+                for i in range(runs_this_attempt):
                     result = await self._run_with_timeout(
                         member_id=i,
                         ticker=ticker,
@@ -134,11 +153,25 @@ class EnsembleAnalysisOrchestrator:
                         temperature=self.temperatures[i % len(self.temperatures)],
                         selected_analysts=selected_analysts,
                         model_override=current_model if attempt > 0 else None,
+                        timeout_seconds=timeout_this_attempt,
                     )
                     results.append(result)
-                    _emit_member_done(i, result.signal, result.error)
+                    if result.error:
+                        logger.info(
+                            "Ensemble member %s finished with error: %s",
+                            i + 1,
+                            result.error,
+                        )
+                    else:
+                        logger.info(
+                            "Ensemble member %s finished: %s",
+                            i + 1,
+                            result.signal,
+                        )
+                    if result.error and "timeout" in str(result.error):
+                        logger.warning(f"Member {i} timed out sequentially; skipping remaining")
+                        break
             else:
-                # Parallel execution for paid models with higher rate limits
                 tasks = [
                     self._run_with_timeout(
                         member_id=i,
@@ -148,28 +181,53 @@ class EnsembleAnalysisOrchestrator:
                         temperature=self.temperatures[i % len(self.temperatures)],
                         selected_analysts=selected_analysts,
                         model_override=current_model if attempt > 0 else None,
+                        timeout_seconds=self.timeout_per_run,
                     )
                     for i in range(self.parallel_runs)
                 ]
                 results = await asyncio.gather(*tasks)
                 for i, r in enumerate(results):
-                    _emit_member_done(i, r.signal, r.error)
-            
-            # Filter out timeouts/errors
+                    if r.error:
+                        logger.info("Ensemble member %s failed: %s", i + 1, r.error)
+                    else:
+                        logger.info("Ensemble member %s: %s", i + 1, r.signal)
+
             valid_results = [r for r in results if r.error is None]
             error_results = [r for r in results if r.error is not None]
-            
+
             if error_results:
                 logger.warning(f"{len(error_results)} ensemble members failed: "
                              f"{[r.error for r in error_results]}")
-            
-            min_required = min(2, self.parallel_runs)
+
+            if len(valid_results) == 0 and error_results:
+                if all(_is_fatal_provider_error(r.error) for r in error_results):
+                    error_samples = list({r.error for r in error_results})[:3]
+                    raise RuntimeError(
+                        "Analysis aborted: API credentials or access denied. "
+                        f"Details: {'; '.join(str(e) for e in error_samples)}"
+                    )
+
+            timeout_count = sum(1 for r in error_results if "timeout" in str(r.error))
+
+            if timeout_count >= 2 and not run_sequential:
+                force_sequential = True
+                logger.info("Multiple timeouts detected; switching to sequential for next attempt")
+
+            min_required = (
+                1 if run_sequential and force_sequential else min(2, self.parallel_runs)
+            )
             if len(valid_results) < min_required:
                 logger.warning(f"Only {len(valid_results)} valid results, need at least {min_required} for consensus")
                 if attempt < self.max_retries:
                     continue
-                else:
-                    logger.error("Max retries reached, returning partial consensus")
+                logger.warning(
+                    "Returning empty consensus after retries (rate limits / timeouts / partial failures)"
+                )
+                return self.consensus_engine.compute_consensus(
+                    [],
+                    entry_price=entry_price,
+                    ticker=ticker,
+                )
             
             # Convert to dict format for consensus engine
             result_dicts = [
@@ -226,6 +284,7 @@ class EnsembleAnalysisOrchestrator:
         temperature: float,
         selected_analysts: Optional[List[str]],
         model_override: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
     ) -> EnsembleMemberResult:
         """Run single ensemble member with timeout protection.
         
@@ -244,6 +303,7 @@ class EnsembleAnalysisOrchestrator:
             EnsembleMemberResult with signal or error
         """
         try:
+            effective_timeout = timeout_seconds or self.timeout_per_run
             return await asyncio.wait_for(
                 self._run_single(
                     member_id=member_id,
@@ -254,10 +314,11 @@ class EnsembleAnalysisOrchestrator:
                     selected_analysts=selected_analysts,
                     model_override=model_override,
                 ),
-                timeout=self.timeout_per_run,
+                timeout=effective_timeout,
             )
         except asyncio.TimeoutError:
-            logger.error(f"Ensemble member {member_id} timed out after {self.timeout_per_run}s")
+            effective_timeout = timeout_seconds or self.timeout_per_run
+            logger.error(f"Ensemble member {member_id} timed out after {effective_timeout}s")
             return EnsembleMemberResult(
                 member_id=member_id,
                 signal="HOLD",
@@ -266,7 +327,7 @@ class EnsembleAnalysisOrchestrator:
                 take_profit_price=None,
                 max_hold_days=3,
                 reasoning="",
-                error=f"timeout_after_{self.timeout_per_run}s",
+                error=f"timeout_after_{effective_timeout}s",
             )
         except Exception as e:
             logger.error(f"Ensemble member {member_id} failed: {e}")
@@ -317,13 +378,27 @@ class EnsembleAnalysisOrchestrator:
         if model_override:
             member_config["deep_think_llm"] = model_override
         
-        # Create graph
+        # Create graph (stream progress on SSE for single run or primary member only)
         analysts = selected_analysts or ["market", "social", "news", "fundamentals"]
-        graph = TradingAgentsGraph(
-            selected_analysts=analysts,
-            config=member_config,
+        eq = getattr(self, "_event_queue", None)
+        use_progress = eq is not None and (
+            self.parallel_runs == 1 or member_id == 0
         )
-        
+        suffix = ""
+        if use_progress and self.parallel_runs > 1:
+            suffix = f" (member {member_id + 1})"
+
+        def _make_graph():
+            return TradingAgentsGraph(
+                selected_analysts=analysts,
+                config=member_config,
+                debug=False,
+                progress_event_queue=eq if use_progress else None,
+                progress_label_suffix=suffix,
+            )
+
+        graph = _make_graph()
+
         # Rebuild graph with crypto tools if needed
         from tradingagents.dataflows.asset_detection import is_crypto
         if is_crypto(ticker):
@@ -348,10 +423,7 @@ class EnsembleAnalysisOrchestrator:
                     print(f"Ensemble member {member_id}: rate limited, waiting {wait}s (retry {retry + 1}/{max_propagate_retries})", flush=True)
                     await asyncio.sleep(wait)
                     # Rebuild graph for fresh state
-                    graph = TradingAgentsGraph(
-                        selected_analysts=analysts,
-                        config=member_config,
-                    )
+                    graph = _make_graph()
                     if is_crypto(ticker):
                         graph._rebuild_graph_for_asset(ticker, analysts)
                 else:

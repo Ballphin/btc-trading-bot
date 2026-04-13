@@ -133,7 +133,7 @@ class TestTelegramAlerts:
             # Should contain parsed reasoning, not raw JSON
             assert "Bullish momentum" in msg
             assert "<b>Analysis:</b>" in msg
-            assert "<b>Signal:</b>" in msg
+            assert "<b>Decision:</b>" in msg
             assert "<b>Confidence:</b>" in msg
             # Should not contain raw JSON braces
             assert '{"signal"' not in msg

@@ -173,25 +173,34 @@ def get_category_for_method(method: str) -> str:
             return category
     raise ValueError(f"Method '{method}' not found in any category")
 
-def get_vendor(category: str, method: str = None) -> str:
+def get_vendor(category: str, method: str = None, ticker: str = None) -> str:
     """Get the configured vendor for a data category or specific tool method.
     Tool-level configuration takes precedence over category-level.
+    For crypto tickers, checks crypto_vendors before data_vendors.
     """
     config = get_config()
 
-    # Check tool-level configuration first (if method provided)
     if method:
         tool_vendors = config.get("tool_vendors", {})
         if method in tool_vendors:
             return tool_vendors[method]
 
-    # Fall back to category-level configuration
+    # For crypto tickers, prefer crypto_vendors config
+    if ticker:
+        from tradingagents.dataflows.asset_detection import is_crypto
+        if is_crypto(ticker):
+            crypto_vendor = config.get("crypto_vendors", {}).get(category)
+            if crypto_vendor:
+                return crypto_vendor
+
     return config.get("data_vendors", {}).get(category, "default")
 
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
     category = get_category_for_method(method)
-    vendor_config = get_vendor(category, method)
+    # First positional arg is typically the ticker/symbol
+    ticker_hint = args[0] if args else kwargs.get("ticker") or kwargs.get("symbol")
+    vendor_config = get_vendor(category, method, ticker=ticker_hint)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
 
     if method not in VENDOR_METHODS:

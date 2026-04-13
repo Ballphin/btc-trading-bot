@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import History from './History';
 
@@ -53,9 +53,15 @@ describe('History page', () => {
     );
 
     await waitFor(() => {
+      expect(screen.getByText('2026-04-11')).toBeInTheDocument();
+    });
+    const expandApr11 = screen.getByText('2026-04-11').closest('button');
+    expect(expandApr11).toBeTruthy();
+    fireEvent.click(expandApr11!);
+
+    await waitFor(() => {
       expect(screen.getByText('2:30 PM')).toBeInTheDocument();
     });
-
     expect(screen.getByText('10:15 AM')).toBeInTheDocument();
   });
 
@@ -101,9 +107,13 @@ describe('History page', () => {
     );
 
     await waitFor(() => {
+      expect(screen.getByText('2026-04-11')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('2026-04-11').closest('button')!);
+
+    await waitFor(() => {
       expect(screen.getByText('2:15 PM')).toBeInTheDocument();
     });
-
     expect(screen.getByText('2:45 PM')).toBeInTheDocument();
   });
 });

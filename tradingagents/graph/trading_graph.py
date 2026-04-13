@@ -51,6 +51,7 @@ from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+from .stream_progress import detect_step_from_chunk
 
 
 class TradingAgentsGraph:
@@ -62,6 +63,8 @@ class TradingAgentsGraph:
         debug=False,
         config: Dict[str, Any] = None,
         callbacks: Optional[List] = None,
+        progress_event_queue: Any = None,
+        progress_label_suffix: str = "",
     ):
         """Initialize the trading agents graph and components.
 
@@ -70,10 +73,14 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            progress_event_queue: Optional queue with .put(dict) for SSE (e.g. JobEventQueue)
+            progress_label_suffix: Appended to agent labels in progress events
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
+        self.progress_event_queue = progress_event_queue
+        self.progress_label_suffix = progress_label_suffix or ""
 
         # Update the interface's config
         set_config(self.config)
@@ -291,18 +298,33 @@ class TradingAgentsGraph:
             company_name, trade_date
         )
         args = self.propagator.get_graph_args()
+        q = self.progress_event_queue
 
-        if self.debug:
-            # Debug mode with tracing
+        if q is not None or self.debug:
+            seen_steps = set()
             trace = []
+            final_state = None
             for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
+                final_state = chunk
+                if self.debug:
+                    msgs = chunk.get("messages") or []
+                    if msgs:
+                        msgs[-1].pretty_print()
                     trace.append(chunk)
-
-            final_state = trace[-1]
+                if q is not None:
+                    step_info = detect_step_from_chunk(chunk, seen_steps)
+                    if step_info:
+                        seen_steps.add(step_info["key"])
+                        q.put(
+                            {
+                                "event": "agent_start",
+                                "agent": step_info["label"] + self.progress_label_suffix,
+                                "step": step_info["step"],
+                                "total": 9,
+                            }
+                        )
+            if final_state is None:
+                raise RuntimeError("Graph stream produced no state")
         else:
             # Standard mode without tracing
             final_state = self.graph.invoke(init_agent_state, **args)

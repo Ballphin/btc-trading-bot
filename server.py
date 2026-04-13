@@ -38,9 +38,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+from tradingagents.graph.stream_progress import detect_step_from_chunk as _detect_step_from_chunk
 
 # ── App setup ─────────────────────────────────────────────────────────
 app = FastAPI(title="TradingAgents API", version="1.0.0")
@@ -65,14 +72,91 @@ _SCHEDULER_TICKERS = ["BTC-USD"]  # tickers to run automatically
 _SCHEDULER_INTERVAL_HOURS = 4     # run every 4 hours, synced to UTC boundary
 _DATA_DELAY_SECONDS = 300         # 5-min offset so data APIs have the closed candle
 
-_scheduler_state: Dict[str, Any] = {
-    "enabled": False,
-    "task": None,           # asyncio.Task handle
-    "last_run": None,       # ISO string of last logical candle time run
-    "last_status": None,    # 'ok' | 'error'
-    "next_run": None,       # ISO string of next scheduled logical candle time
-    "tickers": _SCHEDULER_TICKERS,
-}
+_SCHEDULER_STATE_FILE = EVAL_RESULTS_DIR / ".scheduler_state.json"
+_MODEL_CONFIG_FILE = EVAL_RESULTS_DIR / ".model_config.json"
+
+
+def _load_model_config_into_default() -> None:
+    """Merge persisted model/ensemble settings into DEFAULT_CONFIG (survives restarts)."""
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+        if not _MODEL_CONFIG_FILE.exists():
+            return
+        saved = json.loads(_MODEL_CONFIG_FILE.read_text())
+        keys = (
+            "llm_provider",
+            "deep_think_llm",
+            "quick_think_llm",
+            "enable_ensemble",
+            "ensemble_runs",
+        )
+        for k in keys:
+            if k in saved and saved[k] is not None:
+                DEFAULT_CONFIG[k] = saved[k]
+        logger.info(
+            "Loaded persisted model config: provider=%s ensemble=%s",
+            DEFAULT_CONFIG.get("llm_provider"),
+            DEFAULT_CONFIG.get("enable_ensemble"),
+        )
+    except Exception as e:
+        logger.warning("Failed to load persisted model config: %s", e)
+
+
+def _save_model_config() -> None:
+    """Write user-facing model fields to disk."""
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+        _MODEL_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "llm_provider": DEFAULT_CONFIG.get("llm_provider"),
+            "deep_think_llm": DEFAULT_CONFIG.get("deep_think_llm"),
+            "quick_think_llm": DEFAULT_CONFIG.get("quick_think_llm"),
+            "enable_ensemble": DEFAULT_CONFIG.get("enable_ensemble"),
+            "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs"),
+        }
+        _MODEL_CONFIG_FILE.write_text(json.dumps(payload, indent=2))
+    except Exception as e:
+        logger.warning("Failed to persist model config: %s", e)
+
+
+def _load_scheduler_state() -> Dict[str, Any]:
+    """Load persisted scheduler state from disk (survives server reloads)."""
+    defaults: Dict[str, Any] = {
+        "enabled": False,
+        "task": None,
+        "last_run": None,
+        "last_status": None,
+        "next_run": None,
+        "tickers": _SCHEDULER_TICKERS,
+    }
+    try:
+        if _SCHEDULER_STATE_FILE.exists():
+            saved = json.loads(_SCHEDULER_STATE_FILE.read_text())
+            defaults["enabled"] = saved.get("enabled", False)
+            defaults["last_run"] = saved.get("last_run")
+            defaults["last_status"] = saved.get("last_status")
+            defaults["tickers"] = saved.get("tickers", _SCHEDULER_TICKERS)
+    except Exception:
+        pass
+    return defaults
+
+def _save_scheduler_state():
+    """Persist scheduler state to disk."""
+    try:
+        _SCHEDULER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SCHEDULER_STATE_FILE.write_text(json.dumps({
+            "enabled": _scheduler_state.get("enabled", False),
+            "last_run": _scheduler_state.get("last_run"),
+            "last_status": _scheduler_state.get("last_status"),
+            "tickers": _scheduler_state.get("tickers", _SCHEDULER_TICKERS),
+        }, indent=2))
+    except Exception as e:
+        logger.warning(f"Failed to persist scheduler state: {e}")
+
+_scheduler_state: Dict[str, Any] = _load_scheduler_state()
+
+# Restore LLM / ensemble choices after restarts (must run after DEFAULT_CONFIG exists)
+_load_model_config_into_default()
 
 
 def _next_4h_utc_boundary() -> datetime:
@@ -95,42 +179,43 @@ async def _auto_analysis_scheduler():
     (e.g. '2026-04-08T16') regardless of when the physical process runs.
     """
     import pytz
-    logger.info("[Scheduler] 4H auto-analysis scheduler started")
+    print("[Scheduler] 4H auto-analysis scheduler started", flush=True)
     while _scheduler_state["enabled"]:
         try:
             boundary_utc = _next_4h_utc_boundary()
-            # Physical trigger = boundary + data delay
             physical_trigger = boundary_utc + timedelta(seconds=_DATA_DELAY_SECONDS)
-            # Sleep until that moment
             now_utc = datetime.now(pytz.utc)
             sleep_secs = (physical_trigger - now_utc).total_seconds()
             if sleep_secs > 0:
-                # Logical candle label (e.g. '2026-04-08T16')
                 logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
                 logical_date = boundary_utc.strftime("%Y-%m-%d")
                 _scheduler_state["next_run"] = boundary_utc.isoformat()
-                logger.info(
-                    f"[Scheduler] Next run: {logical_label} UTC (sleeping {sleep_secs:.0f}s until data ready)"
+                print(
+                    f"[Scheduler] Next run: {logical_label} UTC "
+                    f"(sleeping {sleep_secs:.0f}s / {sleep_secs/3600:.1f}h until data ready)",
+                    flush=True,
                 )
                 await asyncio.sleep(sleep_secs)
 
             if not _scheduler_state["enabled"]:
                 break
 
-            # Recalculate logical boundary (may shift slightly if sleep overran)
             logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
             logical_date = boundary_utc.strftime("%Y-%m-%d")
 
-            # Check if ensemble mode will be used
             from tradingagents.default_config import DEFAULT_CONFIG
             from tradingagents.graph.ensemble_orchestrator import should_use_ensemble
             current_provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
             ensemble_active = should_use_ensemble(DEFAULT_CONFIG, current_provider)
             
             if ensemble_active:
-                logger.info(f"[Scheduler] Running ENSEMBLE auto-analysis (3x parallel) for {_SCHEDULER_TICKERS} @ {logical_label}")
+                _n = DEFAULT_CONFIG.get("ensemble_runs", 1)
+                print(
+                    f"[Scheduler] Running ENSEMBLE auto-analysis ({_n}x parallel) for {_SCHEDULER_TICKERS} @ {logical_label}",
+                    flush=True,
+                )
             else:
-                logger.info(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label} (provider: {current_provider})")
+                print(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label} (provider: {current_provider})", flush=True)
             
             for ticker in _SCHEDULER_TICKERS:
                 job_id = str(uuid.uuid4())[:8]
@@ -151,30 +236,32 @@ async def _auto_analysis_scheduler():
                     daemon=True,
                 )
                 thread.start()
-                logger.info(f"[Scheduler] Launched job {job_id} for {ticker} @ {logical_label}")
+                print(f"[Scheduler] Launched job {job_id} for {ticker} @ {logical_label}", flush=True)
 
             _scheduler_state["last_run"] = logical_label
             _scheduler_state["last_status"] = "ok"
-            _scheduler_state["error_count"] = 0  # Reset on success
+            _scheduler_state["error_count"] = 0
+            _save_scheduler_state()
 
         except asyncio.CancelledError:
-            logger.info("[Scheduler] Task cancelled")
+            print("[Scheduler] Task cancelled", flush=True)
             break
         except Exception as e:
             error_count = _scheduler_state.get("error_count", 0) + 1
             _scheduler_state["error_count"] = error_count
-            logger.error(f"[Scheduler] Error ({error_count}/3): {e}")
+            print(f"[Scheduler] Error ({error_count}/3): {e}", flush=True)
+            import traceback; traceback.print_exc()
             _scheduler_state["last_status"] = f"error: {e}"
             
-            # BLOCKER FIX: Circuit breaker - disable after 3 consecutive errors
             if error_count >= 3:
                 _scheduler_state["enabled"] = False
-                logger.error("[Scheduler] DISABLED after 3 consecutive errors")
+                _save_scheduler_state()
+                print("[Scheduler] DISABLED after 3 consecutive errors", flush=True)
                 break
             
-            await asyncio.sleep(60)  # brief wait before retry
+            await asyncio.sleep(60)
 
-    logger.info("[Scheduler] Stopped")
+    print("[Scheduler] Stopped", flush=True)
 
 
 # ── Background eviction of stale completed backtest jobs (HIGH 8) ─────
@@ -198,6 +285,10 @@ async def _evict_old_backtest_jobs():
 @app.on_event("startup")
 async def _start_background_tasks():
     asyncio.create_task(_evict_old_backtest_jobs())
+    # Auto-restore scheduler if it was enabled before a server reload
+    if _scheduler_state.get("enabled") and not _scheduler_state.get("task"):
+        _scheduler_state["task"] = asyncio.create_task(_auto_analysis_scheduler())
+        logger.info("[Scheduler] Auto-restored after server restart (was previously enabled)")
 
 
 # ── Scheduler API Endpoints ───────────────────────────────────────────
@@ -239,7 +330,8 @@ async def toggle_scheduler():
         if task and not task.done():
             task.cancel()
         _scheduler_state["task"] = None
-        logger.info("[Scheduler] Disabled via API")
+        _save_scheduler_state()
+        print("[Scheduler] Disabled via API", flush=True)
         return {"enabled": False, "message": "Scheduler disabled"}
     else:
         # Enable: start the background task (singleton guard)
@@ -248,7 +340,8 @@ async def toggle_scheduler():
             return {"enabled": True, "message": "Already running"}
         _scheduler_state["enabled"] = True
         _scheduler_state["task"] = asyncio.create_task(_auto_analysis_scheduler())
-        logger.info("[Scheduler] Enabled via API")
+        _save_scheduler_state()
+        print("[Scheduler] Enabled via API", flush=True)
         return {"enabled": True, "message": "Scheduler enabled"}
 
 
@@ -302,7 +395,7 @@ async def get_model_config():
         "provider": DEFAULT_CONFIG.get("llm_provider", "openrouter"),
         "model": DEFAULT_CONFIG.get("deep_think_llm", "qwen/qwen3.6-plus"),
         "ensemble_enabled": DEFAULT_CONFIG.get("enable_ensemble", True),
-        "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs", 3),
+        "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs", 1),
         "ensemble_providers": DEFAULT_CONFIG.get("ensemble_enabled_providers", ["openrouter"]),
         "single_run_providers": DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"]),
         "fallback_model": DEFAULT_CONFIG.get("openrouter_fallback_model", "anthropic/claude-3.5-sonnet"),
@@ -311,9 +404,9 @@ async def get_model_config():
 
 @app.post("/api/model/config")
 async def set_model_config(req: ModelConfigRequest):
-    """Update model configuration for session (non-persistent).
-    
-    Note: Ensemble is auto-disabled for providers in ensemble_disabled_providers.
+    """Update model configuration; persisted to disk so it survives server restarts.
+
+    Ensemble is auto-disabled for providers in ensemble_disabled_providers.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
     
@@ -341,7 +434,9 @@ async def set_model_config(req: ModelConfigRequest):
         DEFAULT_CONFIG["enable_ensemble"] = req.parallel_mode
         ensemble_active = req.parallel_mode
         message = f"Configuration updated"
-    
+
+    _save_model_config()
+
     return {
         "status": "ok",
         "provider": req.provider,
@@ -407,34 +502,37 @@ class BacktestRequest(BaseModel):
 # ── SSE event queue helper ────────────────────────────────────────────
 
 class JobEventQueue:
-    """Thread-safe event queue for SSE streaming with buffering."""
+    """Thread-safe event queue for SSE streaming with replay support.
+
+    Every event is appended to ``_history``.  Each call to ``set_loop()``
+    creates a **fresh** asyncio queue and replays the full history into it,
+    so a reconnecting SSE client always receives every event from the start.
+    """
 
     def __init__(self):
         self._queue: asyncio.Queue = asyncio.Queue()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._buffer: list = []  # Buffer events before loop is set
+        self._history: list = []
         self._lock = threading.Lock()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         with self._lock:
             self._loop = loop
-            # Flush buffered events
-            for event in self._buffer:
+            self._queue = asyncio.Queue()
+            for event in self._history:
                 self._unsafe_put(event)
-            self._buffer.clear()
 
     def _unsafe_put(self, event: dict):
-        """Put event into queue - must be called with lock held or after loop is set."""
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
 
     def put(self, event: dict):
         with self._lock:
+            skip_history = event.get("event") == "heartbeat"
+            if not skip_history:
+                self._history.append(event)
             if self._loop and not self._loop.is_closed():
                 self._unsafe_put(event)
-            else:
-                # Buffer events until loop is set
-                self._buffer.append(event)
 
     async def get(self) -> dict:
         return await self._queue.get()
@@ -454,45 +552,6 @@ PIPELINE_STEPS = [
     {"key": "portfolio_manager", "label": "Portfolio Manager", "step": 9},
 ]
 TOTAL_STEPS = len(PIPELINE_STEPS)
-
-
-def _detect_step_from_chunk(chunk: dict, seen_steps: set) -> Optional[dict]:
-    """Detect which step just completed based on what fields are present in the chunk."""
-    # Check for report fields to determine which analyst just finished
-    report_fields = [
-        ("market_report", "market", "Market Analyst", 1),
-        ("sentiment_report", "social", "Social Media Analyst", 2),
-        ("news_report", "news", "News Analyst", 3),
-        ("fundamentals_report", "fundamentals", "Fundamentals Analyst", 4),
-    ]
-    
-    for report_key, step_key, label, step_num in report_fields:
-        if chunk.get(report_key) and step_key not in seen_steps:
-            return {"key": step_key, "label": label, "step": step_num}
-    
-    # Check for debate states
-    investment_debate = chunk.get("investment_debate_state", {})
-    if investment_debate.get("bull_history") and investment_debate.get("bear_history") and "bull_bear" not in seen_steps:
-        return {"key": "bull_bear", "label": "Bull vs Bear Debate", "step": 5}
-    
-    # Check for risk debate
-    risk_debate = chunk.get("risk_debate_state", {})
-    if risk_debate.get("aggressive_history") and "risk_debate" not in seen_steps:
-        return {"key": "risk_debate", "label": "Risk Debate", "step": 8}
-    
-    # Check for final decision
-    if chunk.get("final_trade_decision") and "portfolio_manager" not in seen_steps:
-        return {"key": "portfolio_manager", "label": "Portfolio Manager", "step": 9}
-    
-    # Check for trader plan
-    if chunk.get("trader_investment_plan") and "trader" not in seen_steps:
-        return {"key": "trader", "label": "Trader", "step": 7}
-    
-    # Check for investment plan (research manager)
-    if chunk.get("investment_plan") and "research_manager" not in seen_steps:
-        return {"key": "research_manager", "label": "Research Manager", "step": 6}
-    
-    return None
 
 
 def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool = False, run_timestamp: str = None):
@@ -544,15 +603,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         
         if use_ensemble:
             # HIGH FIX: Use ensemble orchestrator for OpenRouter
-            n_runs = config.get("ensemble_runs", 3)
+            n_runs = config.get("ensemble_runs", 1)
             print(f"[Analysis {job_id}] Ensemble mode enabled for {current_provider} ({n_runs} members)")
-            eq.put({"event": "agent_start", "agent": "Ensemble Analysis", "step": 0, "total": 9})
-            
-            # Emit progress: data gathering phase
-            eq.put({"event": "agent_start", "agent": "Market Analyst", "step": 1, "total": 9})
-            eq.put({"event": "agent_start", "agent": "Social Media Analyst", "step": 2, "total": 9})
-            eq.put({"event": "agent_start", "agent": "News Analyst", "step": 3, "total": 9})
-            eq.put({"event": "agent_start", "agent": "Fundamentals Analyst", "step": 4, "total": 9})
             
             orchestrator = EnsembleAnalysisOrchestrator(
                 config=config,
@@ -620,8 +672,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                     log_path.write_text(json.dumps(log_data, indent=4))
             except Exception as _log_err:
                 print(f"[Analysis {job_id}] Failed to persist ensemble fields to log (non-fatal): {_log_err}")
-            
-            # Log and complete
+
             print(f"[Analysis {job_id}] Ensemble complete: {consensus_result.signal} "
                   f"(conf={consensus_result.confidence:.2f}, "
                   f"agreement={consensus_result.divergence_metrics.get('signal_agreement', 0):.0%})")
@@ -913,17 +964,22 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         print(f"[Analysis {job_id}] Done event sent")
 
     except Exception as e:
+        # #region agent log
+        import json as _dj2; open('/Users/daniel/Desktop/TradingAgents/.cursor/debug-f18c74.log','a').write(_dj2.dumps({"sessionId":"f18c74","hypothesisId":"H2","location":"server.py:outer_exception","message":"analysis outer exception","data":{"job_id":job_id,"error":str(e)[:500],"type":type(e).__name__},"timestamp":int(__import__('time').time()*1000)})+'\n')
+        # #endregion
         print(f"[Analysis {job_id}] ERROR: {e}")
         import traceback
         traceback.print_exc()
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
         
-        # Parse error for better user message
         error_str = str(e)
-        is_rate_limit = "429" in error_str or "rate-limit" in error_str.lower()
-        if is_rate_limit:
-            user_message = "Rate limited by provider. The free model has strict limits. Try again shortly or switch to a non-free model."
+        is_api_issue = any(k in error_str.lower() for k in ("rate limit", "timeout", "429", "502", "upstream", "api issue"))
+        if is_api_issue or "all" in error_str.lower() and "failed" in error_str.lower():
+            user_message = (
+                "Analysis aborted: the AI provider APIs are overloaded or rate-limited. "
+                "No partial results were saved. Please wait a few minutes and try again."
+            )
         else:
             user_message = f"Analysis failed: {str(e)[:200]}"
         
@@ -1031,14 +1087,21 @@ async def stream_analysis(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     eq: JobEventQueue = jobs[job_id]["queue"]
+    # #region agent log
+    _hist_len = len(eq._history)
+    import json as _dj; open('/Users/daniel/Desktop/TradingAgents/.cursor/debug-f18c74.log','a').write(_dj.dumps({"sessionId":"f18c74","hypothesisId":"H1","location":"server.py:sse_connect","message":"SSE stream connecting","data":{"job_id":job_id,"history_len":_hist_len,"history_events":[e.get("event")+"@step"+str(e.get("step","?")) for e in eq._history[:20]]},"timestamp":int(__import__('time').time()*1000)})+'\n')
+    # #endregion
     eq.set_loop(asyncio.get_event_loop())
+    my_queue = eq._queue
 
     stream_start = time.time()
 
     async def event_generator():
         while True:
+            if eq._queue is not my_queue:
+                break
             try:
-                event = await asyncio.wait_for(eq.get(), timeout=30)
+                event = await asyncio.wait_for(my_queue.get(), timeout=30)
                 try:
                     event_data = json.dumps(event, default=str)
                     yield {"event": event.get("event", "message"), "data": event_data}

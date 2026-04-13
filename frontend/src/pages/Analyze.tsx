@@ -1,5 +1,5 @@
 import { useState, useEffect, useReducer, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { BarChart3, MessageSquare, Newspaper, PieChart, ArrowLeft, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import ProgressStepper, { type StepState } from '../components/ProgressStepper';
@@ -178,6 +178,7 @@ export default function Analyze() {
   const { ticker } = useParams<{ ticker: string }>();
   useDocumentTitle(`${ticker} — Live Analysis`);
   const navigate = useNavigate();
+  const location = useLocation();
   const [state, dispatch] = useReducer(reducer, initialState);
   const [jobId, setJobId] = useState<string | null>(null);
   const startedRef = useRef(false);
@@ -186,13 +187,21 @@ export default function Analyze() {
     if (!ticker || startedRef.current) return;
     startedRef.current = true;
     dispatch({ type: 'START' });
+
+    // If navigated from "Run Now" with an existing job, reuse it
+    const existingJobId = (location.state as { jobId?: string })?.jobId;
+    if (existingJobId) {
+      setJobId(existingJobId);
+      return;
+    }
+
     try {
       const res = await startAnalysis(ticker);
       setJobId(res.job_id);
     } catch (err) {
       dispatch({ type: 'ERROR', message: String(err) });
     }
-  }, [ticker]);
+  }, [ticker, location.state]);
 
   // Auto-start on mount (ref guard prevents Strict Mode double-fire)
   useEffect(() => {
@@ -205,6 +214,9 @@ export default function Analyze() {
   useEffect(() => {
     if (!jobId) return;
     const close = streamAnalysis(jobId, (e: SSEEvent) => {
+      // #region agent log
+      fetch('http://127.0.0.1:7444/ingest/e6a1deb5-6f13-4c9b-a327-42294f68dcb9',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'f18c74'},body:JSON.stringify({sessionId:'f18c74',location:'Analyze.tsx:SSE',message:'SSE event received',data:{event:e.event,step:e.step,agent:e.agent},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       switch (e.event) {
         case 'agent_start':
           dispatch({ type: 'AGENT_START', step: e.step!, label: e.agent! });
@@ -273,9 +285,25 @@ export default function Analyze() {
         {/* Right: Reports */}
         <div className="lg:col-span-2 space-y-4">
           {state.status === 'error' && (
-            <div className="glass p-4 border-red-500/30 border">
-              <p className="text-red-400 text-sm font-medium">Error: {state.error}</p>
-            </div>
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass p-6 border-red-500/40 border rounded-xl"
+            >
+              <div className="flex items-start gap-3">
+                <XCircle className="w-6 h-6 text-red-400 mt-0.5 shrink-0" />
+                <div className="space-y-2">
+                  <h3 className="text-red-400 font-semibold text-base">Analysis Failed</h3>
+                  <p className="text-slate-300 text-sm leading-relaxed">{state.error}</p>
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="mt-3 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    Try Again
+                  </button>
+                </div>
+              </div>
+            </motion.div>
           )}
 
           {/* Agent reports */}

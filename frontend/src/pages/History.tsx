@@ -146,7 +146,8 @@ export default function History() {
                           <div className="flex items-center gap-3">
                             <span className="font-medium text-white text-sm tabular-nums">{group.date}</span>
                             <span className="text-xs text-slate-500 bg-slate-800 px-2 py-0.5 rounded-full">
-                              {group.items.length} analyses
+                              {group.items.length}{' '}
+                              {group.items.length === 1 ? 'analysis' : 'analyses'}
                             </span>
                           </div>
                           {isExpanded ? (

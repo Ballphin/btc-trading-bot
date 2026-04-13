@@ -110,6 +110,7 @@ class BGeometricsClient(BaseDataClient):
         ]
 
         core_metrics = ["mvrv", "sopr", "exchange_netflow", "exchange_reserve", "nupl"]
+        failed_metrics: list = []
 
         for metric_name in core_metrics:
             try:
@@ -133,7 +134,14 @@ class BGeometricsClient(BaseDataClient):
                     report_lines.append(f"## {metric_name.upper()}: No data available")
                     report_lines.append("")
             except Exception as e:
+                failed_metrics.append(metric_name)
                 report_lines.append(f"## {metric_name.upper()}: Data unavailable ({e})")
                 report_lines.append("")
+
+        if failed_metrics:
+            report_lines.insert(
+                1,
+                f"*Note: Partial on-chain data — unavailable metrics: {', '.join(failed_metrics)}.*\n",
+            )
 
         return "\n".join(report_lines)

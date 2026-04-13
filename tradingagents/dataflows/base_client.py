@@ -4,6 +4,7 @@ import time
 import hashlib
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -11,12 +12,16 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+_inflight_lock = threading.Lock()
+_inflight: dict[str, threading.Event] = {}
+_inflight_results: dict[str, dict] = {}
+
 
 class BaseDataClient:
     """Base class providing disk caching, exponential backoff retries, and rate limit handling."""
 
-    MAX_RETRIES = 3
-    BACKOFF_BASE = 2  # seconds
+    MAX_RETRIES = 2
+    BACKOFF_BASE = 1  # seconds (faster fail on flaky upstreams)
 
     def __init__(self, cache_subdir: str, cache_ttl: int = 3600):
         self.cache_dir = Path(f"tradingagents/dataflows/data_cache/{cache_subdir}")
@@ -51,6 +56,36 @@ class BaseDataClient:
         if cached is not None:
             return cached
 
+        dedup_key = str(cache_path)
+        with _inflight_lock:
+            if dedup_key in _inflight:
+                event = _inflight[dedup_key]
+                waiting = True
+            else:
+                event = threading.Event()
+                _inflight[dedup_key] = event
+                waiting = False
+
+        if waiting:
+            event.wait(timeout=120)
+            cached = self._read_cache(cache_path)
+            if cached is not None:
+                return cached
+            if dedup_key in _inflight_results:
+                return _inflight_results[dedup_key]
+
+        try:
+            result = self._do_request(url, params, cache_path)
+            with _inflight_lock:
+                _inflight_results[dedup_key] = result
+            return result
+        finally:
+            with _inflight_lock:
+                _inflight.pop(dedup_key, None)
+                _inflight_results.pop(dedup_key, None)
+            event.set()
+
+    def _do_request(self, url: str, params: dict, cache_path: Path) -> dict:
         for attempt in range(self.MAX_RETRIES):
             try:
                 resp = self.session.get(url, params=params, timeout=30)

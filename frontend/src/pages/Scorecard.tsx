@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Target, TrendingUp, TrendingDown, BarChart3, RefreshCw, AlertCircle, CheckCircle2, XCircle, Activity, Zap, Shield, Clock, PlayCircle, StopCircle } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
@@ -123,6 +124,7 @@ function SignalBadge({ signal }: { signal: string }) {
 
 export default function ScorecardPage() {
   useDocumentTitle('Forward-Test Scorecard');
+  const navigate = useNavigate();
   const [ticker, setTicker] = useState('BTC-USD');
   const [scorecard, setScorecard] = useState<Scorecard | null>(null);
   const [walkForward, setWalkForward] = useState<WalkForwardResult | null>(null);
@@ -313,7 +315,12 @@ export default function ScorecardPage() {
               <button
                 onClick={async () => {
                   try {
-                    await fetch(`${API_BASE_URL}/scheduler/run-now`, { method: 'POST' });
+                    const res = await fetch(`${API_BASE_URL}/scheduler/run-now`, { method: 'POST' });
+                    const data = await res.json();
+                    const launched = data?.launched?.[0];
+                    if (launched) {
+                      navigate(`/analyze/${launched.ticker}`, { state: { jobId: launched.job_id } });
+                    }
                   } catch {
                     setError('Failed to trigger scheduler run');
                   }
