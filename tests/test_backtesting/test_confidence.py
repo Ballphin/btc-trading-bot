@@ -184,7 +184,7 @@ class TestColdStartCorrection:
         assert result["confidence"] <= 0.80  # Should be dampened
 
     def test_no_calibration_file(self, scorer, tmp_path):
-        """Without calibration.json, use default 0.80 correction."""
+        """Without calibration.json, use default 0.85 correction."""
         result = scorer.score(
             llm_confidence=0.90,
             ticker="NEW-TICKER",
@@ -201,6 +201,54 @@ class TestColdStartCorrection:
         assert result["confidence"] <= 0.90
 
 
+# ── Cold-start linear ramp ──────────────────────────────────────────
+
+class TestColdStartRamp:
+    """Test continuous linear ramp: correction = base + (1-base) * min(1, n/60)."""
+
+    @pytest.mark.parametrize("n, expected_min_correction", [
+        (0, 0.85),
+        (15, 0.8875),
+        (30, 0.925),
+        (60, 1.0),
+        (100, 1.0),
+    ])
+    def test_ramp_values(self, tmp_path, n, expected_min_correction):
+        scorer = ConfidenceScorer(results_dir=str(tmp_path))
+        # Create scored decisions to control scored_count
+        shadow_dir = tmp_path / "shadow" / "TEST-TICKER"
+        shadow_dir.mkdir(parents=True)
+        scored_path = shadow_dir / "decisions_scored.jsonl"
+        with open(scored_path, "w") as f:
+            for i in range(n):
+                f.write(json.dumps({"ticker": "TEST-TICKER", "scored": True}) + "\n")
+
+        result = scorer.score(
+            llm_confidence=1.0,  # Use 1.0 to isolate the correction
+            ticker="TEST-TICKER",
+            signal="HOLD",
+            knowledge_store=None,
+            regime_ctx={"regime": "unknown", "current_price": None, "above_sma20": True},
+            stop_loss=None,
+            take_profit=None,
+        )
+        # overconfidence_correction should match the ramp
+        assert result["overconfidence_correction"] == pytest.approx(expected_min_correction, abs=0.005)
+
+    def test_scored_count_in_result(self, scorer, tmp_path):
+        result = scorer.score(
+            llm_confidence=0.80,
+            ticker="NEW-TICKER",
+            signal="BUY",
+            knowledge_store=None,
+            regime_ctx={"regime": "unknown", "current_price": 100, "above_sma20": True},
+            stop_loss=90,
+            take_profit=120,
+        )
+        assert "scored_count_used" in result
+        assert result["scored_count_used"] == 0
+
+
 # ── Hedge-word penalty ───────────────────────────────────────────────
 
 class TestHedgeWordPenalty:
@@ -210,28 +258,53 @@ class TestHedgeWordPenalty:
 
     def test_one_hedge_word(self, scorer):
         cal, pen = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "I'm uncertain about this")
-        assert pen == pytest.approx(0.02)
+        assert pen == pytest.approx(0.03)  # Multiplicative: 3% per word
 
     def test_multiple_hedge_words(self, scorer):
-        text = "however uncertain despite risk concern"
+        text = "however uncertain despite concern"
         cal, pen = scorer.calibrate(0.80, None, 0, None, "trending_up", True, text)
-        assert pen > 0.04  # Multiple hedge words
+        assert pen > 0.06  # Multiple hedge words: 4 * 3% = 12%
 
-    def test_penalty_capped_at_008(self, scorer):
-        # All 10 hedge words
-        text = "but however although despite uncertain volatile caution risk concern weak"
+    def test_penalty_capped_at_012(self, scorer):
+        # All current hedge words: but however although despite uncertain concern weak
+        text = "but however although despite uncertain concern weak"
         _, pen = scorer.calibrate(0.80, None, 0, None, "trending_up", True, text)
-        assert pen == pytest.approx(0.08)
+        assert pen == pytest.approx(0.12)  # 7 words × 3% = 21% but capped at 12%
+
+    def test_removed_words_no_penalty(self, scorer):
+        """'risk', 'volatile', 'caution' were removed — no penalty."""
+        cal_clean, pen_clean = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "No hedge words here")
+        cal_risk, pen_risk = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "risk volatile caution")
+        assert pen_risk == 0.0
+        assert cal_clean == cal_risk
+
+    def test_word_boundary_no_false_positive(self, scorer):
+        """'but' should NOT match in 'distribution' or 'contribute'."""
+        cal_clean, pen_clean = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "clean text")
+        cal_substr, pen_substr = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "distribution contribute rebuttal")
+        assert pen_substr == 0.0
+        assert cal_clean == cal_substr
 
 
 # ── Regime gating ────────────────────────────────────────────────────
 
 class TestRegimeGating:
     def test_volatile_below_sma_penalty(self, scorer):
-        """Volatile + below SMA20 → harder penalty."""
-        cal_volatile, _ = scorer.calibrate(0.80, None, 0, None, "volatile", False, "")
+        """Volatile + below SMA20 → harder penalty (for non-SHORT)."""
+        cal_volatile, _ = scorer.calibrate(0.80, None, 0, None, "volatile", False, "", signal="BUY")
         cal_normal, _ = scorer.calibrate(0.80, None, 0, None, "trending_up", True, "")
         assert cal_volatile < cal_normal
+
+    def test_volatile_short_below_sma_less_penalty(self, scorer):
+        """SHORT below SMA20 in volatile regime → reduced penalty (0.92 not 0.75)."""
+        cal_short, _ = scorer.calibrate(0.80, None, 0, None, "volatile", False, "", signal="SHORT")
+        cal_buy, _ = scorer.calibrate(0.80, None, 0, None, "volatile", False, "", signal="BUY")
+        # SHORT gets 0.92 penalty, BUY gets 0.75 penalty → SHORT confidence should be higher
+        assert cal_short > cal_buy
+        # SHORT should be 0.80 * 0.92 = 0.736
+        assert cal_short == pytest.approx(0.80 * 0.92, abs=0.01)
+        # BUY should be 0.80 * 0.75 = 0.60
+        assert cal_buy == pytest.approx(0.80 * 0.75, abs=0.01)
 
 
 # ── kelly_position_size math ─────────────────────────────────────────

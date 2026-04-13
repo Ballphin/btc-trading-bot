@@ -554,6 +554,50 @@ PIPELINE_STEPS = [
 TOTAL_STEPS = len(PIPELINE_STEPS)
 
 
+# ── Background auto-scoring ────────────────────────────────────────────
+_scoring_lock = threading.Lock()
+
+
+def _trigger_background_scoring(ticker: str):
+    """Score pending shadow decisions and auto-calibrate in a background thread."""
+    def _score_and_calibrate():
+        with _scoring_lock:
+            try:
+                from tradingagents.backtesting.scorecard import (
+                    score_pending_decisions, run_calibration_study, count_scored_decisions
+                )
+                result = score_pending_decisions(ticker, str(EVAL_RESULTS_DIR))
+                newly_scored = result.get("scored", 0)
+                total_scored = result.get("total_scored", 0)
+                if newly_scored > 0:
+                    print(f"[AutoScore] {ticker}: scored {newly_scored} new decisions (total: {total_scored})")
+
+                # Auto-calibrate when enough scored decisions exist
+                if total_scored >= 10:
+                    cal_path = EVAL_RESULTS_DIR / "shadow" / ticker / "calibration.json"
+                    should_calibrate = False
+                    if not cal_path.exists():
+                        should_calibrate = True
+                    else:
+                        try:
+                            cal = json.loads(cal_path.read_text())
+                            last_n = cal.get("n_decisions", 0)
+                            if total_scored >= last_n + 5:
+                                should_calibrate = True
+                        except Exception:
+                            should_calibrate = True
+
+                    if should_calibrate:
+                        cal_result = run_calibration_study(ticker, results_dir=str(EVAL_RESULTS_DIR))
+                        if "error" not in cal_result:
+                            print(f"[AutoScore] {ticker}: calibration updated → correction={cal_result.get('correction')}")
+            except Exception as e:
+                print(f"[AutoScore] {ticker}: scoring failed (non-fatal): {e}")
+
+    thread = threading.Thread(target=_score_and_calibrate, daemon=True)
+    thread.start()
+
+
 def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool = False, run_timestamp: str = None):
     """Run the TradingAgents analysis in a background thread.
     
@@ -650,7 +694,73 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             # Convert ConsensusResult to result dict
             result = _ensemble_result_to_dict(consensus_result, ticker, run_timestamp or trade_date)
             
-            # Persist structured fields into the log file so history page reads them
+            # Run ConfidenceScorer on ensemble consensus so Telegram, frontend,
+            # and history all receive the SAME calibrated confidence & R:R values
+            try:
+                from tradingagents.backtesting.regime import detect_regime_context
+                from tradingagents.graph.confidence import ConfidenceScorer
+                from tradingagents.dataflows.asset_detection import is_crypto as _is_crypto_asset
+
+                regime_ctx = detect_regime_context(ticker, trade_date)
+                _ens_sl = result.get("stop_loss_price")
+                _ens_tp = result.get("take_profit_price")
+                _ens_hold = result.get("max_hold_days")
+
+                # Crypto-specific guards (same as single-run path)
+                if _is_crypto_asset(ticker):
+                    if _ens_hold and _ens_hold > 7:
+                        _ens_hold = 7
+                        result["max_hold_days"] = _ens_hold
+                    if (result.get("decision") in ('SHORT', 'SELL')
+                            and regime_ctx.get('current_price')
+                            and _ens_sl):
+                        max_crypto_stop = regime_ctx['current_price'] * 1.12
+                        if _ens_sl > max_crypto_stop:
+                            _ens_sl = max_crypto_stop
+                            result["stop_loss_price"] = _ens_sl
+
+                scored = ConfidenceScorer().score(
+                    llm_confidence=result.get("confidence", 0.50),
+                    ticker=ticker,
+                    signal=result.get("decision", "HOLD"),
+                    knowledge_store=None,
+                    regime_ctx=regime_ctx,
+                    stop_loss=_ens_sl,
+                    take_profit=_ens_tp,
+                    max_hold_days=int(_ens_hold) if _ens_hold else 7,
+                    reasoning=result.get("reasoning", ""),
+                )
+                result["confidence"] = scored.get("confidence", result.get("confidence"))
+                result["position_size_pct"] = scored.get("position_size_pct")
+                result["conviction_label"] = scored.get("conviction_label", result.get("conviction_label"))
+                result["r_ratio"] = scored.get("r_ratio") or result.get("r_ratio")
+                result["r_ratio_warning"] = scored.get("r_ratio_warning", False)
+                result["gated"] = scored.get("gated", False)
+                result["hold_period_scalar"] = scored.get("hold_period_scalar")
+                result["hedge_penalty_applied"] = scored.get("hedge_penalty_applied")
+                print(f"[Analysis {job_id}] Ensemble scored: conf={result['confidence']:.3f} "
+                      f"size={result.get('position_size_pct', 0):.1%} R={result.get('r_ratio')} "
+                      f"gated={result.get('gated')}")
+            except Exception as _score_err:
+                print(f"[Analysis {job_id}] Ensemble confidence scorer error (non-fatal): {_score_err}")
+                import traceback; traceback.print_exc()
+
+            # Fallback R:R from raw prices if scorer didn't provide one
+            if result.get("r_ratio") is None:
+                try:
+                    _fb_sl = result.get("stop_loss_price")
+                    _fb_tp = result.get("take_profit_price")
+                    _fb_entry = consensus_result.ensemble_metadata.get("entry_price_snapshot")
+                    if _fb_sl and _fb_tp and _fb_entry and _fb_entry > 0:
+                        _risk = abs(_fb_entry - _fb_sl)
+                        _reward = abs(_fb_tp - _fb_entry)
+                        if _risk > 0:
+                            result["r_ratio"] = round(_reward / _risk, 3)
+                            result["r_ratio_warning"] = result["r_ratio"] < 1.0
+                except Exception:
+                    pass
+
+            # Persist scored fields into the log file so history page reads them
             try:
                 file_key = run_timestamp or trade_date
                 log_path = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{file_key}.json"
@@ -668,13 +778,17 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                     entry["conviction_label"] = result.get("conviction_label")
                     entry["position_size_pct"] = result.get("position_size_pct")
                     entry["r_ratio"] = result.get("r_ratio")
+                    entry["r_ratio_warning"] = result.get("r_ratio_warning")
+                    entry["gated"] = result.get("gated")
+                    entry["hold_period_scalar"] = result.get("hold_period_scalar")
+                    entry["hedge_penalty_applied"] = result.get("hedge_penalty_applied")
                     log_data[date_key] = entry
                     log_path.write_text(json.dumps(log_data, indent=4))
             except Exception as _log_err:
                 print(f"[Analysis {job_id}] Failed to persist ensemble fields to log (non-fatal): {_log_err}")
 
             print(f"[Analysis {job_id}] Ensemble complete: {consensus_result.signal} "
-                  f"(conf={consensus_result.confidence:.2f}, "
+                  f"(conf={result.get('confidence', 0):.2f}, "
                   f"agreement={consensus_result.divergence_metrics.get('signal_agreement', 0):.0%})")
             
             jobs[job_id]["result"] = result
@@ -685,6 +799,42 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 _send_telegram_alert(result)
             except Exception as e:
                 print(f"[Analysis {job_id}] Telegram alert warning: {e}")
+
+            # Auto-record shadow decision for ensemble path
+            try:
+                _ens_shadow_dir = EVAL_RESULTS_DIR / "shadow" / ticker
+                _ens_shadow_dir.mkdir(parents=True, exist_ok=True)
+                _ens_shadow_price = None
+                try:
+                    _ens_shadow_price = _get_price_on_date(ticker, trade_date)
+                except Exception:
+                    pass
+                _ens_shadow_regime = "unknown"
+                try:
+                    _ens_shadow_regime = regime_ctx.get("regime", "unknown")
+                except Exception:
+                    pass
+                _ens_shadow_entry = {
+                    "ticker": ticker,
+                    "date": trade_date,
+                    "signal": result.get("decision", "HOLD"),
+                    "price": _ens_shadow_price,
+                    "confidence": result.get("confidence"),
+                    "stop_loss": result.get("stop_loss_price"),
+                    "take_profit": result.get("take_profit_price"),
+                    "reasoning": result.get("reasoning"),
+                    "regime": _ens_shadow_regime,
+                    "source": "ensemble_analysis",
+                    "recorded_at": datetime.now().isoformat(),
+                    "scored": False,
+                }
+                with open(_ens_shadow_dir / "decisions.jsonl", "a") as _sf:
+                    _sf.write(json.dumps(_ens_shadow_entry, default=str) + "\n")
+            except Exception as _shadow_err:
+                print(f"[Analysis {job_id}] Ensemble shadow record failed (non-fatal): {_shadow_err}")
+
+            # Background auto-scoring for all tickers with pending decisions
+            _trigger_background_scoring(ticker)
             
             # Emit decision event for the signal badge
             eq.put({"event": "decision", "signal": result.get("decision", "HOLD")})
@@ -868,6 +1018,22 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             print(f"[Analysis {job_id}] Confidence scorer error (non-fatal): {_score_err}")
             import traceback; traceback.print_exc()
 
+        # Fallback R:R from raw prices if scorer didn't provide one
+        _sr_rr = scored.get("r_ratio")
+        _sr_rr_warn = scored.get("r_ratio_warning", False)
+        if _sr_rr is None and stop_loss_price and take_profit_price:
+            try:
+                from tradingagents.backtesting.regime import detect_regime_context as _drc
+                _entry = _drc(ticker, trade_date).get("current_price")
+                if _entry and _entry > 0:
+                    _risk = abs(_entry - stop_loss_price)
+                    _reward = abs(take_profit_price - _entry)
+                    if _risk > 0:
+                        _sr_rr = round(_reward / _risk, 3)
+                        _sr_rr_warn = _sr_rr < 1.0
+            except Exception:
+                pass
+
         result = {
             "ticker": ticker,
             "date": run_timestamp if run_timestamp else trade_date,
@@ -880,8 +1046,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             "position_size_pct": scored.get("position_size_pct"),
             "conviction_label": scored.get("conviction_label"),
             "gated": scored.get("gated", False),
-            "r_ratio": scored.get("r_ratio"),
-            "r_ratio_warning": scored.get("r_ratio_warning", False),
+            "r_ratio": _sr_rr,
+            "r_ratio_warning": _sr_rr_warn,
             "hold_period_scalar": scored.get("hold_period_scalar"),
             "hedge_penalty_applied": scored.get("hedge_penalty_applied"),
             "market_report": final_state.get("market_report", ""),
@@ -958,6 +1124,9 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 _sf.write(json.dumps(shadow_entry, default=str) + "\n")
         except Exception as _shadow_err:
             print(f"[Analysis {job_id}] Shadow record failed (non-fatal): {_shadow_err}")
+
+        # Background auto-scoring for all tickers with pending decisions
+        _trigger_background_scoring(ticker)
 
         eq.put({"event": "decision", "signal": decision_signal})
         eq.put({"event": "done", "result": result})
@@ -1438,14 +1607,14 @@ def _send_telegram_alert(result: dict):
     
     signal = result.get("decision", "UNKNOWN")
     signal_emoji = "🛑" if signal in ["SHORT", "SELL"] else "🟢" if signal in ["BUY", "COVER"] else "⚖️"
-    conf = result.get("confidence", 0)
+    conf = result.get("confidence") or 0
     
     # Ensure stop loss / take profit handle empty paths
     sl = result.get("stop_loss_price")
     tp = result.get("take_profit_price")
     sl_str = f"${float(sl):,.2f}" if sl else "N/A"
     tp_str = f"${float(tp):,.2f}" if tp else "N/A"
-    sizing = result.get("position_size_pct", 0)
+    sizing = result.get("position_size_pct") or 0
     
     # Parse timestamp with new format support
     raw_date = result.get('date', '')
@@ -1490,6 +1659,14 @@ def _send_telegram_alert(result: dict):
     # Format reasoning section
     decision_text = result.get("final_trade_decision", "")
     reasoning_section = _format_reasoning(decision_text)
+
+    # Calibration status
+    _cal_correction = result.get("overconfidence_correction")
+    _cal_scored = result.get("scored_count_used")
+    if _cal_correction is not None and _cal_scored is not None:
+        cal_line = f"\n📊 Calibration: {_cal_scored}/60 scored (correction: {_cal_correction:.0%})"
+    else:
+        cal_line = ""
     
     msg = (
         f"🚨 <b>Trading Agent Alert: {result.get('ticker')}</b> 🚨\n"
@@ -1505,7 +1682,8 @@ def _send_telegram_alert(result: dict):
         f"• <b>Take Profit:</b> {tp_str}\n"
         f"• <b>Hold:</b> {result.get('max_hold_days', 'N/A')} Period(s)\n\n"
         "📈 <b>Metrics:</b>\n"
-        f"{rr_prefix}Conviction: {conviction}\n\n"
+        f"{rr_prefix}Conviction: {conviction}"
+        f"{cal_line}\n\n"
         "📝 <b>Bot Reasoning:</b>\n"
         f"{reasoning_section}"
     )

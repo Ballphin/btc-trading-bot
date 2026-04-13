@@ -15,16 +15,19 @@ Includes:
 import json
 import math
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Hedge words in reasoning that signal LLM uncertainty
+# Hedge words in reasoning that signal genuine LLM uncertainty
+# Removed "risk", "volatile", "caution" — they are descriptive trading terms,
+# not hedging language, and appear in >70% of crypto analyses.
 _HEDGE_WORDS = frozenset({
     "but", "however", "although", "despite", "uncertain",
-    "volatile", "caution", "risk", "concern", "weak",
+    "concern", "weak",
 })
 
 # Signals that are binary trades — Kelly applies
@@ -81,6 +84,7 @@ class ConfidenceScorer:
         regime: str,
         above_sma20: bool,
         reasoning: str = "",
+        signal: str = "",
     ) -> tuple:
         """Calibrate raw LLM confidence against historical data, vol regime, and reasoning.
 
@@ -106,15 +110,23 @@ class ConfidenceScorer:
 
         # Regime volatility penalty
         if regime == "volatile":
-            # Differentiate breakout (above SMA20) from crash (below SMA20)
-            vol_penalty = 0.90 if above_sma20 else 0.75
+            sig_upper = signal.upper() if signal else ""
+            if sig_upper in ("SHORT", "SELL") and not above_sma20:
+                # Confirmed breakdown below SMA20 — high-conviction short setup
+                # Small penalty (8%) for short-squeeze risk only
+                vol_penalty = 0.92
+            else:
+                # Differentiate breakout (above SMA20) from crash (below SMA20)
+                vol_penalty = 0.90 if above_sma20 else 0.75
             calibrated = _clamp(calibrated * vol_penalty, 0.25, 0.95)
 
-        # Hedge-word penalty from reasoning text
+        # Hedge-word penalty from reasoning text (multiplicative, word-boundary matching)
         reasoning_lower = reasoning.lower() if reasoning else ""
-        hedge_count = sum(1 for w in _HEDGE_WORDS if w in reasoning_lower)
-        hedge_penalty = min(0.08, hedge_count * 0.02)
-        calibrated = _clamp(calibrated - hedge_penalty, 0.25, 0.95)
+        hedge_count = sum(1 for w in _HEDGE_WORDS if re.search(r'\b' + w + r'\b', reasoning_lower))
+        # Multiplicative penalty: 3% per hedge word, max 12% total
+        hedge_multiplier = max(0.88, 1.0 - hedge_count * 0.03)
+        hedge_penalty = 1.0 - hedge_multiplier
+        calibrated = _clamp(calibrated * hedge_multiplier, 0.25, 0.95)
 
         return calibrated, hedge_penalty
 
@@ -255,27 +267,30 @@ class ConfidenceScorer:
         above_sma20 = regime_ctx.get("above_sma20", True)
 
         # ── Cold-start overconfidence correction (MIT CSAIL, 2025) ──
-        # Load calibration study result if available, otherwise use default 0.80
-        overconfidence_correction = 0.80  # default: 20% dampener
+        # Continuous linear ramp: correction = base + (1-base) * min(1, n/60)
+        # At n=0: base (0.85), at n=30: 0.925, at n=60+: 1.0 (no penalty)
+        _COLD_START_THRESHOLD = 60
+        base_correction = 0.85  # default: 15% dampener (was 20%)
         try:
             cal_path = self.results_dir / "shadow" / ticker / "calibration.json"
             if cal_path.exists():
-                cal = json.load(open(cal_path))
-                overconfidence_correction = cal.get("correction", 0.80)
+                cal = json.loads(cal_path.read_text())
+                base_correction = cal.get("correction", 0.85)
         except Exception:
             pass
 
         try:
             from tradingagents.backtesting.scorecard import count_scored_decisions
-            scored_count = count_scored_decisions(ticker)
+            scored_count = count_scored_decisions(ticker, results_dir=str(self.results_dir))
         except Exception:
             scored_count = 0
 
-        if scored_count < 60:
-            llm_confidence *= overconfidence_correction
+        overconfidence_correction = base_correction + (1.0 - base_correction) * min(1.0, scored_count / _COLD_START_THRESHOLD)
+        llm_confidence *= overconfidence_correction
+        if overconfidence_correction < 1.0:
             logger.debug(
-                f"Cold-start confidence correction: {overconfidence_correction:.2f} "
-                f"({scored_count}/60 decisions)"
+                f"Cold-start confidence correction: {overconfidence_correction:.3f} "
+                f"(base={base_correction:.2f}, {scored_count}/{_COLD_START_THRESHOLD} decisions)"
             )
 
         # Compute R using current_price as entry proxy
@@ -338,6 +353,7 @@ class ConfidenceScorer:
             regime=regime,
             above_sma20=above_sma20,
             reasoning=reasoning,
+            signal=signal,
         )
 
         # ── Position sizing: Kelly when eligible, fixed fallback otherwise ──
@@ -387,4 +403,5 @@ class ConfidenceScorer:
             "regime_used": regime,
             "overconfidence_correction": round(overconfidence_correction, 4),
             "kelly_eligible": kelly_eligible,
+            "scored_count_used": scored_count,
         }

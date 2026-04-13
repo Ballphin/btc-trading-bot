@@ -345,6 +345,9 @@ export default function Analyze() {
                 signal={state.decision}
                 confidence={state.confidence}
                 rRatio={state.rRatio}
+                stopLoss={state.stopLoss}
+                takeProfit={state.takeProfit}
+                maxHoldDays={state.maxHoldDays}
               />
             </motion.div>
           )}

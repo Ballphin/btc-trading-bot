@@ -1,10 +1,49 @@
-"""Tests for walk_forward.py — compute_deflated_sharpe, boundary cases."""
+"""Tests for walk_forward.py — compute_deflated_sharpe, boundary cases, date parsing."""
 
 import math
 import pytest
+from datetime import datetime
 from unittest.mock import patch
 
-from tradingagents.backtesting.walk_forward import compute_deflated_sharpe
+from tradingagents.backtesting.walk_forward import compute_deflated_sharpe, _parse_any_date
+
+
+# ── Date parsing ──────────────────────────────────────────────────────
+
+class TestParseAnyDate:
+    def test_daily_format(self):
+        dt = _parse_any_date("2026-04-08")
+        assert dt == datetime(2026, 4, 8)
+
+    def test_scheduler_format(self):
+        dt = _parse_any_date("2026-04-08T16")
+        assert dt == datetime(2026, 4, 8, 16, 0)
+
+    def test_scheduler_format_with_minutes(self):
+        dt = _parse_any_date("2026-04-08T16:00")
+        assert dt == datetime(2026, 4, 8, 16, 0)
+
+    def test_manual_format_am(self):
+        dt = _parse_any_date("2026-04-13-12-45-AM")
+        assert dt.year == 2026
+        assert dt.month == 4
+        assert dt.day == 13
+
+    def test_manual_format_pm(self):
+        dt = _parse_any_date("2026-04-13-02-30-PM")
+        assert dt.year == 2026
+        assert dt.month == 4
+        assert dt.day == 13
+        assert dt.hour == 14
+        assert dt.minute == 30
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError):
+            _parse_any_date("not-a-date")
+
+    def test_whitespace_stripped(self):
+        dt = _parse_any_date("  2026-04-08  ")
+        assert dt == datetime(2026, 4, 8)
 
 
 class TestComputeDeflatedSharpe:

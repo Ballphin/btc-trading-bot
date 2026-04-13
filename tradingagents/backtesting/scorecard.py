@@ -566,12 +566,19 @@ def run_calibration_study(
     mean_outcome = sum(outcomes) / len(outcomes)
 
     if mean_confidence > 0:
-        correction = mean_outcome / mean_confidence
+        data_correction = mean_outcome / mean_confidence
     else:
-        correction = 0.80  # fallback
+        data_correction = 0.85  # fallback
 
-    # Clamp to safe range
-    correction = max(0.60, min(0.95, correction))
+    # Bayesian shrinkage: blend data with prior at low sample sizes
+    # w ramps from 0.3 at n=10 to 1.0 at n≥30
+    prior_correction = 0.85
+    n = len(scored)
+    w = min(1.0, max(0.3, n / 30.0))
+    correction = (1.0 - w) * prior_correction + w * data_correction
+
+    # Clamp to safe range (allow up to 1.0 so perfect track record removes penalty)
+    correction = max(0.60, min(1.0, correction))
 
     # Assess regime coverage
     regimes = set(d.get("regime", "unknown") for d in scored)

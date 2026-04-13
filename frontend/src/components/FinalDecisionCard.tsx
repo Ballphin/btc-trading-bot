@@ -36,17 +36,21 @@ interface Props {
   signal?: string;
   confidence?: number;
   rRatio?: number | null;
+  stopLoss?: number;
+  takeProfit?: number;
+  maxHoldDays?: number;
 }
 
-export default function FinalDecisionCard({ text, signal, confidence, rRatio: backendRRatio }: Props) {
+export default function FinalDecisionCard({ text, signal, confidence, rRatio: backendRRatio, stopLoss, takeProfit, maxHoldDays }: Props) {
   const parsed = tryParseJson(text);
 
   if (parsed) {
     const sig = (parsed.signal || signal || 'UNKNOWN').toUpperCase();
-    const conf = parsed.confidence ?? confidence;
-    const sl = parsed.stop_loss_price;
-    const tp = parsed.take_profit_price;
-    // Prefer backend r_ratio, else null (we can't correctly compute without entry_price)
+    // Always prefer backend-scored/capped values over raw LLM JSON values
+    const conf = confidence ?? parsed.confidence;
+    const sl = stopLoss ?? parsed.stop_loss_price;
+    const tp = takeProfit ?? parsed.take_profit_price;
+    const holdDays = maxHoldDays ?? parsed.max_hold_days;
     const rRatio = backendRRatio ?? null;
 
     const signalColor =
@@ -87,11 +91,11 @@ export default function FinalDecisionCard({ text, signal, confidence, rRatio: ba
         </div>
 
         {/* Price Levels Grid */}
-        {(sl || tp || parsed.max_hold_days) && (
+        {(sl || tp || holdDays) && (
           <div className={`grid gap-3 ${
-            (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (parsed.max_hold_days ? 1 : 0) === 1
+            (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (holdDays ? 1 : 0) === 1
               ? 'grid-cols-1 max-w-xs'
-              : (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (parsed.max_hold_days ? 1 : 0) === 2
+              : (sl && sl > 0 ? 1 : 0) + (tp && tp > 0 ? 1 : 0) + (holdDays ? 1 : 0) === 2
                 ? 'grid-cols-2 max-w-md'
                 : 'grid-cols-3'
           }`}>
@@ -111,10 +115,10 @@ export default function FinalDecisionCard({ text, signal, confidence, rRatio: ba
                 <p className="text-lg font-bold text-emerald-400">${tp.toLocaleString()}</p>
               </div>
             )}
-            {parsed.max_hold_days && (
+            {holdDays && (
               <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700/50">
                 <p className="text-xs text-slate-500 mb-1">Max Hold</p>
-                <p className="text-lg font-bold text-white">{parsed.max_hold_days}d</p>
+                <p className="text-lg font-bold text-white">{holdDays}d</p>
               </div>
             )}
           </div>

@@ -173,6 +173,9 @@ export default function AnalysisDetail() {
               signal={signal}
               confidence={analysis.confidence}
               rRatio={analysis.r_ratio}
+              stopLoss={analysis.stop_loss_price}
+              takeProfit={analysis.take_profit_price}
+              maxHoldDays={analysis.max_hold_days}
             />
           </div>
 

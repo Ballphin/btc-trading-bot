@@ -13,6 +13,7 @@ and multiple testing per Bailey & López de Prado (2014).
 import json
 import math
 import logging
+import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
@@ -24,6 +25,34 @@ logger = logging.getLogger(__name__)
 
 # Primary scoring horizon (T+7d) — per Ardia et al. (2019)
 _PRIMARY_HORIZON = 7
+
+# Date formats produced by the system
+_DATE_FORMATS = [
+    "%Y-%m-%d",            # daily: 2026-04-08
+    "%Y-%m-%dT%H",         # 4H scheduler: 2026-04-08T16
+    "%Y-%m-%dT%H:%M",      # intraday: 2026-04-08T16:00
+    "%Y-%m-%d-%I-%M-%p",   # manual runs: 2026-04-13-12-45-AM
+]
+
+
+def _parse_any_date(date_str: str) -> datetime:
+    """Parse a date string in any of the system's known formats.
+    
+    Returns datetime (date portion only for scoring purposes).
+    Raises ValueError if no format matches.
+    """
+    clean = date_str.strip()
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(clean, fmt)
+        except ValueError:
+            continue
+    # Last resort: try just the date portion
+    # Handles edge cases like "2026-04-13-12-45-AM" where split("T") doesn't help
+    date_part = re.match(r'(\d{4}-\d{2}-\d{2})', clean)
+    if date_part:
+        return datetime.strptime(date_part.group(1), "%Y-%m-%d")
+    raise ValueError(f"Cannot parse date: {date_str!r}")
 
 
 def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
@@ -180,7 +209,8 @@ class WalkForwardValidator:
                 # FIX: log files use the date as the top-level key
                 # e.g. { "2026-04-08": { "final_trade_decision": "...", ... } }
                 # Find the date-keyed sub-object (key may match date_str or date portion)
-                date_key = date_str.split("T")[0]  # strip hour for lookup
+                date_match = re.match(r'(\d{4}-\d{2}-\d{2})', date_str)
+                date_key = date_match.group(1) if date_match else date_str.split("T")[0]
                 date_data = data.get(date_str) or data.get(date_key) or data
 
                 # Parse signal from final_trade_decision
@@ -284,7 +314,7 @@ class WalkForwardValidator:
 
         for d in decisions:
             date_str = d["date"].split(" ")[0]
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            dt = _parse_any_date(date_str)
             price = d["price"]
             signal = d.get("signal", "HOLD")
 
