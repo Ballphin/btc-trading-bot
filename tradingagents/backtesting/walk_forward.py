@@ -21,38 +21,18 @@ from collections import defaultdict
 
 import yfinance as yf
 
+from tradingagents.backtesting.date_utils import parse_any_date as _parse_any_date
+from tradingagents.backtesting.scorecard import (
+    _get_ohlc_range,
+    _scan_sl_tp_hits,
+    _estimate_execution_costs,
+    CALIBRATION_HORIZON_DAYS,
+)
+
 logger = logging.getLogger(__name__)
 
 # Primary scoring horizon (T+7d) — per Ardia et al. (2019)
 _PRIMARY_HORIZON = 7
-
-# Date formats produced by the system
-_DATE_FORMATS = [
-    "%Y-%m-%d",            # daily: 2026-04-08
-    "%Y-%m-%dT%H",         # 4H scheduler: 2026-04-08T16
-    "%Y-%m-%dT%H:%M",      # intraday: 2026-04-08T16:00
-    "%Y-%m-%d-%I-%M-%p",   # manual runs: 2026-04-13-12-45-AM
-]
-
-
-def _parse_any_date(date_str: str) -> datetime:
-    """Parse a date string in any of the system's known formats.
-    
-    Returns datetime (date portion only for scoring purposes).
-    Raises ValueError if no format matches.
-    """
-    clean = date_str.strip()
-    for fmt in _DATE_FORMATS:
-        try:
-            return datetime.strptime(clean, fmt)
-        except ValueError:
-            continue
-    # Last resort: try just the date portion
-    # Handles edge cases like "2026-04-13-12-45-AM" where split("T") doesn't help
-    date_part = re.match(r'(\d{4}-\d{2}-\d{2})', clean)
-    if date_part:
-        return datetime.strptime(date_part.group(1), "%Y-%m-%d")
-    raise ValueError(f"Cannot parse date: {date_str!r}")
 
 
 def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
@@ -243,6 +223,15 @@ class WalkForwardValidator:
                 if not price or price <= 0:
                     continue
 
+                # Extract max_hold_days from decision text
+                max_hold = date_data.get("max_hold_days")
+                if max_hold is None:
+                    hold_match = re.search(r'"max_hold_days"\s*:\s*(\d+)', decision_text)
+                    if hold_match:
+                        max_hold = min(int(hold_match.group(1)), 7)  # cap crypto
+
+                position_size = date_data.get("position_size_pct")
+
                 decisions.append({
                     "date": date_str,
                     "signal": signal,
@@ -250,6 +239,8 @@ class WalkForwardValidator:
                     "price": price,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
+                    "max_hold_days": max_hold,
+                    "position_size_pct": position_size,
                     "source": "analysis_log",
                 })
             except Exception as e:
@@ -295,13 +286,18 @@ class WalkForwardValidator:
         self,
         horizon_days: int = _PRIMARY_HORIZON,
     ) -> Dict[str, Any]:
-        """Run walk-forward validation on all available decisions.
+        """Run walk-forward validation with adaptive per-trade scoring.
+
+        Uses the same three-tier scoring as score_pending_decisions:
+        1. SL/TP hit scan  2. Hold-period timeout  3. 7d fallback
+
+        Includes execution cost deduction and position-sized equity curve.
 
         Args:
-            horizon_days: Scoring horizon in days (default 7)
+            horizon_days: Default scoring horizon when max_hold_days is missing
 
         Returns:
-            Comprehensive validation report
+            Comprehensive validation report with gross/net metrics
         """
         decisions = self._load_decisions_from_logs()
 
@@ -310,7 +306,10 @@ class WalkForwardValidator:
 
         # Score each decision
         scored = []
-        returns = []
+        gross_returns = []
+        net_returns = []
+        position_sizes = []
+        exit_type_counts = defaultdict(int)
 
         for d in decisions:
             date_str = d["date"].split(" ")[0]
@@ -318,93 +317,167 @@ class WalkForwardValidator:
             price = d["price"]
             signal = d.get("signal", "HOLD")
 
-            # Check pre-scored data first
-            key_7d = f"was_correct_{horizon_days}d"
-            if key_7d in d:
+            if signal == "HOLD":
+                continue  # not scorable
+
+            # Adaptive hold period per decision
+            hold_days = d.get("max_hold_days")
+            if hold_days is None or hold_days <= 0:
+                hold_days = horizon_days  # 7d fallback
+
+            # Use pre-scored adaptive data if available
+            if "was_correct_primary" in d:
+                scored.append(d)
+                gr = d.get("actual_return_primary", d.get(f"actual_return_{horizon_days}d", 0))
+                nr = d.get("net_return_primary", gr)
+                gross_returns.append(gr)
+                net_returns.append(nr)
+                ps = d.get("position_size_pct", 0.05) or 0.05
+                position_sizes.append(ps)
+                exit_type_counts[d.get("exit_type", "legacy_7d")] += 1
+                continue
+
+            # Legacy pre-scored (T+Nd close) — use as-is
+            key_nd = f"was_correct_{horizon_days}d"
+            if key_nd in d:
                 scored.append(d)
                 ret = d.get(f"actual_return_{horizon_days}d", 0)
-                returns.append(ret)
+                cost = _estimate_execution_costs(signal, hold_days, self.ticker)
+                gross_returns.append(ret)
+                net_returns.append(ret - cost)
+                ps = d.get("position_size_pct", 0.05) or 0.05
+                position_sizes.append(ps)
+                exit_type_counts["legacy_7d"] += 1
                 continue
 
-            # Need to score: fetch price at T+horizon
-            target_date = (dt + timedelta(days=horizon_days)).strftime("%Y-%m-%d")
-            actual_price = _get_price_on_date(self.ticker, target_date)
-            if actual_price is None:
+            # Fresh scoring: three-tier adaptive
+            ohlc_start = dt.strftime("%Y-%m-%d")
+            ohlc_end = (dt + timedelta(days=hold_days + 3)).strftime("%Y-%m-%d")
+            ohlc_df = _get_ohlc_range(self.ticker, ohlc_start, ohlc_end)
+
+            stop_loss = d.get("stop_loss")
+            take_profit = d.get("take_profit")
+
+            exit_result = _scan_sl_tp_hits(
+                ohlc_df, price, signal, stop_loss, take_profit, hold_days, dt
+            )
+
+            if not exit_result:
                 continue
 
-            # Compute directional return
-            if signal in ("BUY", "OVERWEIGHT", "COVER"):
-                was_correct = actual_price > price
-                actual_return = (actual_price - price) / price
-            elif signal in ("SHORT", "SELL", "UNDERWEIGHT"):
-                was_correct = actual_price < price
-                actual_return = (price - actual_price) / price
-            else:
-                continue  # HOLD — not scorable
+            # Execution cost deduction
+            actual_hold = exit_result.get("exit_day", hold_days)
+            exec_cost = _estimate_execution_costs(signal, actual_hold, self.ticker)
+            gross_ret = exit_result["actual_return"]
+            net_ret = gross_ret - exec_cost
 
-            d[key_7d] = was_correct
-            d[f"actual_return_{horizon_days}d"] = round(actual_return, 6)
+            # Store results back into decision dict
+            d["was_correct_primary"] = exit_result["was_correct"]
+            d["actual_return_primary"] = round(gross_ret, 6)
+            d["net_return_primary"] = round(net_ret, 6)
+            d["exit_type"] = exit_result["exit_type"]
+            d["exit_price"] = exit_result["exit_price"]
+            d["exit_day"] = exit_result["exit_day"]
+            d["hold_days_planned"] = hold_days
+            d["execution_cost"] = round(exec_cost, 6)
 
             scored.append(d)
-            returns.append(actual_return)
+            gross_returns.append(gross_ret)
+            net_returns.append(net_ret)
+            ps = d.get("position_size_pct", 0.05) or 0.05
+            position_sizes.append(ps)
+            exit_type_counts[exit_result["exit_type"]] += 1
 
         if not scored:
             return {"error": "No scorable decisions", "decisions": len(decisions)}
 
         # Compute metrics
         n = len(scored)
-        correct = sum(1 for d in scored if d.get(f"was_correct_{horizon_days}d"))
+
+        def _was_correct(d):
+            if "was_correct_primary" in d:
+                return bool(d["was_correct_primary"])
+            return bool(d.get(f"was_correct_{horizon_days}d", False))
+
+        correct = sum(1 for d in scored if _was_correct(d))
         win_rate = correct / n
 
-        # Returns-based metrics
-        if returns:
-            mean_return = sum(returns) / len(returns)
-            std_return = math.sqrt(sum((r - mean_return) ** 2 for r in returns) / max(len(returns) - 1, 1))
-            sharpe = mean_return / std_return if std_return > 0 else 0
+        # Returns-based metrics (use net returns for Sharpe/DSR)
+        if net_returns:
+            mean_gross = sum(gross_returns) / len(gross_returns)
+            mean_net = sum(net_returns) / len(net_returns)
+            std_net = math.sqrt(
+                sum((r - mean_net) ** 2 for r in net_returns) / max(len(net_returns) - 1, 1)
+            )
+            std_gross = math.sqrt(
+                sum((r - mean_gross) ** 2 for r in gross_returns) / max(len(gross_returns) - 1, 1)
+            )
+            sharpe_net = mean_net / std_net if std_net > 0 else 0
+            sharpe_gross = mean_gross / std_gross if std_gross > 0 else 0
 
-            # Compute skewness and kurtosis for DSR
-            if len(returns) >= 4 and std_return > 0:
-                skew = sum((r - mean_return) ** 3 for r in returns) / (n * std_return ** 3)
-                kurtosis = sum((r - mean_return) ** 4 for r in returns) / (n * std_return ** 4)
+            # Sharpe standard error
+            sharpe_se = math.sqrt((1 + 0.5 * sharpe_net ** 2) / n) if n > 1 else float("inf")
+
+            # Skewness and kurtosis for DSR
+            if len(net_returns) >= 4 and std_net > 0:
+                skew = sum((r - mean_net) ** 3 for r in net_returns) / (n * std_net ** 3)
+                kurtosis = sum((r - mean_net) ** 4 for r in net_returns) / (n * std_net ** 4)
             else:
                 skew = 0
                 kurtosis = 3
 
-            # Deflated Sharpe Ratio (n_strategies=1 for single pipeline)
-            dsr = compute_deflated_sharpe(sharpe, n, n_strategies=1, skew=skew, kurtosis=kurtosis)
+            # DSR on net returns
+            dsr = compute_deflated_sharpe(sharpe_net, n, n_strategies=1, skew=skew, kurtosis=kurtosis)
 
-            # Equity curve (cumulative)
-            equity = [1.0]
-            for r in returns:
-                equity.append(equity[-1] * (1 + r))
+            # Position-sized equity curve (portfolio-weighted)
+            equity_gross = [1.0]
+            equity_position = [1.0]
+            for i, gr in enumerate(gross_returns):
+                equity_gross.append(equity_gross[-1] * (1 + gr))
+                ps = position_sizes[i] if i < len(position_sizes) else 0.05
+                equity_position.append(equity_position[-1] * (1 + net_returns[i] * ps))
 
-            # Max drawdown
-            peak = equity[0]
+            # Max drawdown (on position-sized equity)
+            peak = equity_position[0]
             max_dd = 0
-            for val in equity:
+            for val in equity_position:
                 if val > peak:
                     peak = val
                 dd = (peak - val) / peak
                 if dd > max_dd:
                     max_dd = dd
         else:
-            mean_return = 0
-            std_return = 0
-            sharpe = 0
+            mean_gross = mean_net = 0
+            std_net = std_gross = 0
+            sharpe_net = sharpe_gross = 0
+            sharpe_se = float("inf")
             dsr = 0
-            equity = []
+            equity_gross = []
+            equity_position = []
             max_dd = 0
             skew = 0
             kurtosis = 3
 
+        # EV per trade (on $10K notional)
+        notional = 10000.0
+        wins_ret = [r for r, d in zip(net_returns, scored) if _was_correct(d)]
+        losses_ret = [abs(r) for r, d in zip(net_returns, scored) if not _was_correct(d)]
+        avg_win = sum(wins_ret) / len(wins_ret) if wins_ret else 0
+        avg_loss = sum(losses_ret) / len(losses_ret) if losses_ret else 0
+        ev_per_trade = round(
+            (win_rate * avg_win - (1 - win_rate) * avg_loss) * notional, 2
+        )
+
         # Regime breakdown
         regime_stats = defaultdict(lambda: {"correct": 0, "total": 0, "returns": []})
-        for d in scored:
+        for i, d in enumerate(scored):
             regime = d.get("regime", "unknown")
             regime_stats[regime]["total"] += 1
-            if d.get(f"was_correct_{horizon_days}d"):
+            if _was_correct(d):
                 regime_stats[regime]["correct"] += 1
-            regime_stats[regime]["returns"].append(d.get(f"actual_return_{horizon_days}d", 0))
+            regime_stats[regime]["returns"].append(
+                net_returns[i] if i < len(net_returns) else 0
+            )
 
         regime_analysis = {}
         for regime, stats in regime_stats.items():
@@ -419,7 +492,7 @@ class WalkForwardValidator:
         for d in scored:
             sig = d.get("signal", "")
             signal_stats[sig]["total"] += 1
-            if d.get(f"was_correct_{horizon_days}d"):
+            if _was_correct(d):
                 signal_stats[sig]["correct"] += 1
 
         signal_analysis = {
@@ -430,15 +503,19 @@ class WalkForwardValidator:
             for sig, s in signal_stats.items()
         }
 
-        # DSR interpretation
-        if dsr > 0.95:
-            dsr_interpretation = "GENUINE EDGE — statistically significant at 95% confidence"
+        # DSR interpretation with n<30 guard
+        if n < 30:
+            dsr_interpretation = (
+                f"INSUFFICIENT DATA \u2014 need \u226530 scored decisions for statistical validity (have {n})"
+            )
+        elif dsr > 0.95:
+            dsr_interpretation = "GENUINE EDGE \u2014 statistically significant at 95% confidence"
         elif dsr > 0.80:
-            dsr_interpretation = "PROMISING — approaching significance, need more data"
+            dsr_interpretation = "PROMISING \u2014 approaching significance, need more data"
         elif dsr > 0.50:
-            dsr_interpretation = "INCONCLUSIVE — cannot distinguish from noise"
+            dsr_interpretation = "INCONCLUSIVE \u2014 cannot distinguish from noise"
         else:
-            dsr_interpretation = "LIKELY NOISE — returns indistinguishable from random"
+            dsr_interpretation = "LIKELY NOISE \u2014 returns indistinguishable from random"
 
         return {
             "ticker": self.ticker,
@@ -447,18 +524,26 @@ class WalkForwardValidator:
             "scored_decisions": n,
             "overall_metrics": {
                 "win_rate": round(win_rate, 4),
-                "mean_return": round(mean_return, 6),
-                "std_return": round(std_return, 6),
-                "sharpe_ratio": round(sharpe, 4),
+                "mean_return_gross": round(mean_gross, 6),
+                "mean_return_net": round(mean_net, 6),
+                "std_return": round(std_net, 6),
+                "sharpe_ratio_gross": round(sharpe_gross, 4),
+                "sharpe_ratio_net": round(sharpe_net, 4),
+                "sharpe_se": round(sharpe_se, 4) if sharpe_se != float("inf") else None,
                 "deflated_sharpe_ratio": round(dsr, 4),
                 "dsr_interpretation": dsr_interpretation,
                 "max_drawdown": round(max_dd, 4),
                 "skewness": round(skew, 4),
                 "kurtosis": round(kurtosis, 4),
                 "n_strategies_tested": 1,
+                "ev_per_trade_10k": ev_per_trade,
+                "avg_win_return": round(avg_win, 6),
+                "avg_loss_return": round(avg_loss, 6),
             },
+            "exit_type_breakdown": dict(exit_type_counts),
             "regime_analysis": regime_analysis,
             "signal_analysis": signal_analysis,
-            "equity_curve": [round(e, 6) for e in equity[:100]],  # cap at 100 points
+            "equity_curve_gross": [round(e, 6) for e in equity_gross[:100]],
+            "equity_curve_position": [round(e, 6) for e in equity_position[:100]],
             "validated_at": datetime.now().isoformat(),
         }

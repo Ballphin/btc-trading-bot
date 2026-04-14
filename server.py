@@ -559,42 +559,62 @@ _scoring_lock = threading.Lock()
 
 
 def _trigger_background_scoring(ticker: str):
-    """Score pending shadow decisions and auto-calibrate in a background thread."""
-    def _score_and_calibrate():
+    """Score pending shadow decisions for ALL tickers (not just the analyzed one).
+
+    Walks all eval_results/shadow/*/ directories and scores each sequentially.
+    Auto-calibrates when enough scored decisions accumulate.
+    """
+    def _score_all_tickers():
         with _scoring_lock:
-            try:
-                from tradingagents.backtesting.scorecard import (
-                    score_pending_decisions, run_calibration_study, count_scored_decisions
-                )
-                result = score_pending_decisions(ticker, str(EVAL_RESULTS_DIR))
-                newly_scored = result.get("scored", 0)
-                total_scored = result.get("total_scored", 0)
-                if newly_scored > 0:
-                    print(f"[AutoScore] {ticker}: scored {newly_scored} new decisions (total: {total_scored})")
+            from tradingagents.backtesting.scorecard import (
+                score_pending_decisions, run_calibration_study, count_scored_decisions
+            )
+            shadow_root = EVAL_RESULTS_DIR / "shadow"
+            if not shadow_root.exists():
+                return
 
-                # Auto-calibrate when enough scored decisions exist
-                if total_scored >= 10:
-                    cal_path = EVAL_RESULTS_DIR / "shadow" / ticker / "calibration.json"
-                    should_calibrate = False
-                    if not cal_path.exists():
-                        should_calibrate = True
-                    else:
-                        try:
-                            cal = json.loads(cal_path.read_text())
-                            last_n = cal.get("n_decisions", 0)
-                            if total_scored >= last_n + 5:
-                                should_calibrate = True
-                        except Exception:
+            # Collect all tickers with a decisions.jsonl file
+            tickers_to_score = []
+            for ticker_dir in shadow_root.iterdir():
+                if ticker_dir.is_dir() and (ticker_dir / "decisions.jsonl").exists():
+                    tickers_to_score.append(ticker_dir.name)
+
+            # Ensure the triggering ticker is first (fastest feedback)
+            if ticker in tickers_to_score:
+                tickers_to_score.remove(ticker)
+                tickers_to_score.insert(0, ticker)
+
+            for t in tickers_to_score:
+                try:
+                    result = score_pending_decisions(t, str(EVAL_RESULTS_DIR))
+                    newly_scored = result.get("scored", 0)
+                    total_scored = result.get("total_scored", 0)
+                    if newly_scored > 0:
+                        print(f"[AutoScore] {t}: scored {newly_scored} new decisions (total: {total_scored})")
+
+                    # Auto-calibrate when enough scored decisions exist
+                    if total_scored >= 10:
+                        cal_path = EVAL_RESULTS_DIR / "shadow" / t / "calibration.json"
+                        should_calibrate = False
+                        if not cal_path.exists():
                             should_calibrate = True
+                        else:
+                            try:
+                                cal = json.loads(cal_path.read_text())
+                                last_n = cal.get("n_decisions_total", cal.get("n_decisions", 0))
+                                if total_scored >= last_n + 5:
+                                    should_calibrate = True
+                            except Exception:
+                                should_calibrate = True
 
-                    if should_calibrate:
-                        cal_result = run_calibration_study(ticker, results_dir=str(EVAL_RESULTS_DIR))
-                        if "error" not in cal_result:
-                            print(f"[AutoScore] {ticker}: calibration updated → correction={cal_result.get('correction')}")
-            except Exception as e:
-                print(f"[AutoScore] {ticker}: scoring failed (non-fatal): {e}")
+                        if should_calibrate:
+                            cal_result = run_calibration_study(t, results_dir=str(EVAL_RESULTS_DIR))
+                            if "error" not in cal_result:
+                                print(f"[AutoScore] {t}: calibration updated -> correction={cal_result.get('correction')}")
+                except Exception as e:
+                    print(f"[AutoScore] {t}: scoring failed (non-fatal): {e}")
 
-    thread = threading.Thread(target=_score_and_calibrate, daemon=True)
+    thread = threading.Thread(target=_score_all_tickers, daemon=True)
     thread.start()
 
 
@@ -822,6 +842,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                     "confidence": result.get("confidence"),
                     "stop_loss": result.get("stop_loss_price"),
                     "take_profit": result.get("take_profit_price"),
+                    "max_hold_days": result.get("max_hold_days"),
+                    "position_size_pct": result.get("position_size_pct"),
                     "reasoning": result.get("reasoning"),
                     "regime": _ens_shadow_regime,
                     "source": "ensemble_analysis",
@@ -1034,6 +1056,25 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             except Exception:
                 pass
 
+        # SL/TP sanity warnings: SL inside daily ATR → likely to be hunted
+        _sl_atr_warning = False
+        _tp_atr_warning = False
+        try:
+            _entry_px = regime_ctx.get("current_price") if regime_ctx else None
+            _daily_vol = regime_ctx.get("daily_vol", 0.03) if regime_ctx else 0.03
+            if _entry_px and _entry_px > 0 and stop_loss_price:
+                sl_dist_pct = abs(stop_loss_price - _entry_px) / _entry_px
+                if sl_dist_pct < _daily_vol:
+                    _sl_atr_warning = True
+            if _entry_px and _entry_px > 0 and take_profit_price and max_hold_days:
+                tp_dist_pct = abs(take_profit_price - _entry_px) / _entry_px
+                # TP unrealistic if distance > hold_days * daily_vol * 1.5
+                max_reasonable_tp = max_hold_days * _daily_vol * 1.5
+                if tp_dist_pct > max_reasonable_tp:
+                    _tp_atr_warning = True
+        except Exception:
+            pass
+
         result = {
             "ticker": ticker,
             "date": run_timestamp if run_timestamp else trade_date,
@@ -1048,6 +1089,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             "gated": scored.get("gated", False),
             "r_ratio": _sr_rr,
             "r_ratio_warning": _sr_rr_warn,
+            "sl_atr_warning": _sl_atr_warning,
+            "tp_atr_warning": _tp_atr_warning,
             "hold_period_scalar": scored.get("hold_period_scalar"),
             "hedge_penalty_applied": scored.get("hedge_penalty_applied"),
             "market_report": final_state.get("market_report", ""),
@@ -1114,6 +1157,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 "confidence": confidence,
                 "stop_loss": stop_loss_price,
                 "take_profit": take_profit_price,
+                "max_hold_days": max_hold_days,
+                "position_size_pct": scored.get("position_size_pct") if scored else None,
                 "reasoning": reasoning,
                 "regime": _shadow_regime,
                 "source": "live_analysis",

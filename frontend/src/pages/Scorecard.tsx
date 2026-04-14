@@ -26,6 +26,14 @@ interface ScoredDecision {
   regime: string;
   was_correct_7d?: boolean;
   actual_return_7d?: number;
+  was_correct_primary?: boolean;
+  actual_return_primary?: number;
+  net_return_primary?: number;
+  exit_type?: string;
+  exit_price?: number;
+  exit_day?: number;
+  hold_days_planned?: number;
+  execution_cost?: number;
   brier_score?: number;
 }
 
@@ -38,6 +46,10 @@ interface Scorecard {
   win_by_signal: Record<string, WinRateEntry>;
   win_by_regime: Record<string, WinRateEntry>;
   win_by_combo: Record<string, WinRateEntry>;
+  exit_type_breakdown?: Record<string, number>;
+  ev_per_trade_10k?: number;
+  avg_win_return?: number;
+  avg_loss_return?: number;
   brier_decomposition: {
     brier_score: number;
     reliability: number;
@@ -61,24 +73,37 @@ interface WalkForwardResult {
   scored_decisions: number;
   overall_metrics: {
     win_rate: number;
-    mean_return: number;
-    sharpe_ratio: number;
+    mean_return_gross?: number;
+    mean_return_net?: number;
+    mean_return?: number;
+    sharpe_ratio_gross?: number;
+    sharpe_ratio_net?: number;
+    sharpe_ratio?: number;
+    sharpe_se?: number | null;
     deflated_sharpe_ratio: number;
     dsr_interpretation: string;
     max_drawdown: number;
     skewness: number;
     kurtosis: number;
+    ev_per_trade_10k?: number;
+    avg_win_return?: number;
+    avg_loss_return?: number;
   };
+  exit_type_breakdown?: Record<string, number>;
   regime_analysis: Record<string, { win_rate: number; sample_size: number; mean_return: number }>;
   signal_analysis: Record<string, { win_rate: number; sample_size: number }>;
-  equity_curve: number[];
+  equity_curve?: number[];
+  equity_curve_gross?: number[];
+  equity_curve_position?: number[];
 }
 
 interface CalibrationResult {
   correction: number;
   mean_confidence: number;
   mean_outcome: number;
-  n_decisions: number;
+  n_decisions_total?: number;
+  n_decisions_deduped?: number;
+  n_decisions?: number;
   regimes_covered: string[];
   coverage_quality: string;
   note: string;
@@ -188,6 +213,10 @@ export default function ScorecardPage() {
         win_by_signal: data.win_by_signal ?? {},
         win_by_regime: data.win_by_regime ?? {},
         win_by_combo: data.win_by_combo ?? {},
+        exit_type_breakdown: data.exit_type_breakdown ?? {},
+        ev_per_trade_10k: data.ev_per_trade_10k,
+        avg_win_return: data.avg_win_return,
+        avg_loss_return: data.avg_loss_return,
         brier_decomposition: data.brier_decomposition ?? null,
         recent_decisions: data.recent_decisions ?? [],
         ticker: data.ticker ?? ticker,
@@ -419,7 +448,7 @@ export default function ScorecardPage() {
                   icon={BarChart3}
                 />
                 <StatCard
-                  label="Win Rate (T+7d)"
+                  label="Win Rate (Adaptive)"
                   value={`${(scorecard.overall_win_rate * 100).toFixed(1)}%`}
                   sub={scorecard.overall_win_rate >= 0.5 ? 'Above breakeven' : 'Below breakeven'}
                   icon={scorecard.overall_win_rate >= 0.5 ? TrendingUp : TrendingDown}
@@ -435,21 +464,66 @@ export default function ScorecardPage() {
                 <StatCard
                   label="Pending"
                   value={scorecard.total_decisions - scorecard.scored_decisions}
-                  sub="Awaiting T+7d"
+                  sub="Awaiting hold expiry"
                   icon={RefreshCw}
                 />
               </div>
+
+              {/* EV + Exit Type Row */}
+              {scorecard.scored_decisions > 0 && (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <StatCard
+                    label="EV / Trade ($10K)"
+                    value={scorecard.ev_per_trade_10k != null ? `$${scorecard.ev_per_trade_10k.toFixed(0)}` : '—'}
+                    sub={scorecard.ev_per_trade_10k != null ? (scorecard.ev_per_trade_10k > 0 ? 'Positive edge' : 'Negative edge') : ''}
+                    icon={TrendingUp}
+                    color={scorecard.ev_per_trade_10k != null && scorecard.ev_per_trade_10k > 0 ? 'text-green-400' : 'text-red-400'}
+                  />
+                  <StatCard
+                    label="Avg Win"
+                    value={scorecard.avg_win_return != null ? `${(scorecard.avg_win_return * 100).toFixed(2)}%` : '—'}
+                    icon={CheckCircle2}
+                    color="text-green-400"
+                  />
+                  <StatCard
+                    label="Avg Loss"
+                    value={scorecard.avg_loss_return != null ? `-${(scorecard.avg_loss_return * 100).toFixed(2)}%` : '—'}
+                    icon={XCircle}
+                    color="text-red-400"
+                  />
+                  {scorecard.exit_type_breakdown && Object.keys(scorecard.exit_type_breakdown).length > 0 && (
+                    <div className="glass-static p-4 flex flex-col gap-1">
+                      <div className="flex items-center gap-2 text-xs text-slate-400">
+                        <Target className="w-3.5 h-3.5" />
+                        Exit Types
+                      </div>
+                      <div className="flex flex-col gap-0.5 text-xs mt-1">
+                        {Object.entries(scorecard.exit_type_breakdown).map(([type, count]) => (
+                          <div key={type} className="flex justify-between">
+                            <span className="text-slate-400">
+                              {type === 'take_profit_hit' ? 'TP Hit' : type === 'stop_loss_hit' ? 'SL Hit' : type === 'held_to_expiry' ? 'Timeout' : type}
+                            </span>
+                            <span className={type === 'take_profit_hit' ? 'text-green-400' : type === 'stop_loss_hit' ? 'text-red-400' : 'text-slate-300'}>
+                              {count as number}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Pending scoring notice */}
               {scorecard.scored_decisions === 0 && scorecard.total_decisions > 0 && (
                 <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-3">
                   <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-sm font-semibold text-amber-300">Waiting for T+7 Day Scoring Window</p>
+                    <p className="text-sm font-semibold text-amber-300">Waiting for Scoring Window</p>
                     <p className="text-xs text-slate-400 mt-1">
                       You have <strong className="text-white">{scorecard.total_decisions}</strong> recorded decisions, but none have been scored yet.
-                      Brier scoring requires <strong className="text-white">7 days</strong> to pass after the decision date so actual prices can be verified.
-                      Click <strong className="text-white">Score Pending Decisions</strong> after 7+ days to see results.
+                      Adaptive scoring waits for each trade's hold period to expire (per-trade max_hold_days), then checks SL/TP hits first.
+                      Click <strong className="text-white">Score Pending Decisions</strong> after the hold period to see results.
                     </p>
                   </div>
                 </div>
@@ -601,34 +675,49 @@ export default function ScorecardPage() {
                         <th className="text-right py-2 pr-4">Price</th>
                         <th className="text-right py-2 pr-4">Conf.</th>
                         <th className="text-center py-2 pr-4">Correct?</th>
-                        <th className="text-right py-2 pr-4">Return (7d)</th>
+                        <th className="text-left py-2 pr-4">Exit</th>
+                        <th className="text-right py-2 pr-4">Hold</th>
+                        <th className="text-right py-2 pr-4">Net Return</th>
                         <th className="text-right py-2">Brier</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {scorecard.recent_decisions.slice().reverse().map((d, i) => (
-                        <tr key={i} className="border-b border-slate-800/50 hover:bg-white/[0.02]">
-                          <td className="py-2 pr-4 text-slate-300 font-mono text-xs">{d.date?.split(' ')[0]}</td>
-                          <td className="py-2 pr-4"><SignalBadge signal={d.signal} /></td>
-                          <td className="py-2 pr-4 text-right text-slate-300 font-mono">${d.price?.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-                          <td className="py-2 pr-4 text-right text-slate-400 font-mono">{((d.confidence || 0) * 100).toFixed(0)}%</td>
-                          <td className="py-2 pr-4 text-center">
-                            {d.was_correct_7d === true ? (
-                              <CheckCircle2 className="w-4 h-4 text-green-400 mx-auto" />
-                            ) : d.was_correct_7d === false ? (
-                              <XCircle className="w-4 h-4 text-red-400 mx-auto" />
-                            ) : (
-                              <span className="text-slate-600">—</span>
-                            )}
-                          </td>
-                          <td className={`py-2 pr-4 text-right font-mono ${(d.actual_return_7d || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {d.actual_return_7d !== undefined ? `${(d.actual_return_7d * 100).toFixed(2)}%` : '—'}
-                          </td>
-                          <td className="py-2 text-right font-mono text-slate-400 text-xs">
-                            {d.brier_score !== undefined ? d.brier_score.toFixed(4) : '—'}
-                          </td>
-                        </tr>
-                      ))}
+                      {scorecard.recent_decisions.slice().reverse().map((d, i) => {
+                        const wasCorrect = d.was_correct_primary ?? d.was_correct_7d;
+                        const netRet = d.net_return_primary ?? d.actual_return_primary ?? d.actual_return_7d;
+                        const exitLabel = d.exit_type === 'take_profit_hit' ? 'TP' : d.exit_type === 'stop_loss_hit' ? 'SL' : d.exit_type === 'held_to_expiry' ? 'Timeout' : d.exit_type || '7d';
+                        return (
+                          <tr key={i} className="border-b border-slate-800/50 hover:bg-white/[0.02]">
+                            <td className="py-2 pr-4 text-slate-300 font-mono text-xs">{d.date?.split(' ')[0]}</td>
+                            <td className="py-2 pr-4"><SignalBadge signal={d.signal} /></td>
+                            <td className="py-2 pr-4 text-right text-slate-300 font-mono">${d.price?.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                            <td className="py-2 pr-4 text-right text-slate-400 font-mono">{((d.confidence || 0) * 100).toFixed(0)}%</td>
+                            <td className="py-2 pr-4 text-center">
+                              {wasCorrect === true ? (
+                                <CheckCircle2 className="w-4 h-4 text-green-400 mx-auto" />
+                              ) : wasCorrect === false ? (
+                                <XCircle className="w-4 h-4 text-red-400 mx-auto" />
+                              ) : (
+                                <span className="text-slate-600">—</span>
+                              )}
+                            </td>
+                            <td className="py-2 pr-4 text-xs">
+                              <span className={`px-1.5 py-0.5 rounded ${d.exit_type === 'take_profit_hit' ? 'bg-green-500/15 text-green-400' : d.exit_type === 'stop_loss_hit' ? 'bg-red-500/15 text-red-400' : 'bg-slate-500/15 text-slate-400'}`}>
+                                {exitLabel}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-4 text-right text-slate-400 font-mono text-xs">
+                              {d.exit_day != null ? `${d.exit_day}d` : d.hold_days_planned != null ? `${d.hold_days_planned}d` : '—'}
+                            </td>
+                            <td className={`py-2 pr-4 text-right font-mono ${(netRet || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {netRet !== undefined && netRet !== null ? `${(netRet * 100).toFixed(2)}%` : '—'}
+                            </td>
+                            <td className="py-2 text-right font-mono text-slate-400 text-xs">
+                              {d.brier_score !== undefined ? d.brier_score.toFixed(4) : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -703,29 +792,78 @@ export default function ScorecardPage() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StatCard label="Win Rate" value={`${(walkForward.overall_metrics.win_rate * 100).toFixed(1)}%`} icon={Target}
                   color={walkForward.overall_metrics.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'} />
-                <StatCard label="Sharpe Ratio" value={walkForward.overall_metrics.sharpe_ratio.toFixed(3)} icon={TrendingUp}
-                  color={walkForward.overall_metrics.sharpe_ratio > 0 ? 'text-green-400' : 'text-red-400'} />
+                <StatCard label="Sharpe (Net)" value={(walkForward.overall_metrics.sharpe_ratio_net ?? walkForward.overall_metrics.sharpe_ratio ?? 0).toFixed(3)} icon={TrendingUp}
+                  sub={walkForward.overall_metrics.sharpe_se != null ? `SE: ±${walkForward.overall_metrics.sharpe_se.toFixed(3)}` : undefined}
+                  color={(walkForward.overall_metrics.sharpe_ratio_net ?? walkForward.overall_metrics.sharpe_ratio ?? 0) > 0 ? 'text-green-400' : 'text-red-400'} />
                 <StatCard label="Max Drawdown" value={`${(walkForward.overall_metrics.max_drawdown * 100).toFixed(1)}%`} icon={TrendingDown}
                   color="text-red-400" />
-                <StatCard label="Mean Return" value={`${(walkForward.overall_metrics.mean_return * 100).toFixed(3)}%`} icon={Activity}
-                  color={walkForward.overall_metrics.mean_return > 0 ? 'text-green-400' : 'text-red-400'} />
+                <StatCard label="Mean Return (Net)" value={`${((walkForward.overall_metrics.mean_return_net ?? walkForward.overall_metrics.mean_return ?? 0) * 100).toFixed(3)}%`} icon={Activity}
+                  color={(walkForward.overall_metrics.mean_return_net ?? walkForward.overall_metrics.mean_return ?? 0) > 0 ? 'text-green-400' : 'text-red-400'} />
+              </div>
+              {/* EV + Exit Type Row */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {walkForward.overall_metrics.ev_per_trade_10k != null && (
+                  <StatCard label="EV / Trade ($10K)" value={`$${walkForward.overall_metrics.ev_per_trade_10k.toFixed(0)}`}
+                    sub={walkForward.overall_metrics.ev_per_trade_10k > 0 ? 'Positive edge' : 'Negative edge'}
+                    icon={TrendingUp}
+                    color={walkForward.overall_metrics.ev_per_trade_10k > 0 ? 'text-green-400' : 'text-red-400'} />
+                )}
+                {walkForward.overall_metrics.avg_win_return != null && (
+                  <StatCard label="Avg Win" value={`${(walkForward.overall_metrics.avg_win_return * 100).toFixed(2)}%`}
+                    icon={CheckCircle2} color="text-green-400" />
+                )}
+                {walkForward.overall_metrics.avg_loss_return != null && (
+                  <StatCard label="Avg Loss" value={`-${(walkForward.overall_metrics.avg_loss_return * 100).toFixed(2)}%`}
+                    icon={XCircle} color="text-red-400" />
+                )}
+                {walkForward.exit_type_breakdown && Object.keys(walkForward.exit_type_breakdown).length > 0 && (
+                  <div className="glass-static p-4 flex flex-col gap-1">
+                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                      <Target className="w-3.5 h-3.5" /> Exit Types
+                    </div>
+                    <div className="flex flex-col gap-0.5 text-xs mt-1">
+                      {Object.entries(walkForward.exit_type_breakdown).map(([type, count]) => (
+                        <div key={type} className="flex justify-between">
+                          <span className="text-slate-400">
+                            {type === 'take_profit_hit' ? 'TP Hit' : type === 'stop_loss_hit' ? 'SL Hit' : type === 'held_to_expiry' ? 'Timeout' : type}
+                          </span>
+                          <span className={type === 'take_profit_hit' ? 'text-green-400' : type === 'stop_loss_hit' ? 'text-red-400' : 'text-slate-300'}>
+                            {count as number}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Equity Curve */}
-              {walkForward.equity_curve.length > 1 && (
-                <div className="glass-static p-5">
-                  <h3 className="text-sm font-semibold text-white mb-4">Walk-Forward Equity Curve</h3>
-                  <ResponsiveContainer width="100%" height={250}>
-                    <LineChart data={walkForward.equity_curve.map((v, i) => ({ period: i, value: v }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                      <XAxis dataKey="period" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-                      <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} domain={['auto', 'auto']} />
-                      <Tooltip contentStyle={{ background: '#0f1629', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8 }} />
-                      <Line type="monotone" dataKey="value" stroke="#06d6a0" strokeWidth={2} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
+              {(() => {
+                const grossCurve = walkForward.equity_curve_gross ?? walkForward.equity_curve ?? [];
+                const posCurve = walkForward.equity_curve_position ?? [];
+                const hasDual = posCurve.length > 1;
+                const chartData = grossCurve.map((v, i) => ({
+                  period: i,
+                  gross: v,
+                  ...(hasDual ? { position: posCurve[i] } : {}),
+                }));
+                return chartData.length > 1 ? (
+                  <div className="glass-static p-5">
+                    <h3 className="text-sm font-semibold text-white mb-4">Walk-Forward Equity Curve</h3>
+                    <ResponsiveContainer width="100%" height={250}>
+                      <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                        <XAxis dataKey="period" tick={{ fill: '#94a3b8', fontSize: 11 }} />
+                        <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} domain={['auto', 'auto']} />
+                        <Tooltip contentStyle={{ background: '#0f1629', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8 }} />
+                        {hasDual && <Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />}
+                        <Line type="monotone" dataKey="gross" name="Gross" stroke="#64748b" strokeWidth={1.5} dot={false} strokeDasharray={hasDual ? "5 5" : undefined} />
+                        {hasDual && <Line type="monotone" dataKey="position" name="Position-Sized (Net)" stroke="#06d6a0" strokeWidth={2} dot={false} />}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : null;
+              })()}
 
               {/* Signal Analysis */}
               {Object.keys(walkForward.signal_analysis).length > 0 && (
@@ -789,7 +927,8 @@ export default function ScorecardPage() {
                 <StatCard label="Mean Confidence" value={`${(calibration.mean_confidence * 100).toFixed(1)}%`} icon={Target} color="text-accent-teal" />
                 <StatCard label="Mean Outcome" value={`${(calibration.mean_outcome * 100).toFixed(1)}%`} icon={CheckCircle2}
                   color={calibration.mean_outcome >= calibration.mean_confidence ? 'text-green-400' : 'text-yellow-400'} />
-                <StatCard label="Decisions Used" value={calibration.n_decisions} icon={BarChart3} />
+                <StatCard label="Decisions Used" value={calibration.n_decisions_deduped ?? calibration.n_decisions ?? 0}
+                  sub={calibration.n_decisions_total ? `${calibration.n_decisions_total} total (deduped)` : undefined} icon={BarChart3} />
                 <StatCard label="Coverage Quality" value={calibration.coverage_quality.toUpperCase()} icon={Shield}
                   color={calibration.coverage_quality === 'high' ? 'text-green-400' : calibration.coverage_quality === 'medium' ? 'text-yellow-400' : 'text-red-400'} />
               </div>

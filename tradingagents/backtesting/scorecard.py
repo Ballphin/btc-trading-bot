@@ -22,6 +22,8 @@ from collections import defaultdict
 
 import yfinance as yf
 
+from tradingagents.backtesting.date_utils import parse_any_date
+
 logger = logging.getLogger(__name__)
 
 # Signals that make a directional prediction (can be scored)
@@ -77,6 +79,172 @@ def _get_price_on_date(ticker: str, date_str: str) -> Optional[float]:
         logger.debug(f"Price fetch failed for {ticker} on {date_str}: {e}")
         return None
 
+
+
+def _get_ohlc_range(ticker: str, start_date: str, end_date: str) -> Optional[Any]:
+    """Fetch daily OHLC data for a ticker over a date range (single yfinance call).
+
+    Returns a DataFrame with columns [Open, High, Low, Close] indexed by date,
+    or None if no data is available.
+    """
+    try:
+        data = yf.download(
+            ticker,
+            start=start_date,
+            end=end_date,
+            progress=False,
+            auto_adjust=True,
+        )
+        if data.empty:
+            return None
+        return data
+    except Exception as e:
+        logger.debug(f"OHLC range fetch failed for {ticker} ({start_date}→{end_date}): {e}")
+        return None
+
+
+def _scan_sl_tp_hits(
+    ohlc_df,
+    entry_price: float,
+    signal: str,
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+    hold_days: int,
+    entry_dt: datetime,
+) -> Dict[str, Any]:
+    """Three-tier scoring: SL/TP hit scan → hold-period timeout → 7d fallback.
+
+    Scans daily OHLC from T+1 to T+hold_days for stop-loss or take-profit hits.
+    First trigger wins.  If neither triggers, scores at T+hold_days close.
+    If hold_days data is unavailable, falls back to T+7d close.
+
+    Returns dict with:
+        exit_type: "stop_loss_hit" | "take_profit_hit" | "held_to_expiry"
+        exit_price: float
+        exit_day: int (days after entry)
+        was_correct: bool
+        actual_return: float (signed, from entry perspective)
+    """
+    sig = signal.upper()
+    is_long = sig in ("BUY", "COVER")
+
+    # Filter OHLC to the relevant window (T+1 onwards, up to hold_days)
+    if ohlc_df is None or ohlc_df.empty:
+        return {}
+
+    # Normalize index to naive datetimes for comparison
+    rows = []
+    for idx in ohlc_df.index:
+        idx_naive = idx.replace(tzinfo=None) if hasattr(idx, "tzinfo") and idx.tzinfo else idx
+        day_offset = (idx_naive - entry_dt).days
+        if day_offset < 1:
+            continue  # skip entry day
+        if day_offset > hold_days:
+            break
+        high = ohlc_df["High"].loc[idx]
+        low = ohlc_df["Low"].loc[idx]
+        close = ohlc_df["Close"].loc[idx]
+        rows.append({
+            "day": day_offset,
+            "high": float(high.item() if hasattr(high, "item") else high),
+            "low": float(low.item() if hasattr(low, "item") else low),
+            "close": float(close.item() if hasattr(close, "item") else close),
+        })
+
+    if not rows:
+        return {}
+
+    # Tier 1: Scan for SL/TP hits (first trigger wins)
+    has_sl = stop_loss is not None and stop_loss > 0
+    has_tp = take_profit is not None and take_profit > 0
+
+    if has_sl or has_tp:
+        for row in rows:
+            if is_long:
+                # BUY/COVER: SL triggers when low ≤ stop_loss
+                if has_sl and row["low"] <= stop_loss:
+                    ret = (stop_loss - entry_price) / entry_price
+                    return {
+                        "exit_type": "stop_loss_hit",
+                        "exit_price": stop_loss,
+                        "exit_day": row["day"],
+                        "was_correct": False,
+                        "actual_return": round(ret, 6),
+                    }
+                # BUY/COVER: TP triggers when high ≥ take_profit
+                if has_tp and row["high"] >= take_profit:
+                    ret = (take_profit - entry_price) / entry_price
+                    return {
+                        "exit_type": "take_profit_hit",
+                        "exit_price": take_profit,
+                        "exit_day": row["day"],
+                        "was_correct": True,
+                        "actual_return": round(ret, 6),
+                    }
+            else:
+                # SHORT/SELL: SL triggers when high ≥ stop_loss
+                if has_sl and row["high"] >= stop_loss:
+                    ret = (entry_price - stop_loss) / entry_price
+                    return {
+                        "exit_type": "stop_loss_hit",
+                        "exit_price": stop_loss,
+                        "exit_day": row["day"],
+                        "was_correct": False,
+                        "actual_return": round(ret, 6),
+                    }
+                # SHORT/SELL: TP triggers when low ≤ take_profit
+                if has_tp and row["low"] <= take_profit:
+                    ret = (entry_price - take_profit) / entry_price
+                    return {
+                        "exit_type": "take_profit_hit",
+                        "exit_price": take_profit,
+                        "exit_day": row["day"],
+                        "was_correct": True,
+                        "actual_return": round(ret, 6),
+                    }
+
+    # Tier 2: Hold-period timeout — use T+hold_days close
+    # Find the row closest to hold_days
+    last_row = rows[-1]
+    exit_price = last_row["close"]
+    if is_long:
+        was_correct = exit_price > entry_price
+        ret = (exit_price - entry_price) / entry_price
+    else:
+        was_correct = exit_price < entry_price
+        ret = (entry_price - exit_price) / entry_price
+
+    return {
+        "exit_type": "held_to_expiry",
+        "exit_price": round(exit_price, 6),
+        "exit_day": last_row["day"],
+        "was_correct": was_correct,
+        "actual_return": round(ret, 6),
+    }
+
+
+# Execution cost constants (configurable)
+_SPREAD_BPS = 10  # round-trip spread in basis points
+_FUNDING_RATE_PER_8H = 0.0001  # 1 bps per 8h funding interval (shorts only)
+
+
+def _estimate_execution_costs(
+    signal: str, hold_days: int, ticker: str
+) -> float:
+    """Estimate execution costs: spread + funding for crypto shorts.
+
+    Returns cost as a positive fraction (e.g. 0.0031 = 0.31%).
+    """
+    spread_cost = _SPREAD_BPS / 10000.0  # e.g. 10 bps = 0.001
+    is_crypto = "-USD" in ticker.upper() or "USDT" in ticker.upper()
+    sig = signal.upper()
+
+    if is_crypto and sig in ("SHORT", "SELL"):
+        # 3 funding intervals per day × hold_days
+        funding_cost = hold_days * 3 * _FUNDING_RATE_PER_8H
+        return spread_cost + funding_cost
+
+    return spread_cost
 
 
 def record_decision(
@@ -138,16 +306,16 @@ def score_pending_decisions(
     ticker: str,
     results_dir: str = "./eval_results",
 ) -> Dict[str, Any]:
-    """Score all un-scored directional decisions at T+7d (primary), T+1d/T+3d (informational).
+    """Score un-scored directional decisions using adaptive per-trade horizons.
+
+    Three-tier scoring per decision:
+    1. SL/TP hit scan — check daily OHLC from T+1 to T+hold_days for stop/target hits
+    2. Hold-period timeout — if no SL/TP hit, score at T+hold_days close
+    3. 7d fallback — if max_hold_days is missing, use T+7d close (legacy behaviour)
+
+    Also deducts estimated execution costs (spread + funding for crypto shorts).
 
     Idempotent: keyed by (ticker, date, signal) — re-runs skip already-scored entries.
-
-    Args:
-        ticker: Ticker symbol
-        results_dir: Results directory
-
-    Returns:
-        Dict with scoring summary
     """
     jsonl_path = Path(results_dir) / "shadow" / ticker / "decisions.jsonl"
     scored_path = Path(results_dir) / "shadow" / ticker / "decisions_scored.jsonl"
@@ -196,45 +364,82 @@ def score_pending_decisions(
             logger.warning(f"Skipping decision with invalid price: {decision.get('date')}")
             continue
 
-        date_str = decision["date"].split(" ")[0]
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        try:
+            dt = parse_any_date(decision["date"])
+        except ValueError:
+            logger.warning(f"Skipping decision with unparseable date: {decision.get('date')}")
+            continue
 
-        # Check if enough time has passed for T+7d scoring
-        if datetime.now() - dt < timedelta(days=CALIBRATION_HORIZON_DAYS + 1):
-            continue  # Not enough time has passed for primary horizon
+        # Adaptive hold period: use per-trade max_hold_days, fallback to 7
+        hold_days = decision.get("max_hold_days")
+        if hold_days is None or hold_days <= 0:
+            hold_days = CALIBRATION_HORIZON_DAYS  # 7d fallback
 
-        # Fetch actual prices at each horizon
+        # Check if enough time has passed for this decision's hold period
+        if datetime.now() - dt < timedelta(days=hold_days + 1):
+            continue
+
+        stop_loss = decision.get("stop_loss")
+        take_profit = decision.get("take_profit")
+
+        # Batch fetch OHLC for the entire hold period (single yfinance call)
+        ohlc_start = dt.strftime("%Y-%m-%d")
+        ohlc_end = (dt + timedelta(days=hold_days + 3)).strftime("%Y-%m-%d")
+        ohlc_df = _get_ohlc_range(ticker, ohlc_start, ohlc_end)
+
+        # Three-tier scoring
+        exit_result = _scan_sl_tp_hits(
+            ohlc_df, price, signal, stop_loss, take_profit, hold_days, dt
+        )
+
+        if not exit_result:
+            # No OHLC data available — skip for now
+            continue
+
+        # Execution cost deduction
+        actual_hold = exit_result.get("exit_day", hold_days)
+        exec_cost = _estimate_execution_costs(signal, actual_hold, ticker)
+        gross_return = exit_result["actual_return"]
+        net_return = gross_return - exec_cost
+
+        # Also fetch informational horizons (T+1d, T+3d) for the dashboard
         scores = {}
-        for horizon in INFO_HORIZONS_DAYS + [CALIBRATION_HORIZON_DAYS]:
+        for horizon in INFO_HORIZONS_DAYS:
             target_date = (dt + timedelta(days=horizon)).strftime("%Y-%m-%d")
             actual_price = _get_price_on_date(ticker, target_date)
             if actual_price is None:
                 continue
-
-            # Determine if signal direction was correct
             if signal in ("BUY", "COVER"):
                 was_correct = actual_price > price
                 actual_return = (actual_price - price) / price
-            else:  # SHORT, SELL
+            else:
                 was_correct = actual_price < price
                 actual_return = (price - actual_price) / price
-
             scores[f"was_correct_{horizon}d"] = was_correct
             scores[f"actual_return_{horizon}d"] = round(actual_return, 6)
             scores[f"actual_price_{horizon}d"] = actual_price
 
-        # Require at least the primary horizon (T+7d) to be scored
-        if f"was_correct_{CALIBRATION_HORIZON_DAYS}d" not in scores:
-            continue
-
-        # Compute Brier score for the primary horizon
+        # Compute Brier score using the adaptive exit result
         confidence = decision.get("confidence", 0.5)
-        outcome = 1.0 if scores[f"was_correct_{CALIBRATION_HORIZON_DAYS}d"] else 0.0
+        outcome = 1.0 if exit_result["was_correct"] else 0.0
         brier = (confidence - outcome) ** 2
 
         scored_entry = {
             **decision,
             **scores,
+            # Primary scoring result (adaptive)
+            "was_correct_primary": exit_result["was_correct"],
+            "actual_return_primary": round(gross_return, 6),
+            "net_return_primary": round(net_return, 6),
+            "exit_type": exit_result["exit_type"],
+            "exit_price": exit_result["exit_price"],
+            "exit_day": exit_result["exit_day"],
+            "hold_days_planned": hold_days,
+            "execution_cost": round(exec_cost, 6),
+            # Legacy compatibility fields (T+7d equivalent)
+            f"was_correct_{hold_days}d": exit_result["was_correct"],
+            f"actual_return_{hold_days}d": round(gross_return, 6),
+            f"actual_price_{hold_days}d": exit_result["exit_price"],
             "brier_score": round(brier, 6),
             "scored": True,
             "scored_at": datetime.now().isoformat(),
@@ -303,8 +508,13 @@ def compute_brier_decomposition(
         bin_edges[-1] = 1.01  # include 1.0
 
     # Compute base rate (overall fraction of correct predictions)
-    key_7d = f"was_correct_{CALIBRATION_HORIZON_DAYS}d"
-    outcomes = [1.0 if d.get(key_7d, False) else 0.0 for d in scored]
+    # Use adaptive was_correct_primary, fallback to legacy was_correct_7d
+    def _was_correct(d: dict) -> bool:
+        if "was_correct_primary" in d:
+            return bool(d["was_correct_primary"])
+        return bool(d.get(f"was_correct_{CALIBRATION_HORIZON_DAYS}d", False))
+
+    outcomes = [1.0 if _was_correct(d) else 0.0 for d in scored]
     base_rate = sum(outcomes) / N
 
     # Bin the decisions
@@ -321,7 +531,7 @@ def compute_brier_decomposition(
         n_k = len(bin_decisions)
         mean_conf = sum(d["confidence"] for d in bin_decisions) / n_k
         mean_outcome = sum(
-            1.0 if d.get(key_7d, False) else 0.0 for d in bin_decisions
+            1.0 if _was_correct(d) else 0.0 for d in bin_decisions
         ) / n_k
 
         bins.append({
@@ -416,13 +626,22 @@ def get_scorecard(
 
     key_7d = f"was_correct_{CALIBRATION_HORIZON_DAYS}d"
 
+    # Adaptive correctness: use was_correct_primary, fallback to legacy was_correct_7d
+    def _was_correct(d: dict):
+        if "was_correct_primary" in d:
+            return bool(d["was_correct_primary"])
+        if d.get(key_7d) is not None:
+            return bool(d[key_7d])
+        return None
+
     # Win rate by signal type
     signal_stats = defaultdict(lambda: {"correct": 0, "total": 0})
     for d in scored:
         sig = d.get("signal", "")
-        if d.get(key_7d) is not None:
+        wc = _was_correct(d)
+        if wc is not None:
             signal_stats[sig]["total"] += 1
-            if d[key_7d]:
+            if wc:
                 signal_stats[sig]["correct"] += 1
 
     win_by_signal = {
@@ -437,9 +656,10 @@ def get_scorecard(
     regime_stats = defaultdict(lambda: {"correct": 0, "total": 0})
     for d in scored:
         regime = d.get("regime", "unknown")
-        if d.get(key_7d) is not None:
+        wc = _was_correct(d)
+        if wc is not None:
             regime_stats[regime]["total"] += 1
-            if d[key_7d]:
+            if wc:
                 regime_stats[regime]["correct"] += 1
 
     win_by_regime = {
@@ -454,9 +674,10 @@ def get_scorecard(
     combo_stats = defaultdict(lambda: {"correct": 0, "total": 0})
     for d in scored:
         combo = f"{d.get('signal', '')}_{d.get('regime', 'unknown')}"
-        if d.get(key_7d) is not None:
+        wc = _was_correct(d)
+        if wc is not None:
             combo_stats[combo]["total"] += 1
-            if d[key_7d]:
+            if wc:
                 combo_stats[combo]["correct"] += 1
 
     win_by_combo = {
@@ -469,12 +690,33 @@ def get_scorecard(
     }
 
     # Overall win rate
-    total_correct = sum(1 for d in scored if d.get(key_7d))
+    total_correct = sum(1 for d in scored if _was_correct(d))
     overall_win_rate = total_correct / len(scored) if scored else 0
 
     # Average Brier score
     brier_scores = [d.get("brier_score", 0) for d in scored if d.get("brier_score") is not None]
     avg_brier = sum(brier_scores) / len(brier_scores) if brier_scores else None
+
+    # Exit type breakdown
+    exit_types = defaultdict(int)
+    for d in scored:
+        exit_types[d.get("exit_type", "legacy_7d")] += 1
+
+    # EV per trade (on $10K notional)
+    notional = 10000.0
+    wins = [d for d in scored if _was_correct(d)]
+    losses = [d for d in scored if _was_correct(d) is False]
+    avg_win_ret = sum(
+        d.get("net_return_primary", d.get(f"actual_return_{CALIBRATION_HORIZON_DAYS}d", 0))
+        for d in wins
+    ) / len(wins) if wins else 0
+    avg_loss_ret = sum(
+        abs(d.get("net_return_primary", d.get(f"actual_return_{CALIBRATION_HORIZON_DAYS}d", 0)))
+        for d in losses
+    ) / len(losses) if losses else 0
+    win_rate_f = len(wins) / len(scored) if scored else 0
+    loss_rate_f = len(losses) / len(scored) if scored else 0
+    ev_per_trade = round((win_rate_f * avg_win_ret - loss_rate_f * avg_loss_ret) * notional, 2)
 
     # Brier decomposition
     brier_decomp = compute_brier_decomposition(ticker, results_dir)
@@ -488,6 +730,10 @@ def get_scorecard(
         "win_by_signal": win_by_signal,
         "win_by_regime": win_by_regime,
         "win_by_combo": win_by_combo,
+        "exit_type_breakdown": dict(exit_types),
+        "ev_per_trade_10k": ev_per_trade,
+        "avg_win_return": round(avg_win_ret, 6),
+        "avg_loss_return": round(avg_loss_ret, 6),
         "brier_decomposition": brier_decomp if "error" not in brier_decomp else None,
         "recent_decisions": scored[-20:],  # last 20 scored decisions
     }
@@ -553,14 +799,29 @@ def run_calibration_study(
             "scored_available": len(scored),
         }
 
-    # Use the most recent min_decisions decisions
-    scored = scored[-min_decisions:]
+    # Use ALL scored decisions (no truncation — Bayesian shrinkage handles small-n)
+
+    # Deduplicate: keep one decision per day (highest confidence) to preserve independence
+    # when the 4H scheduler produces multiple decisions per day
+    by_day: Dict[str, Any] = {}
+    for d in scored:
+        date_key = d.get("date", "").split("T")[0].split(" ")[0]
+        existing = by_day.get(date_key)
+        if existing is None or d.get("confidence", 0) > existing.get("confidence", 0):
+            by_day[date_key] = d
+    deduped = list(by_day.values())
 
     key_7d = f"was_correct_{CALIBRATION_HORIZON_DAYS}d"
 
-    # Compute correction factor
-    confidences = [d.get("confidence", 0.5) for d in scored]
-    outcomes = [1.0 if d.get(key_7d, False) else 0.0 for d in scored]
+    # Adaptive correctness: use was_correct_primary, fallback to legacy
+    def _cal_was_correct(d: dict) -> bool:
+        if "was_correct_primary" in d:
+            return bool(d["was_correct_primary"])
+        return bool(d.get(key_7d, False))
+
+    # Compute correction factor using deduped sample
+    confidences = [d.get("confidence", 0.5) for d in deduped]
+    outcomes = [1.0 if _cal_was_correct(d) else 0.0 for d in deduped]
 
     mean_confidence = sum(confidences) / len(confidences)
     mean_outcome = sum(outcomes) / len(outcomes)
@@ -573,7 +834,7 @@ def run_calibration_study(
     # Bayesian shrinkage: blend data with prior at low sample sizes
     # w ramps from 0.3 at n=10 to 1.0 at n≥30
     prior_correction = 0.85
-    n = len(scored)
+    n = len(deduped)
     w = min(1.0, max(0.3, n / 30.0))
     correction = (1.0 - w) * prior_correction + w * data_correction
 
@@ -597,7 +858,8 @@ def run_calibration_study(
         "correction": round(correction, 4),
         "mean_confidence": round(mean_confidence, 4),
         "mean_outcome": round(mean_outcome, 4),
-        "n_decisions": len(scored),
+        "n_decisions_total": len(scored),
+        "n_decisions_deduped": n,
         "regimes_covered": list(regimes),
         "coverage_quality": coverage_quality,
         "computed_at": datetime.now().isoformat(),
