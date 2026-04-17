@@ -15,6 +15,11 @@ from tradingagents.dataflows.base_client import BaseDataClient
 logger = logging.getLogger(__name__)
 
 # Hyperliquid interval strings
+INTERVAL_1M = "1m"
+INTERVAL_3M = "3m"
+INTERVAL_5M = "5m"
+INTERVAL_15M = "15m"
+INTERVAL_30M = "30m"
 INTERVAL_1H = "1h"
 INTERVAL_4H = "4h"
 INTERVAL_1D = "1d"
@@ -24,9 +29,27 @@ MAX_CANDLES = 5000
 
 # Map interval string → seconds for pagination
 _INTERVAL_SECONDS = {
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
     "1h": 3600,
     "4h": 14400,
     "1d": 86400,
+}
+
+# Per-interval cache TTL for Pulse — each callsite MUST pass via max_age_override.
+# Without this, BaseDataClient.cache_ttl (3600s) makes sub-hourly data stale.
+PULSE_CACHE_TTL = {
+    "1m": 60,
+    "3m": 120,
+    "5m": 120,
+    "15m": 300,
+    "30m": 600,
+    "1h": 600,
+    "4h": 1800,
+    "1d": 3600,
 }
 
 
@@ -119,7 +142,7 @@ class HyperliquidClient(BaseDataClient):
 
         Args:
             coin: Base asset, e.g. "BTC" (not "BTC-USD").
-            interval: "1h", "4h", or "1d".
+            interval: "1m", "5m", "15m", "1h", "4h", or "1d".
             start: Start date yyyy-mm-dd.
             end: End date yyyy-mm-dd.
             max_age_override: Override cache TTL (0 = no cache).
@@ -366,3 +389,148 @@ class HyperliquidClient(BaseDataClient):
         if df.empty:
             return None
         return float(df.iloc[-1]["funding_rate"])
+
+    # ── L2 Book Snapshot (book imbalance) ─────────────────────────────
+
+    def get_l2_snapshot(
+        self, coin: str, max_age_override: int = None
+    ) -> Optional[dict]:
+        """Fetch L2 order book snapshot.
+
+        Returns:
+            {"coin": str, "bids": [(px, sz), ...], "asks": [(px, sz), ...]} or None.
+            Levels are sorted best → worst.
+        """
+        payload = {"type": "l2Book", "coin": coin}
+        try:
+            data = self._post_request(
+                payload,
+                cache_prefix=f"hl-l2-{coin}",
+                max_age_override=max_age_override,
+            )
+            if not isinstance(data, dict) or "levels" not in data:
+                return None
+            levels = data["levels"]
+            if not isinstance(levels, list) or len(levels) < 2:
+                return None
+            bids_raw = levels[0] if isinstance(levels[0], list) else []
+            asks_raw = levels[1] if isinstance(levels[1], list) else []
+
+            def _parse(lst: list):
+                out = []
+                for lvl in lst:
+                    if isinstance(lvl, dict):
+                        px = float(lvl.get("px", 0))
+                        sz = float(lvl.get("sz", 0))
+                        if px > 0 and sz > 0:
+                            out.append((px, sz))
+                return out
+
+            return {
+                "coin": coin,
+                "bids": _parse(bids_raw),
+                "asks": _parse(asks_raw),
+            }
+        except Exception as e:
+            logger.warning(f"Hyperliquid L2 snapshot failed for {coin}: {e}")
+            return None
+
+    def compute_book_imbalance(
+        self, coin: str, levels: int = 1, max_age_override: int = 60
+    ) -> Optional[float]:
+        """(bid_size - ask_size) / (bid_size + ask_size) over top `levels` rungs.
+
+        Returns:
+            Float in [-1, +1] or None if snapshot unavailable.
+        """
+        snap = self.get_l2_snapshot(coin, max_age_override=max_age_override)
+        if snap is None:
+            return None
+        bids = snap["bids"][:levels]
+        asks = snap["asks"][:levels]
+        if not bids or not asks:
+            return None
+        bid_sz = sum(sz for _, sz in bids)
+        ask_sz = sum(sz for _, sz in asks)
+        denom = bid_sz + ask_sz
+        if denom < 1e-12:
+            return None
+        return float((bid_sz - ask_sz) / denom)
+
+    # ── Recent trades / liquidation cascade detection ─────────────────
+
+    def get_recent_trades(
+        self, coin: str, max_age_override: int = 60
+    ) -> list:
+        """Fetch recent trades for a coin. Returns list of dicts with at least
+        {px, sz, time, side}. Empty list on failure."""
+        # Note: Hyperliquid public endpoint is "recentTrades"; exact field
+        # names are px, sz, time, side, users.
+        payload = {"type": "recentTrades", "coin": coin}
+        try:
+            data = self._post_request(
+                payload,
+                cache_prefix=f"hl-trades-{coin}",
+                max_age_override=max_age_override,
+            )
+            if isinstance(data, list):
+                return data
+            return []
+        except Exception as e:
+            logger.warning(f"Hyperliquid recentTrades failed for {coin}: {e}")
+            return []
+
+    def liquidation_cluster_score(
+        self,
+        coin: str,
+        window_minutes: int = 15,
+        size_normalizer_usd: float = 1e6,
+        max_age_override: int = 60,
+    ) -> Optional[float]:
+        """Log-normalized liquidation cluster magnitude in the trailing window.
+
+        The Hyperliquid public API does not expose a dedicated liquidations
+        endpoint. We approximate via recent trades filtered for the
+        "liquidation" user (Hyperliquid tags liq fills; when absent we return
+        None so callers can skip the factor).
+
+        Returns:
+            signed log1p(notional / size_normalizer_usd) with sign matching
+            the net direction of liquidated side (positive = shorts liquidated
+            on an up-move → bearish unwind; negative = longs liquidated on a
+            down-move → bullish snapback opportunity if vol falling).
+            None if the feed is unavailable or no liq tag is present.
+        """
+        import math as _math
+        trades = self.get_recent_trades(coin, max_age_override=max_age_override)
+        if not trades:
+            return None
+        cutoff_ms = int((datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).timestamp() * 1000)
+        liq_notional_signed = 0.0
+        any_liq_tag = False
+        for t in trades:
+            try:
+                ts_ms = int(t.get("time", 0))
+                if ts_ms < cutoff_ms:
+                    continue
+                users = t.get("users") or []
+                is_liq = any(
+                    isinstance(u, str) and "liq" in u.lower() for u in users
+                )
+                if not is_liq:
+                    continue
+                any_liq_tag = True
+                px = float(t.get("px", 0))
+                sz = float(t.get("sz", 0))
+                side = t.get("side", "")
+                notional = px * sz
+                # side "B" on HL = buy-aggressor (shorts being liquidated)
+                # side "A" = ask-aggressor (longs being liquidated)
+                sign = 1.0 if side == "B" else -1.0 if side == "A" else 0.0
+                liq_notional_signed += sign * notional
+            except (ValueError, TypeError):
+                continue
+        if not any_liq_tag:
+            return None
+        mag = _math.log1p(abs(liq_notional_signed) / max(size_normalizer_usd, 1.0))
+        return float(mag if liq_notional_signed >= 0 else -mag)

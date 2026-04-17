@@ -1,0 +1,171 @@
+# Quant Pulse v3 — Scoring & Risk Configuration
+#
+# Default "uncalibrated" params. The walk-forward calibration CLI
+# (python -m tradingagents.pulse.calibrate ...) is the ONLY supported
+# way to rewrite this file. Manual edits are tolerated but will cause
+# the scorecard UI to display an "Uncalibrated parameters" banner
+# whenever calibrated_at == null.
+
+engine_version: 3
+calibrated_at: null
+calibration_window: null
+deflated_sharpe: null
+oos_sharpe: null
+pbo: null
+n_eff: null
+
+scheduler:
+  pulse_interval_minutes: 5
+  scoring_interval_seconds: 900   # forward-return scorer runs every 15 min
+  tickers: [BTC-USD, ETH-USD, SOL-USD]
+  jitter_seconds: 15              # randomized start offset per ticker
+
+# ── Layer 1: TSMOM (primary alpha) ──────────────────────────────────
+tsmom:
+  enabled: true
+  lookbacks_hours: [504, 1512, 6048]   # 21d / 63d / 252d on 1h bars
+  target_annualized_vol: 0.20
+  rebalance_minutes: 60                # recompute every 1h close
+  min_history_days: 550                # need slightly more than 252d
+  universe:
+    - BTC-USD
+    - ETH-USD
+    - SOL-USD
+    - AVAX-USD
+    - ARB-USD
+    - MATIC-USD
+    - LINK-USD
+    - OP-USD
+    - LDO-USD
+    - FIL-USD
+    - APT-USD
+    - DOT-USD
+    - UNI-USD
+    - ATOM-USD
+    - DOGE-USD
+
+# ── Layer 2: Confluence (entry timing) ──────────────────────────────
+confluence:
+  signal_threshold: 0.25
+  confidence_divisor: 0.5
+  persistence:
+    same_direction_mul: 1.2
+    flip_mul: 0.8
+    neutral_prev_mul: 1.0
+
+  tf_weights:       # baseline (regime "mixed"); per-regime overrides below
+    1m: 0.05
+    5m: 0.10
+    15m: 0.20
+    1h: 0.30
+    4h: 0.35
+  order_flow_weight: 0.30
+
+  regime_weight_profiles:
+    trend:
+      ema_cross_mul: 1.5
+      macd_mul: 1.3
+      rsi_mul: 0.5
+      bb_mul: 0.7
+    chop:
+      ema_cross_mul: 0.5
+      macd_mul: 0.8
+      rsi_mul: 1.5
+      bb_mul: 1.3
+    mixed:
+      ema_cross_mul: 1.0
+      macd_mul: 1.0
+      rsi_mul: 1.0
+      bb_mul: 1.0
+
+  # Regime on/off gate (not weight blending):
+  regime_onoff_gate:
+    enabled: true
+    chop_disabled_indicators: [ema_cross, macd]
+    trend_disabled_indicators: [rsi, bb]
+
+  four_hour_veto:
+    enabled: true
+    min_abs_signal: 0.5
+    min_confidence: 0.7
+    only_in_trend_regime: true
+
+  # Tiered premium scoring
+  premium_tiers:
+    small_threshold_pct: 0.05
+    large_threshold_pct: 0.15
+
+  order_flow_score_cap: 3
+
+  # Funding delta adaptive threshold
+  funding_delta:
+    p75_multiplier: 1.0
+    floor_bp: 2.0            # 2 bp per 8h funding step
+
+  # Funding elevation override
+  funding_elevation:
+    enabled: true
+    annualized_threshold: 0.20   # |ann funding| > 20% → force counter-carry
+
+  # Liquidation cascade detector
+  liquidation:
+    enabled: true
+    window_minutes: 15
+    cluster_log_threshold: 2.0       # log1p(notional/1e6) > 2 => significant
+    vol_fall_ratio: 0.8              # prior-30m vol × 0.8 vs current-30m
+
+  # Book imbalance (Cont/Stoikov microstructure)
+  book_imbalance:
+    enabled: true
+    levels: 1
+    abs_threshold: 0.30
+    cache_seconds: 60
+
+  # EMA liquidity gate
+  ema_liquidity_gate:
+    enabled: true
+    min_24h_volume_usd: 50_000_000
+
+# ── Forward-return scoring ──────────────────────────────────────────
+forward_return:
+  horizons_minutes: [5, 15, 60]
+  atr_multiplier: 0.5            # thr = 0.5 × ATR × sqrt(h/60) / price
+  exec_cost_bps: 5               # taker+spread+slip default
+  fallback_fixed_bps: [5, 10, 15]
+
+# ── Fill models (for scorecard) ─────────────────────────────────────
+fill_models:
+  maker_reject_move_bps: 100     # >100bps in 10s => maker fill fails
+  maker_reject_window_sec: 10
+  maker_adverse_window_sec: 30
+  slippage_bps: 5
+  impact_coefficient: 10.0       # square-root impact C (crypto perps)
+
+# ── Alerts ──────────────────────────────────────────────────────────
+alerts:
+  min_confidence: 0.5
+  cooldown_minutes_floor: 10     # = scheduler_interval × 2 for 5-min
+  backends:
+    discord:
+      enabled: false
+      webhook_env: PULSE_DISCORD_WEBHOOK_URL
+    email:
+      enabled: false
+      smtp_env_prefix: PULSE_SMTP
+      to_env: PULSE_EMAIL_TO
+    webhook:
+      enabled: false
+      url_env: PULSE_WEBHOOK_URL
+
+# ── Edge gate (CI) ──────────────────────────────────────────────────
+edge_gate:
+  required_deflated_is_sharpe: 0.30
+  required_oos_over_is_ratio: 0.50
+  max_pbo: 0.50
+  min_n_eff: 50
+  benchmark: max_of_60_40_and_tsmom_btc
+  target_sharpe_premium_over_benchmark: 0.30
+  stress_mae_limits:
+    "2024-08-05": 0.08
+    "2023-08-17": 0.06
+    "2024-03-05": 0.05

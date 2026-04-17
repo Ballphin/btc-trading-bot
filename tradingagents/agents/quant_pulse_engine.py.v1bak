@@ -1,0 +1,429 @@
+"""Quant Pulse Deterministic Scoring Engine — zero-LLM signal generation.
+
+Computes a weighted confluence score from multi-timeframe indicators + order
+flow → BUY / SHORT / NEUTRAL with confidence, SL/TP, and templated reasoning.
+
+All thresholds come from the v3 post-debate plan.
+"""
+
+import math
+import logging
+from datetime import datetime, timezone
+from typing import Dict, Optional
+
+from tradingagents.dataflows.hyperliquid_client import _INTERVAL_SECONDS
+
+logger = logging.getLogger(__name__)
+
+# ── Configurable defaults ─────────────────────────────────────────────
+
+DEFAULT_SIGNAL_THRESHOLD = 0.25
+CONFIDENCE_DIVISOR = 0.5  # confidence = min(|normalized| / divisor, 1.0)
+
+# Timeframe base weights (must sum to ~1.0 with order flow)
+TF_WEIGHTS = {
+    "1m": 0.05,
+    "5m": 0.10,
+    "15m": 0.20,
+    "1h": 0.30,
+    "4h": 0.35,
+}
+ORDER_FLOW_WEIGHT = 0.30
+
+# Hold minutes by dominant timeframe
+HOLD_MINUTES = {
+    "1m": 5,
+    "5m": 15,
+    "15m": 45,
+    "1h": 120,
+    "4h": 480,
+}
+
+# TF ordering for SL clamp (never use sub-15m ATR for stops)
+_TF_ORDER = ["1m", "5m", "15m", "1h", "4h"]
+
+# ── Per-indicator scoring ─────────────────────────────────────────────
+
+
+def _score_rsi(rsi: Optional[float]) -> int:
+    if rsi is None:
+        return 0
+    if rsi < 35:
+        return 1
+    if rsi > 65:
+        return -1
+    return 0
+
+
+def _score_macd(macd_hist: Optional[float], macd_direction: Optional[str]) -> int:
+    if macd_hist is None:
+        return 0
+    if macd_hist > 0 and macd_direction == "rising":
+        return 1
+    if macd_hist < 0 and macd_direction == "falling":
+        return -1
+    return 0
+
+
+def _score_bb(bb_pct: Optional[float]) -> int:
+    if bb_pct is None:
+        return 0
+    if bb_pct < 0.15:
+        return 1
+    if bb_pct > 0.85:
+        return -1
+    return 0
+
+
+def _score_ema_cross(
+    ema_cross: Optional[str],
+    ema9: Optional[float],
+    ema21: Optional[float],
+    atr: Optional[float],
+) -> int:
+    """Score EMA cross with ATR-adaptive neutral zone.
+
+    Neutral when abs(ema9 - ema21) < 0.3 × ATR (prevents ranging-market whipsaw).
+    """
+    if ema_cross is None or ema9 is None or ema21 is None:
+        return 0
+    if atr is not None and atr > 1e-10:
+        if abs(ema9 - ema21) < 0.3 * atr:
+            return 0  # neutral zone
+    if ema_cross == "bullish":
+        return 1
+    if ema_cross == "bearish":
+        return -1
+    return 0
+
+
+def _volume_amplifier(rel_volume: Optional[float]) -> float:
+    """Return 1.5 if rel_volume > 1.5, else 1.0."""
+    if rel_volume is not None and rel_volume > 1.5:
+        return 1.5
+    return 1.0
+
+
+# ── Pattern scoring ───────────────────────────────────────────────────
+
+_BULLISH_PATTERNS = {
+    "bullish_engulfing", "hammer", "morning_star",
+    "three_white_soldiers", "bullish_harami",
+}
+_BEARISH_PATTERNS = {
+    "bearish_engulfing", "shooting_star", "evening_star",
+    "three_black_crows", "bearish_harami",
+}
+
+
+def _score_patterns(
+    patterns: list,
+    close_price: Optional[float],
+    support: Optional[float],
+    resistance: Optional[float],
+    vwap: Optional[float],
+) -> int:
+    """Score candlestick patterns: ±2 near key level, ±1 otherwise."""
+    if not patterns or close_price is None:
+        return 0
+
+    near_key_level = False
+    if close_price > 0:
+        for level in [support, resistance, vwap]:
+            if level is not None and level > 0:
+                if abs(close_price - level) / close_price <= 0.003:
+                    near_key_level = True
+                    break
+
+    total = 0
+    for p in patterns:
+        if p == "doji":
+            continue  # doji is neutral, doesn't contribute
+        base = 2 if near_key_level else 1
+        if p in _BULLISH_PATTERNS:
+            total += base
+        elif p in _BEARISH_PATTERNS:
+            total -= base
+    return total
+
+
+# ── Order flow scoring ────────────────────────────────────────────────
+
+
+def _score_order_flow(
+    premium_pct: Optional[float],
+    funding_delta: Optional[float],
+    vwap_position: Optional[int],
+    backtest_mode: bool = False,
+) -> tuple:
+    """Score order flow factors.
+
+    Returns (total_score, n_active_factors).
+    """
+    score = 0
+    n_active = 0
+
+    # Premium (skip in backtest mode — set to 0)
+    if not backtest_mode and premium_pct is not None:
+        n_active += 1
+        if premium_pct > 0.05:
+            score += 1
+        elif premium_pct < -0.05:
+            score -= 1
+
+    # Funding delta
+    if funding_delta is not None:
+        n_active += 1
+        if funding_delta < -0.00005:
+            score += 1  # decreasing = bullish (longs paying less)
+        elif funding_delta > 0.00005:
+            score -= 1
+
+    # VWAP position
+    if vwap_position is not None and vwap_position != 0:
+        n_active += 1
+        score += vwap_position  # +1 or -1
+
+    return score, n_active
+
+
+# ── 4h staleness discount ────────────────────────────────────────────
+
+
+def _4h_staleness_weight(base_weight: float, last_4h_close_ts: Optional[datetime]) -> float:
+    """Discount 4h weight based on hours since last close.
+
+    weight = base × max(0.5, 1 - hours_since_close / 4)
+    """
+    if last_4h_close_ts is None:
+        return base_weight * 0.5  # max discount if unknown
+    now = datetime.now(timezone.utc)
+    hours_stale = (now - last_4h_close_ts).total_seconds() / 3600
+    discount = max(0.5, 1.0 - hours_stale / 4.0)
+    return base_weight * discount
+
+
+# ── Key levels ────────────────────────────────────────────────────────
+
+
+def _compute_key_levels(timeframes: dict) -> dict:
+    """Compute support/resistance from 15m candle data in the report.
+
+    The actual candle data isn't in the report (only indicators), so
+    support/resistance must be passed separately or computed upstream.
+    For now, return None placeholders — they get set in the full pipeline.
+    """
+    return {"support": None, "resistance": None}
+
+
+# ── Main scoring function ────────────────────────────────────────────
+
+
+def score_pulse(
+    report: dict,
+    signal_threshold: float = DEFAULT_SIGNAL_THRESHOLD,
+    backtest_mode: bool = False,
+    support: Optional[float] = None,
+    resistance: Optional[float] = None,
+    last_4h_close_ts: Optional[datetime] = None,
+) -> dict:
+    """Score a pulse report → BUY/SHORT/NEUTRAL with confidence.
+
+    Args:
+        report: Output from build_pulse_report() or build_pulse_report_from_historical()
+        signal_threshold: Threshold for signal generation (default 0.25)
+        backtest_mode: If True, premium_pct is excluded from order flow scoring
+        support: Support level for pattern proximity scoring
+        resistance: Resistance level for pattern proximity scoring
+        last_4h_close_ts: Timestamp of last closed 4h candle (for staleness discount)
+
+    Returns:
+        Signal dict with signal, confidence, breakdown, SL/TP, etc.
+    """
+    timeframes = report.get("timeframes", {})
+    spot_price = report.get("spot_price")
+    vwap_daily = report.get("vwap_daily")
+    vwap_position = report.get("vwap_position", 0)
+    premium_pct = report.get("premium_pct", 0.0)
+    funding_delta = report.get("funding_delta")
+
+    # Per-timeframe scoring
+    raw_score = 0.0
+    max_possible = 0.0
+    breakdown = {}
+    dominant_tf = None
+    dominant_tf_abs = 0.0
+
+    for tf, base_weight in TF_WEIGHTS.items():
+        tf_data = timeframes.get(tf, {})
+        if not tf_data:
+            continue
+
+        # Effective weight (4h gets staleness discount)
+        if tf == "4h":
+            weight = _4h_staleness_weight(base_weight, last_4h_close_ts)
+        else:
+            weight = base_weight
+
+        # Score each indicator
+        rsi_score = _score_rsi(tf_data.get("rsi"))
+        macd_score = _score_macd(
+            tf_data.get("macd_hist"), tf_data.get("_macd_direction")
+        )
+        bb_score = _score_bb(tf_data.get("bb_pct"))
+        ema_score = _score_ema_cross(
+            tf_data.get("ema_cross"),
+            tf_data.get("_ema9"),
+            tf_data.get("_ema21"),
+            tf_data.get("atr"),
+        )
+
+        # Count valid (non-None) indicators for dynamic max_possible
+        indicator_scores = []
+        n_valid_indicators = 0
+        for val, score in [(tf_data.get("rsi"), rsi_score),
+                           (tf_data.get("macd_hist"), macd_score),
+                           (tf_data.get("bb_pct"), bb_score),
+                           (tf_data.get("ema_cross"), ema_score)]:
+            if val is not None:
+                n_valid_indicators += 1
+            indicator_scores.append(score)
+
+        # Pattern scoring (1h/4h only)
+        pattern_score = _score_patterns(
+            tf_data.get("patterns", []),
+            spot_price, support, resistance, vwap_daily,
+        )
+
+        tf_net = sum(indicator_scores) + pattern_score
+        vol_amp = _volume_amplifier(tf_data.get("rel_volume"))
+        weighted_tf = weight * tf_net * vol_amp
+
+        raw_score += weighted_tf
+        # max_possible counts only valid indicators (None excluded from denominator)
+        max_per_tf = n_valid_indicators + (2 if tf_data.get("patterns") else 0)
+        max_possible += weight * max(max_per_tf, 1) * vol_amp
+
+        breakdown[tf] = round(weighted_tf, 4)
+
+        if abs(weighted_tf) > dominant_tf_abs:
+            dominant_tf_abs = abs(weighted_tf)
+            dominant_tf = tf
+
+    # Order flow scoring
+    of_score, n_of_factors = _score_order_flow(
+        premium_pct, funding_delta, vwap_position, backtest_mode
+    )
+    of_weighted = ORDER_FLOW_WEIGHT * of_score
+    raw_score += of_weighted
+    max_possible += ORDER_FLOW_WEIGHT * max(n_of_factors, 1)
+    breakdown["order_flow"] = round(of_weighted, 4)
+
+    # Normalize
+    if max_possible < 1e-10:
+        max_possible = 1.0
+    normalized = raw_score / max_possible
+    normalized = max(-1.0, min(1.0, normalized))
+
+    # Signal determination
+    if normalized > signal_threshold:
+        signal = "BUY"
+    elif normalized < -signal_threshold:
+        signal = "SHORT"
+    else:
+        signal = "NEUTRAL"
+
+    confidence = min(abs(normalized) / CONFIDENCE_DIVISOR, 1.0)
+
+    # Dominant TF defaults
+    if dominant_tf is None:
+        dominant_tf = "15m"
+
+    # SL/TP: use ATR from max(dominant_tf, "15m")
+    sl_tf_idx = max(_TF_ORDER.index(dominant_tf), _TF_ORDER.index("15m"))
+    sl_tf = _TF_ORDER[sl_tf_idx]
+    sl_atr = None
+    if sl_tf in timeframes:
+        sl_atr = timeframes[sl_tf].get("atr")
+
+    stop_loss = None
+    take_profit = None
+    if spot_price is not None and sl_atr is not None and sl_atr > 0:
+        if signal == "BUY":
+            stop_loss = round(spot_price - 2.0 * sl_atr, 2)
+            take_profit = round(spot_price + 3.0 * sl_atr, 2)
+        elif signal == "SHORT":
+            stop_loss = round(spot_price + 2.0 * sl_atr, 2)
+            take_profit = round(spot_price - 3.0 * sl_atr, 2)
+
+    hold_minutes = HOLD_MINUTES.get(dominant_tf, 45)
+
+    # Templated reasoning
+    reasoning = _build_reasoning(signal, confidence, breakdown, timeframes, report)
+
+    return {
+        "signal": signal,
+        "confidence": round(confidence, 4),
+        "normalized_score": round(normalized, 4),
+        "timeframe_bias": dominant_tf,
+        "key_levels": {"support": support, "resistance": resistance},
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "hold_minutes": hold_minutes,
+        "reasoning": reasoning,
+        "volatility_flag": report.get("max_1m_move_pct", 0) > 1.0,
+        "breakdown": breakdown,
+        "signal_threshold": signal_threshold,
+    }
+
+
+# ── Templated reasoning ──────────────────────────────────────────────
+
+
+def _build_reasoning(
+    signal: str,
+    confidence: float,
+    breakdown: dict,
+    timeframes: dict,
+    report: dict,
+) -> str:
+    """Build a human-readable reasoning string from the top 3 contributors."""
+    if signal == "NEUTRAL":
+        return f"NEUTRAL ({confidence:.2f}): Insufficient confluence across timeframes"
+
+    # Sort breakdown by absolute contribution
+    sorted_tf = sorted(
+        [(k, v) for k, v in breakdown.items() if k != "order_flow"],
+        key=lambda x: abs(x[1]),
+        reverse=True,
+    )
+
+    parts = []
+    for tf, score in sorted_tf[:3]:
+        tf_data = timeframes.get(tf, {})
+        details = []
+        if tf_data.get("rsi") is not None:
+            details.append(f"RSI={tf_data['rsi']:.0f}")
+        if tf_data.get("ema_cross"):
+            details.append(f"EMA {'↑' if tf_data['ema_cross'] == 'bullish' else '↓'}")
+        if tf_data.get("rel_volume") is not None and tf_data["rel_volume"] > 1.5:
+            details.append(f"vol {tf_data['rel_volume']:.1f}×")
+        if tf_data.get("patterns"):
+            details.append(", ".join(tf_data["patterns"]))
+
+        direction = "bullish" if score > 0 else "bearish"
+        detail_str = f" [{', '.join(details)}]" if details else ""
+        parts.append(f"{tf} {direction}{detail_str}")
+
+    # Order flow
+    of = breakdown.get("order_flow", 0)
+    if abs(of) > 0:
+        of_parts = []
+        if report.get("premium_pct") and abs(report["premium_pct"]) > 0.05:
+            of_parts.append(f"premium {report['premium_pct']:+.2f}%")
+        if report.get("funding_delta") and abs(report["funding_delta"]) > 0.00005:
+            of_parts.append(f"funding Δ {'neg' if report['funding_delta'] < 0 else 'pos'}")
+        if of_parts:
+            parts.append(" + ".join(of_parts))
+
+    return f"{signal} ({confidence:.2f}): {' + '.join(parts)}"

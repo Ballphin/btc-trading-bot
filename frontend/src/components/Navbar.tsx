@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3, Target } from 'lucide-react';
+import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3, Target, Zap } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: '/backtest', label: 'Backtest', icon: TrendingUp },
   { to: '/backtests', label: 'Backtest History', icon: BarChart3 },
   { to: '/scorecard', label: 'Scorecard', icon: Target },
+  { to: '/pulse', label: 'Pulse', icon: Zap },
   { to: '/history', label: 'History', icon: History },
 ];
 

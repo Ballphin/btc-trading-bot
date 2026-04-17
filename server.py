@@ -26,10 +26,11 @@ import threading
 import time
 import uuid
 import requests
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
 import uvicorn
 import yfinance as yf
 from dotenv import load_dotenv
@@ -3177,6 +3178,831 @@ async def shadow_score(ticker: str):
         "accuracy_pct": round(accuracy, 1) if accuracy is not None else None,
         "decisions": scored[:100],
     }
+
+
+# ── Quant Pulse — Deterministic Short-Term Signal Engine ──────────────
+
+PULSE_DIR = EVAL_RESULTS_DIR / "pulse"
+PULSE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Pipeline locks: cover full read-compute-write cycle per ticker
+_pulse_pipeline_locks: Dict[str, asyncio.Lock] = {}
+
+def _get_pulse_lock(ticker: str) -> asyncio.Lock:
+    if ticker not in _pulse_pipeline_locks:
+        _pulse_pipeline_locks[ticker] = asyncio.Lock()
+    return _pulse_pipeline_locks[ticker]
+
+# Pulse scheduler state (independent from the 4H scheduler).
+# v3 default: 5-minute cadence (see config/pulse_scoring.yaml).
+_PULSE_INTERVAL_MINUTES = 5
+_PULSE_STATE_FILE = EVAL_RESULTS_DIR / ".pulse_scheduler_state.json"
+
+def _load_pulse_scheduler_state() -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "enabled": False,
+        "task": None,
+        "last_run": None,
+        "last_status": None,
+        "interval_minutes": _PULSE_INTERVAL_MINUTES,
+        "tickers": ["BTC-USD"],
+    }
+    try:
+        if _PULSE_STATE_FILE.exists():
+            saved = json.loads(_PULSE_STATE_FILE.read_text())
+            defaults["enabled"] = saved.get("enabled", False)
+            defaults["last_run"] = saved.get("last_run")
+            defaults["last_status"] = saved.get("last_status")
+            defaults["tickers"] = saved.get("tickers", ["BTC-USD"])
+            defaults["interval_minutes"] = saved.get("interval_minutes", _PULSE_INTERVAL_MINUTES)
+    except Exception:
+        pass
+    return defaults
+
+def _save_pulse_scheduler_state():
+    try:
+        _PULSE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PULSE_STATE_FILE.write_text(json.dumps({
+            "enabled": _pulse_state.get("enabled", False),
+            "last_run": _pulse_state.get("last_run"),
+            "last_status": _pulse_state.get("last_status"),
+            "tickers": _pulse_state.get("tickers", ["BTC-USD"]),
+            "interval_minutes": _pulse_state.get("interval_minutes", _PULSE_INTERVAL_MINUTES),
+        }, indent=2))
+    except Exception as e:
+        logger.warning(f"Failed to persist pulse scheduler state: {e}")
+
+_pulse_state: Dict[str, Any] = _load_pulse_scheduler_state()
+
+
+def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
+    """Execute a single pulse cycle: build report → score → return v3 entry.
+
+    v3 pipeline:
+        1. build_pulse_report (with partial_bar_flags)
+        2. load TSMOM cache (refreshed separately on 1h cadence)
+        3. detect regime from 1h history (cached)
+        4. fetch book imbalance + liq cluster (optional, best-effort)
+        5. look up previous signal for persistence multiplier
+        6. score_pulse with all v3 inputs
+
+    NOT async — runs synchronously. Locking is done by the caller.
+    """
+    from tradingagents.agents.quant_pulse_data import build_pulse_report
+    from tradingagents.agents.quant_pulse_engine import score_pulse
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+    from tradingagents.pulse.config import get_config
+    from tradingagents.pulse.tsmom import load_tsmom
+    from tradingagents.pulse.regime import detect_regime
+
+    cfg = get_config()
+    rd = results_dir or str(EVAL_RESULTS_DIR)
+    report = build_pulse_report(ticker, results_dir=rd)
+    base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
+    hl = HyperliquidClient()
+
+    # --- TSMOM (best-effort; None if unavailable) ---------------------
+    tsmom_direction = None
+    tsmom_strength = None
+    tsmom_cached = load_tsmom(ticker, rd)
+    if tsmom_cached is not None and not tsmom_cached.insufficient_history:
+        tsmom_direction = int(tsmom_cached.direction)
+        tsmom_strength = float(tsmom_cached.strength)
+
+    # --- Regime (from 1h history; reuse 1h fetch) --------------------
+    regime_mode = "mixed"
+    regime_snapshot = None
+    try:
+        # Fetch enough 1h history for regime (500 bars is plenty)
+        from datetime import timedelta as _td
+        start_dt = datetime.now(timezone.utc) - _td(hours=720)
+        df_1h = hl.get_ohlcv(
+            base_asset, "1h",
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=(datetime.now(timezone.utc) + _td(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=1800,
+        )
+        if df_1h is not None and len(df_1h) >= 30:
+            regime = detect_regime(df_1h)
+            regime_mode = regime.mode
+            regime_snapshot = regime.to_dict()
+    except Exception as e:
+        logger.warning(f"[Pulse] regime detection failed for {ticker}: {e}")
+
+    # --- Book imbalance (best-effort; None if unavailable) -----------
+    book_imbalance = None
+    try:
+        cache_sec = int(cfg.get("confluence", "book_imbalance", "cache_seconds", default=60))
+        book_imbalance = hl.compute_book_imbalance(base_asset, levels=1, max_age_override=cache_sec)
+    except Exception:
+        book_imbalance = None
+
+    # --- Liq cluster (best-effort; may be None if HL doesn't tag liq) -
+    liq_score = None
+    try:
+        window_min = int(cfg.get("confluence", "liquidation", "window_minutes", default=15))
+        liq_score = hl.liquidation_cluster_score(
+            base_asset, window_minutes=window_min, max_age_override=60,
+        )
+    except Exception:
+        liq_score = None
+
+    # Realized vol windows for liq override (30m recent, 30m prior)
+    rv_recent = None
+    rv_prior = None
+    try:
+        candles_1m = report.get("timeframes", {}).get("1m", {})
+        # We don't have 1m df in the report — fetch ourselves (cached).
+        start_dt = datetime.now(timezone.utc) - timedelta(minutes=70)
+        df_1m = hl.get_ohlcv(
+            base_asset, "1m",
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=(datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=60,
+        )
+        if df_1m is not None and len(df_1m) >= 60:
+            import numpy as _np
+            closes = df_1m["close"].astype(float).values[-60:]
+            log_rets = _np.diff(_np.log(_np.clip(closes, 1e-12, None)))
+            rv_recent = float(_np.std(log_rets[-30:], ddof=1)) if len(log_rets) >= 30 else None
+            rv_prior = float(_np.std(log_rets[:30], ddof=1)) if len(log_rets) >= 30 else None
+    except Exception:
+        pass
+
+    # --- EMA liquidity gate -----------------------------------------
+    ema_liquidity_ok = True
+    try:
+        min_vol = float(cfg.get("confluence", "ema_liquidity_gate", "min_24h_volume_usd", default=5e7))
+        day_vol = float(report.get("day_volume") or 0)
+        if day_vol > 0:
+            ema_liquidity_ok = day_vol >= min_vol
+    except Exception:
+        pass
+
+    # --- Previous signal for persistence multiplier ------------------
+    prev_signal = None
+    try:
+        last = _read_last_pulse_entry(ticker)
+        if last is not None:
+            prev_signal = last.get("signal")
+    except Exception:
+        pass
+
+    # --- Score -------------------------------------------------------
+    result = score_pulse(
+        report,
+        backtest_mode=False,
+        tsmom_direction=tsmom_direction,
+        tsmom_strength=tsmom_strength,
+        regime_mode=regime_mode,
+        liquidation_score=liq_score,
+        realized_vol_recent=rv_recent,
+        realized_vol_prior=rv_prior,
+        book_imbalance=book_imbalance,
+        prev_signal=prev_signal,
+        ema_liquidity_ok=ema_liquidity_ok,
+        cfg=cfg,
+    )
+
+    # v3 pulse entry schema ------------------------------------------
+    atr_1h = (report.get("timeframes") or {}).get("1h", {}).get("atr")
+    pulse_entry = {
+        "ts": report.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "engine_version": cfg.engine_version,
+        "config_hash": cfg.hash_short(),
+        "signal": result["signal"],
+        "confidence": result["confidence"],
+        "normalized_score": result["normalized_score"],
+        "raw_normalized_score": result.get("raw_normalized_score"),
+        "price": report.get("spot_price"),
+        "atr_1h_at_pulse": atr_1h,
+        "partial_bar_flags": report.get("partial_bar_flags", {}),
+        "stop_loss": result.get("stop_loss"),
+        "take_profit": result.get("take_profit"),
+        "hold_minutes": result.get("hold_minutes"),
+        "timeframe_bias": result.get("timeframe_bias"),
+        "funding_rate": report.get("funding_rate"),
+        "premium_pct": report.get("premium_pct"),
+        "reasoning": result.get("reasoning", ""),
+        "breakdown": result.get("breakdown", {}),
+        "volatility_flag": result.get("volatility_flag", False),
+        "signal_threshold": result.get("signal_threshold"),
+        "persistence_mul": result.get("persistence_mul"),
+        "override_reason": result.get("override_reason"),
+        "tsmom_direction": tsmom_direction,
+        "tsmom_strength": tsmom_strength,
+        "tsmom_gated_out": result.get("tsmom_gated_out", False),
+        "regime_mode": regime_mode,
+        "regime_snapshot": regime_snapshot,
+        "book_imbalance": book_imbalance,
+        "liquidation_score": liq_score,
+        "day_volume_usd": report.get("day_volume"),
+        "scored": False,
+    }
+    return pulse_entry
+
+
+def _read_last_pulse_entry(ticker: str) -> Optional[dict]:
+    """Return the most recent pulse entry (or None). Tolerates corrupt lines."""
+    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    if not pulse_path.exists():
+        return None
+    try:
+        last = None
+        with open(pulse_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    last = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        return last
+    except Exception:
+        return None
+
+
+def _append_pulse(ticker: str, entry: dict):
+    """Append a pulse entry to the JSONL file.
+
+    Append is naturally atomic on POSIX for small writes < PIPE_BUF (4 KB).
+    Pulse entries are ~1-2 KB so safe. For multi-line rewrites we use
+    _score_pending_pulses's atomic tmp+rename.
+    """
+    pulse_dir = PULSE_DIR / ticker
+    pulse_dir.mkdir(parents=True, exist_ok=True)
+    pulse_path = pulse_dir / "pulse.jsonl"
+    line = json.dumps(entry, default=str) + "\n"
+    if len(line.encode()) >= 4096:
+        # Unlikely but possible for huge reasoning; use lock-like approach
+        tmp = pulse_path.with_suffix(".jsonl.append.tmp")
+        with open(tmp, "w") as f:
+            f.write(line)
+        # Read-modify-write path as fallback
+        existing = pulse_path.read_text() if pulse_path.exists() else ""
+        tmp.unlink()
+        final_tmp = pulse_path.with_suffix(".jsonl.tmp")
+        final_tmp.write_text(existing + line)
+        os.replace(final_tmp, pulse_path)
+        return
+    with open(pulse_path, "a") as f:
+        f.write(line)
+
+
+def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
+    """Read the last N pulses from JSONL."""
+    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    if not pulse_path.exists():
+        return []
+    entries = []
+    with open(pulse_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return entries[-limit:]
+
+
+async def _tick_ticker(ticker: str, skip_count: dict) -> None:
+    """Run one pulse for one ticker with skip-on-overlap lock semantics."""
+    lock = _get_pulse_lock(ticker)
+    if lock.locked():
+        skip_count["skipped"] = skip_count.get("skipped", 0) + 1
+        logger.warning(
+            f"[Pulse] Skipped {ticker} — previous run still active"
+        )
+        return
+    async with lock:
+        try:
+            entry = await asyncio.get_event_loop().run_in_executor(
+                None, _run_single_pulse, ticker
+            )
+            _append_pulse(ticker, entry)
+            logger.info(
+                f"[Pulse] {ticker}: {entry['signal']} "
+                f"(conf={entry['confidence']:.2f}) "
+                f"TSMOM={entry.get('tsmom_direction')} "
+                f"regime={entry.get('regime_mode')}"
+            )
+            # Fire alerts (best-effort, non-blocking from the run-loop's perspective)
+            try:
+                from tradingagents.pulse.alerts import dispatch_alert_if_eligible
+                await asyncio.get_event_loop().run_in_executor(
+                    None, dispatch_alert_if_eligible, entry, ticker
+                )
+            except Exception as alert_exc:
+                logger.warning(f"[Pulse.alerts] {ticker}: {alert_exc}")
+        except Exception as e:
+            logger.error(f"[Pulse] Error for {ticker}: {e}")
+
+
+async def _pulse_scheduler():
+    """Run pulse analysis at configured interval for all pulse tickers.
+
+    v3: parallel per-ticker via asyncio.gather, per-ticker jitter to spread
+    API load, skip-on-overlap so slow tickers never cause pile-up.
+    """
+    logger.info("[Pulse] Scheduler started (v3: parallel + skip-on-overlap)")
+    skip_count = {"skipped": 0}
+    while _pulse_state["enabled"]:
+        try:
+            interval = _pulse_state.get("interval_minutes", _PULSE_INTERVAL_MINUTES)
+            tickers = _pulse_state.get("tickers", ["BTC-USD"])
+
+            async def _jittered(tkr: str) -> None:
+                offset = (hash(tkr) & 0xFFFF) % max(1, min(15, int(interval * 60 / 10)))
+                if offset > 0:
+                    await asyncio.sleep(offset)
+                await _tick_ticker(tkr, skip_count)
+
+            await asyncio.gather(
+                *(_jittered(t) for t in tickers),
+                return_exceptions=True,
+            )
+
+            _pulse_state["last_run"] = datetime.now(timezone.utc).isoformat()
+            _pulse_state["last_status"] = (
+                f"ok (skipped={skip_count['skipped']})"
+                if skip_count["skipped"] else "ok"
+            )
+            _save_pulse_scheduler_state()
+
+            await asyncio.sleep(interval * 60)
+
+        except asyncio.CancelledError:
+            logger.info("[Pulse] Scheduler cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[Pulse] Scheduler error: {e}")
+            _pulse_state["last_status"] = f"error: {e}"
+            await asyncio.sleep(60)
+
+    logger.info("[Pulse] Scheduler stopped")
+
+
+async def _tsmom_refresh_loop():
+    """Refresh TSMOM cache every hour for all configured tickers.
+
+    Separated from the 5-min pulse scheduler: TSMOM only needs 1h cadence.
+    """
+    from tradingagents.pulse.tsmom import refresh_tsmom
+    from tradingagents.pulse.config import get_config as _get_cfg
+    logger.info("[TSMOM] Refresh loop started")
+    while _pulse_state["enabled"]:
+        try:
+            cfg = _get_cfg()
+            universe = cfg.get("tsmom", "universe", default=[]) or []
+            lookbacks = cfg.get("tsmom", "lookbacks_hours", default=[504, 1512, 6048])
+            target_vol = float(cfg.get("tsmom", "target_annualized_vol", default=0.20))
+
+            for ticker in universe:
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        refresh_tsmom,
+                        ticker, None, tuple(lookbacks), target_vol, 500,
+                        str(EVAL_RESULTS_DIR),
+                    )
+                except Exception as e:
+                    logger.warning(f"[TSMOM] refresh failed for {ticker}: {e}")
+
+            rebalance_min = int(cfg.get("tsmom", "rebalance_minutes", default=60))
+            await asyncio.sleep(rebalance_min * 60)
+        except asyncio.CancelledError:
+            logger.info("[TSMOM] Refresh loop cancelled")
+            break
+        except Exception as e:
+            logger.error(f"[TSMOM] Loop error: {e}")
+            await asyncio.sleep(120)
+
+
+@app.on_event("startup")
+async def _start_pulse_scheduler():
+    if _pulse_state.get("enabled") and not _pulse_state.get("task"):
+        _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
+        logger.info("[Pulse] Auto-restored scheduler after restart")
+        # Also kick off the TSMOM refresh loop — it shares _pulse_state["enabled"]
+        if not _pulse_state.get("tsmom_task"):
+            _pulse_state["tsmom_task"] = asyncio.create_task(_tsmom_refresh_loop())
+            logger.info("[TSMOM] Refresh loop started (1h cadence)")
+
+
+# ── Pulse API Endpoints ──────────────────────────────────────────────
+
+@app.get("/api/pulse/{ticker}")
+async def get_pulses(ticker: str, limit: int = 50):
+    """Return the last N pulse signals for a ticker."""
+    pulses = _read_pulses(ticker.upper(), limit)
+    return {"ticker": ticker.upper(), "pulses": pulses, "count": len(pulses)}
+
+
+@app.get("/api/pulse/latest/{ticker}")
+async def get_latest_pulse(ticker: str):
+    """Return the most recent pulse signal."""
+    pulses = _read_pulses(ticker.upper(), 1)
+    if not pulses:
+        return {"ticker": ticker.upper(), "pulse": None}
+    return {"ticker": ticker.upper(), "pulse": pulses[-1]}
+
+
+@app.post("/api/pulse/run/{ticker}")
+async def run_pulse(ticker: str):
+    """Manually trigger a single pulse analysis."""
+    ticker = ticker.upper()
+    lock = _get_pulse_lock(ticker)
+    async with lock:
+        try:
+            entry = await asyncio.get_event_loop().run_in_executor(
+                None, _run_single_pulse, ticker
+            )
+            _append_pulse(ticker, entry)
+            return {"ticker": ticker, "pulse": entry}
+        except Exception as e:
+            logger.error(f"[Pulse] Manual run failed for {ticker}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/pulse/scorecard/{ticker}")
+async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None):
+    """Return forward-return hit rates + 4-fill-model summaries for scored pulses.
+
+    Query args:
+        engine_version: if provided, only pulses tagged with that engine_version
+            are included. v3 entries have "engine_version"; legacy entries do
+            not. By default we include everything but break out the counts.
+    """
+    ticker = ticker.upper()
+    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    if not pulse_path.exists():
+        return {"ticker": ticker, "total": 0, "scored": 0, "hit_rates": {}}
+
+    all_pulses = _read_pulses(ticker, limit=10000)
+    if engine_version:
+        all_pulses = [
+            p for p in all_pulses if p.get("engine_version") == engine_version
+        ]
+    scored = [p for p in all_pulses if p.get("scored")]
+    total = len(all_pulses)
+    n_scored = len(scored)
+
+    if n_scored == 0:
+        return {
+            "ticker": ticker,
+            "total": total,
+            "scored": 0,
+            "hit_rates": {},
+            "fill_summary": {},
+            "engine_versions": sorted({p.get("engine_version") for p in all_pulses if p.get("engine_version")}),
+        }
+
+    # Hit rates per horizon
+    hit_rates: dict = {}
+    for horizon in ["+5m", "+15m", "+1h"]:
+        key = f"hit_{horizon}"
+        hits = sum(1 for p in scored if p.get(key))
+        hit_rates[horizon] = {
+            "overall": round(hits / n_scored, 4) if n_scored > 0 else 0,
+        }
+        for sig in ["BUY", "SHORT"]:
+            sig_scored = [p for p in scored if p.get("signal") == sig]
+            sig_hits = sum(1 for p in sig_scored if p.get(key))
+            hit_rates[horizon][sig] = (
+                round(sig_hits / len(sig_scored), 4)
+                if sig_scored else 0
+            )
+
+    # Fill-model summary: mean net return per model per horizon (v3 entries only)
+    fill_summary: dict = {}
+    for horizon in ["+5m", "+15m", "+1h"]:
+        fills_key = f"fills_{horizon}"
+        by_model: dict = {"best": [], "realistic": [], "maker_rejected": [], "maker_adverse": []}
+        for p in scored:
+            fills = p.get(fills_key) or {}
+            if not isinstance(fills, dict):
+                continue
+            for m, vals in fills.items():
+                if not isinstance(vals, dict) or m not in by_model:
+                    continue
+                nr = vals.get("net_return")
+                if isinstance(nr, (int, float)):
+                    by_model[m].append(float(nr))
+        fill_summary[horizon] = {
+            m: (
+                {
+                    "count": len(vs),
+                    "mean_net_bps": round(sum(vs) / len(vs) * 10_000, 2) if vs else 0.0,
+                    "win_rate": round(sum(1 for v in vs if v > 0) / len(vs), 4) if vs else 0.0,
+                }
+                if vs else {"count": 0, "mean_net_bps": 0.0, "win_rate": 0.0}
+            )
+            for m, vs in by_model.items()
+        }
+
+    return {
+        "ticker": ticker,
+        "total": total,
+        "scored": n_scored,
+        "hit_rates": hit_rates,
+        "fill_summary": fill_summary,
+        "engine_versions": sorted({p.get("engine_version") for p in all_pulses if p.get("engine_version")}),
+    }
+
+
+@app.get("/api/pulse/scheduler/status")
+async def pulse_scheduler_status():
+    """Return pulse scheduler state."""
+    return {
+        "enabled": _pulse_state.get("enabled", False),
+        "tickers": _pulse_state.get("tickers", ["BTC-USD"]),
+        "interval_minutes": _pulse_state.get("interval_minutes", _PULSE_INTERVAL_MINUTES),
+        "last_run": _pulse_state.get("last_run"),
+        "last_status": _pulse_state.get("last_status"),
+    }
+
+
+@app.post("/api/pulse/scheduler/toggle")
+async def toggle_pulse_scheduler():
+    """Enable or disable the pulse scheduler."""
+    currently_enabled = _pulse_state.get("enabled", False)
+
+    if currently_enabled:
+        _pulse_state["enabled"] = False
+        task = _pulse_state.get("task")
+        if task:
+            task.cancel()
+        _pulse_state["task"] = None
+        tsmom_task = _pulse_state.get("tsmom_task")
+        if tsmom_task:
+            tsmom_task.cancel()
+        _pulse_state["tsmom_task"] = None
+        _save_pulse_scheduler_state()
+        return {"enabled": False, "message": "Pulse scheduler disabled"}
+    else:
+        _pulse_state["enabled"] = True
+        _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
+        _pulse_state["tsmom_task"] = asyncio.create_task(_tsmom_refresh_loop())
+        _save_pulse_scheduler_state()
+        return {"enabled": True, "message": "Pulse scheduler enabled (v3)"}
+
+
+# ── Pulse Scorecard Scoring Job ───────────────────────────────────────
+
+async def _score_pending_pulses():
+    """Score unscored pulses older than 1h against actual forward returns.
+
+    Uses candle OPEN at target timestamp (not close) per debate finding.
+    """
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient, PULSE_CACHE_TTL
+
+    hl = HyperliquidClient()
+    now_utc = datetime.now(timezone.utc)
+    one_hour_ago = now_utc - timedelta(hours=1)
+
+    for ticker_dir in PULSE_DIR.iterdir():
+        if not ticker_dir.is_dir():
+            continue
+        ticker = ticker_dir.name
+        pulse_path = ticker_dir / "pulse.jsonl"
+        if not pulse_path.exists():
+            continue
+
+        base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
+        all_entries = []
+        modified = False
+
+        with open(pulse_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        all_entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        all_entries.append({"_raw": line})
+
+        for entry in all_entries:
+            if entry.get("scored") or entry.get("_raw"):
+                continue
+            if entry.get("signal") == "NEUTRAL":
+                entry["scored"] = True
+                modified = True
+                continue
+
+            ts_str = entry.get("ts")
+            if not ts_str:
+                continue
+            try:
+                pulse_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+
+            if pulse_ts > one_hour_ago:
+                continue  # too recent to score
+
+            entry_price = entry.get("price")
+            if not entry_price or entry_price <= 0:
+                continue
+
+            signal = entry.get("signal")
+            direction = 1 if signal == "BUY" else -1
+
+            # Fetch 1m candles covering [pulse_ts - 1m, pulse_ts + 65m]
+            try:
+                start_str = (pulse_ts - timedelta(minutes=2)).strftime("%Y-%m-%d")
+                end_str = (pulse_ts + timedelta(minutes=70)).strftime("%Y-%m-%d")
+                candles = hl.get_ohlcv(
+                    base_asset, "1m", start=start_str, end=end_str,
+                    max_age_override=3600,
+                )
+            except Exception:
+                continue
+
+            if candles.empty:
+                continue
+
+            # v3 scoring: ATR-sqrt-time thresholds + 4 fill models.
+            from tradingagents.pulse.config import get_config as _get_cfg
+            from tradingagents.pulse.fills import simple_fill_returns
+            cfg = _get_cfg()
+
+            horizons_min = cfg.get("forward_return", "horizons_minutes", default=[5, 15, 60]) or [5, 15, 60]
+            atr_mul = float(cfg.get("forward_return", "atr_multiplier", default=0.5))
+            exec_cost_bps = float(cfg.get("forward_return", "exec_cost_bps", default=5))
+            fallback_bps = cfg.get("forward_return", "fallback_fixed_bps", default=[5, 10, 15]) or [5, 10, 15]
+            atr_at_pulse = entry.get("atr_1h_at_pulse")
+            threshold_source = "atr_sqrt_time" if atr_at_pulse else "fallback"
+            entry["threshold_source"] = threshold_source
+
+            for idx, h_min in enumerate(horizons_min):
+                horizon = f"+{h_min}m" if h_min != 60 else "+1h"
+                target_ts = pulse_ts + timedelta(minutes=int(h_min))
+                mask = candles["timestamp"] >= pd.Timestamp(target_ts.replace(tzinfo=None))
+                if not mask.any():
+                    continue
+                target_candle = candles[mask].iloc[0]
+                fwd_price = float(target_candle["open"])
+
+                # Raw return (direction-signed)
+                raw_return = (fwd_price - entry_price) / entry_price * direction
+
+                # Threshold: ATR-sqrt-time if available, else fallback fixed bps
+                if atr_at_pulse and atr_at_pulse > 0 and entry_price > 0:
+                    thr = atr_mul * float(atr_at_pulse) * math.sqrt(h_min / 60.0) / entry_price
+                else:
+                    fb_bps = fallback_bps[idx] if idx < len(fallback_bps) else fallback_bps[-1]
+                    thr = float(fb_bps) / 10_000.0
+
+                net_return = raw_return - exec_cost_bps / 10_000.0
+                hit = net_return >= thr
+                entry[f"hit_{horizon}"] = bool(hit)
+                entry[f"return_{horizon}"] = round(float(net_return), 6)
+                entry[f"return_raw_{horizon}"] = round(float(raw_return), 6)
+                entry[f"threshold_{horizon}"] = round(float(thr), 6)
+
+                # 4 fill models — compute once per horizon.
+                try:
+                    # Price at +10s and +30s relative to signal (for maker models)
+                    p10_mask = candles["timestamp"] >= pd.Timestamp(
+                        (pulse_ts + timedelta(seconds=10)).replace(tzinfo=None)
+                    )
+                    p30_mask = candles["timestamp"] >= pd.Timestamp(
+                        (pulse_ts + timedelta(seconds=30)).replace(tzinfo=None)
+                    )
+                    p10 = float(candles[p10_mask].iloc[0]["open"]) if p10_mask.any() else None
+                    p30 = float(candles[p30_mask].iloc[0]["open"]) if p30_mask.any() else None
+                    fills = simple_fill_returns(
+                        direction=direction,
+                        entry_price=entry_price,
+                        exit_price=fwd_price,
+                        spread_bps=float(cfg.get("fill_models", "slippage_bps", default=5)) * 0.4,
+                        slippage_bps=float(cfg.get("fill_models", "slippage_bps", default=5)),
+                        price_at_10s=p10,
+                        price_at_30s=p30,
+                        maker_reject_move_bps=float(cfg.get("fill_models", "maker_reject_move_bps", default=100)),
+                        impact_coefficient=float(cfg.get("fill_models", "impact_coefficient", default=10)),
+                    )
+                    fill_key = f"fills_{horizon}"
+                    entry[fill_key] = {
+                        model: {
+                            "gross_return": round(fr.gross_return, 6),
+                            "cost_bps": round(fr.cost_bps, 2),
+                            "net_return": round(fr.net_return, 6),
+                            "notes": fr.notes,
+                        }
+                        for model, fr in fills.items()
+                    }
+                except Exception as _e:
+                    entry[f"fills_{horizon}_error"] = str(_e)[:200]
+
+            entry["scored"] = True
+            entry["scored_at"] = now_utc.isoformat()
+            modified = True
+
+        if modified:
+            # Atomic rewrite: tmp + os.replace (same directory on POSIX = atomic)
+            tmp_path = pulse_path.with_suffix(".jsonl.tmp")
+            with open(tmp_path, "w") as f:
+                for entry in all_entries:
+                    raw = entry.pop("_raw", None)
+                    if raw:
+                        f.write(raw + "\n")
+                    else:
+                        f.write(json.dumps(entry, default=str) + "\n")
+            os.replace(tmp_path, pulse_path)
+
+
+# Register scoring job on startup
+@app.on_event("startup")
+async def _start_pulse_scoring():
+    async def _scoring_loop():
+        while True:
+            try:
+                await _score_pending_pulses()
+            except Exception as e:
+                logger.error(f"[Pulse Scoring] Error: {e}")
+            await asyncio.sleep(900)  # every 15 min
+    asyncio.create_task(_scoring_loop())
+
+
+# ── Pulse Backtest API ────────────────────────────────────────────────
+
+class PulseBacktestRequest(BaseModel):
+    start_date: str
+    end_date: str
+    interval_minutes: int = 15
+    threshold: float = 0.25
+
+
+@app.post("/api/pulse/backtest/{ticker}")
+async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
+    """Start a historical pulse replay backtest. Returns SSE stream."""
+    ticker = ticker.upper()
+
+    # Validate crypto ticker
+    if not ticker.endswith("-USD") and not ticker.endswith("USDT"):
+        raise HTTPException(status_code=400, detail="Pulse backtest is crypto-only (ticker must end with -USD)")
+
+    # Validate dates
+    try:
+        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
+
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date")
+
+    days = (end_dt - start_dt).days
+    if days > 90:
+        raise HTTPException(status_code=400, detail="Max backtest range is 90 days")
+
+    job_id = str(uuid.uuid4())[:8]
+
+    async def run_backtest():
+        try:
+            from tradingagents.backtesting.pulse_backtest import PulseBacktestEngine
+            engine = PulseBacktestEngine(
+                ticker=ticker,
+                start_date=req.start_date,
+                end_date=req.end_date,
+                pulse_interval_minutes=req.interval_minutes,
+                signal_threshold=req.threshold,
+                results_dir=str(EVAL_RESULTS_DIR),
+            )
+
+            yield {
+                "event": "progress",
+                "data": json.dumps({
+                    "phase": "starting",
+                    "message": f"Starting pulse backtest for {ticker} ({req.start_date} to {req.end_date})",
+                }),
+            }
+
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, engine.run)
+
+            yield {
+                "event": "result",
+                "data": json.dumps(result, default=str),
+            }
+            yield {
+                "event": "done",
+                "data": json.dumps({"status": "completed"}),
+            }
+        except Exception as e:
+            logger.error(f"[Pulse Backtest] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(e)}),
+            }
+
+    return EventSourceResponse(run_backtest())
 
 
 # ── Main ──────────────────────────────────────────────────────────────
