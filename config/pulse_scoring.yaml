@@ -46,12 +46,45 @@ tsmom:
 
 # ── Layer 2: Confluence (entry timing) ──────────────────────────────
 confluence:
-  signal_threshold: 0.25
+  # Aggressive defaults: threshold lowered from 0.25 to 0.22 (~12% more fires).
+  signal_threshold: 0.22
   confidence_divisor: 0.5
   persistence:
     same_direction_mul: 1.2
     flip_mul: 0.8
     neutral_prev_mul: 1.0
+
+  # TSMOM AND-gate mode (SHORTs now fire out of the box):
+  #   strict               – current (pre-v3.1) behaviour, counter-trend gated to 0.
+  #   confidence_weighted  – allow counter-trend when confluence is strong AND
+  #                          TSMOM trend is weak. Parabolic moves soft-gated.
+  #   disabled             – no TSMOM gate (dangerous; testing only).
+  tsmom_gate:
+    mode: confidence_weighted
+    counter_trend_confluence_mul: 1.2   # |confluence| must exceed this × threshold
+    weak_trend_strength_threshold: 0.4  # TSMOM strength below this → gate relaxed
+    parabolic_soft_gate_z: 3.0          # magnitude × max(0, 1 - |z_4h|/z)
+
+  # Support/Resistance proximity amplifier (never creates signals alone)
+  sr_proximity:
+    enabled: true
+    window_atr_mul: 0.3                 # aggressive: loose 0.3×ATR trigger window
+    max_factor: 0.15                    # max |contribution| to normalized score
+    cluster_atr_mul: 0.15               # pivot clustering tolerance
+    pivot_left: 3
+    pivot_right: 3
+    book_band_pct: 0.02                 # ±2% of spot
+    min_book_notional_usd: 500000
+    recency_half_life_hours: 24.0
+    liquidity_sweep_filter: true        # drop book levels pierced in current 5m bar
+
+  # Exit rules
+  exits:
+    short_crash_sl_atr_mul: 1.5         # crash-only SL on SHORTs at ANY horizon
+    short_tp_atr_mul: 3.0               # TP only for hold >= 15m
+    buy_sl_atr_mul: 2.0
+    buy_tp_atr_mul: 3.0
+    disable_tp_sl_below_hold_min: 15    # no SL/TP for sub-15m BUYs; SHORT keeps crash-SL
 
   tf_weights:       # baseline (regime "mixed"); per-regime overrides below
     1m: 0.05

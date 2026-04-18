@@ -353,6 +353,104 @@ def _persistence_mul(
 
 # ── Main scoring function ────────────────────────────────────────────
 
+def _score_sr_proximity(
+    spot: Optional[float],
+    support: Optional[float],
+    resistance: Optional[float],
+    atr_1h: Optional[float],
+    confluence_before_sr: float,
+    cfg: PulseConfig,
+) -> tuple:
+    """S/R proximity as a CONFLUENCE AMPLIFIER, not an independent trigger.
+
+    Rule: only amplify signals that already agree with the nearby level.
+      * price near support + confluence bullish   → +max_factor
+      * price near resistance + confluence bearish → -max_factor
+      * anything else                              → 0.0
+
+    Returns (sr_factor, near_side: 'support'|'resistance'|None).
+    """
+    if not cfg.get("confluence", "sr_proximity", "enabled", default=True):
+        return 0.0, None
+    if spot is None or atr_1h is None or atr_1h <= 0:
+        return 0.0, None
+    if abs(confluence_before_sr) < 0.05:
+        # S/R may never create a signal from nothing.
+        return 0.0, None
+
+    window_mul = float(cfg.get("confluence", "sr_proximity", "window_atr_mul", default=0.3))
+    max_factor = float(cfg.get("confluence", "sr_proximity", "max_factor", default=0.15))
+    window = window_mul * atr_1h
+
+    if support is not None and abs(spot - support) <= window and confluence_before_sr > 0:
+        return +max_factor, "support"
+    if resistance is not None and abs(spot - resistance) <= window and confluence_before_sr < 0:
+        return -max_factor, "resistance"
+    return 0.0, None
+
+
+def _apply_tsmom_gate(
+    normalized: float,
+    signal_threshold: float,
+    tsmom_direction: Optional[int],
+    tsmom_strength: Optional[float],
+    z_4h_return: Optional[float],
+    cfg: PulseConfig,
+) -> tuple:
+    """Apply the TSMOM AND-gate according to the configured mode.
+
+    Returns (adjusted_normalized, gated_out: bool, reject_reason: Optional[str]).
+    """
+    if tsmom_direction is None:
+        return normalized, False, None
+
+    mode = str(cfg.get("confluence", "tsmom_gate", "mode", default="confidence_weighted"))
+    if mode == "disabled":
+        return normalized, False, None
+
+    # Direction implied by the confluence score
+    cand_dir = (
+        1 if normalized > signal_threshold
+        else -1 if normalized < -signal_threshold
+        else 0
+    )
+
+    # TSMOM says "nothing" (direction=0) → always neutralize
+    if tsmom_direction == 0:
+        if cand_dir != 0:
+            return 0.0, True, "tsmom_flat"
+        return normalized, False, None
+
+    # Agreement → pass through
+    if cand_dir == 0 or cand_dir == tsmom_direction:
+        return normalized, False, None
+
+    # Disagreement: behaviour depends on mode
+    if mode == "strict":
+        return 0.0, True, "strict_disagree"
+
+    # confidence_weighted
+    mul = float(cfg.get("confluence", "tsmom_gate", "counter_trend_confluence_mul", default=1.2))
+    weak_thr = float(
+        cfg.get("confluence", "tsmom_gate", "weak_trend_strength_threshold", default=0.4)
+    )
+    z_soft = float(
+        cfg.get("confluence", "tsmom_gate", "parabolic_soft_gate_z", default=3.0)
+    )
+
+    strong_counter = abs(normalized) >= mul * signal_threshold
+    weak_trend = (tsmom_strength is None) or (abs(tsmom_strength) < weak_thr)
+    if not (strong_counter and weak_trend):
+        return 0.0, True, "counter_trend_insufficient"
+
+    # Parabolic soft-gate: magnitude × max(0, 1 - |z_4h| / z_soft)
+    z_abs = abs(z_4h_return) if z_4h_return is not None else 0.0
+    parabolic_mul = max(0.0, 1.0 - z_abs / max(z_soft, 1e-6))
+    if parabolic_mul <= 0.0:
+        return 0.0, True, "parabolic_soft_gate"
+    return normalized * parabolic_mul, False, None
+
+
 def score_pulse(
     report: dict,
     signal_threshold: Optional[float] = None,
@@ -369,6 +467,8 @@ def score_pulse(
     book_imbalance: Optional[float] = None,
     prev_signal: Optional[str] = None,
     ema_liquidity_ok: bool = True,
+    z_4h_return: Optional[float] = None,
+    sr_source: str = "none",
     cfg: Optional[PulseConfig] = None,
 ) -> dict:
     """Score a pulse report → {signal, confidence, breakdown, ...}.
@@ -525,18 +625,20 @@ def score_pulse(
         normalized = max(-1.0, min(1.0, normalized + 0.25 * liq_dir_score))
         override_reason = override_reason or "liquidation_cascade"
 
-    # TSMOM AND-gate --------------------------------------------------
-    tsmom_gated_out = False
-    if tsmom_direction is not None:
-        if tsmom_direction == 0:
-            tsmom_gated_out = True
-            normalized = 0.0
-        else:
-            cand_dir = 1 if normalized > signal_threshold else -1 if normalized < -signal_threshold else 0
-            if cand_dir != 0 and cand_dir != tsmom_direction:
-                # Confluence disagrees with TSMOM → no trade
-                tsmom_gated_out = True
-                normalized = 0.0
+    # S/R proximity amplifier (confluence-sign-dependent; never creates signals)
+    atr_1h_for_sr = (timeframes.get("1h") or {}).get("atr")
+    sr_factor, sr_near_side = _score_sr_proximity(
+        spot_price, support, resistance, atr_1h_for_sr, normalized, cfg,
+    )
+    if sr_factor != 0.0:
+        normalized = max(-1.0, min(1.0, normalized + sr_factor))
+        breakdown["sr_proximity"] = round(sr_factor, 4)
+
+    # TSMOM gate (modes: strict / confidence_weighted / disabled) --
+    normalized, tsmom_gated_out, tsmom_gate_reason = _apply_tsmom_gate(
+        normalized, signal_threshold, tsmom_direction, tsmom_strength,
+        z_4h_return, cfg,
+    )
 
     # Persistence multiplier on confidence ----------------------------
     direction = 1 if normalized > signal_threshold else -1 if normalized < -signal_threshold else 0
@@ -556,24 +658,40 @@ def score_pulse(
     if dominant_tf is None:
         dominant_tf = "15m"
 
-    # SL/TP (informational only in v3) --------------------------------
+    # SL/TP rules (v3.1 aggressive):
+    #   - Crash-only SL on SHORTs at ANY hold horizon (squeeze guardrail).
+    #   - No TP and no SL for BUYs under disable_tp_sl_below_hold_min.
+    #   - SL at 2×ATR / TP at 3×ATR for BUYs at ≥15m holds.
+    hold_minutes = HOLD_MINUTES.get(dominant_tf, 45)
+
     sl_tf_idx = max(_TF_ORDER.index(dominant_tf), _TF_ORDER.index("15m"))
     sl_tf = _TF_ORDER[sl_tf_idx]
     sl_atr = None
     if sl_tf in timeframes:
         sl_atr = timeframes[sl_tf].get("atr")
 
+    disable_below = int(
+        cfg.get("confluence", "exits", "disable_tp_sl_below_hold_min", default=15)
+    )
+    buy_sl_mul = float(cfg.get("confluence", "exits", "buy_sl_atr_mul", default=2.0))
+    buy_tp_mul = float(cfg.get("confluence", "exits", "buy_tp_atr_mul", default=3.0))
+    short_crash_mul = float(
+        cfg.get("confluence", "exits", "short_crash_sl_atr_mul", default=1.5)
+    )
+    short_tp_mul = float(cfg.get("confluence", "exits", "short_tp_atr_mul", default=3.0))
+
     stop_loss = None
     take_profit = None
     if spot_price is not None and sl_atr is not None and sl_atr > 0:
         if signal == "BUY":
-            stop_loss = round(spot_price - 2.0 * sl_atr, 2)
-            take_profit = round(spot_price + 3.0 * sl_atr, 2)
+            if hold_minutes >= disable_below:
+                stop_loss = round(spot_price - buy_sl_mul * sl_atr, 2)
+                take_profit = round(spot_price + buy_tp_mul * sl_atr, 2)
         elif signal == "SHORT":
-            stop_loss = round(spot_price + 2.0 * sl_atr, 2)
-            take_profit = round(spot_price - 3.0 * sl_atr, 2)
-
-    hold_minutes = HOLD_MINUTES.get(dominant_tf, 45)
+            # Crash-only SL at ANY hold horizon
+            stop_loss = round(spot_price + short_crash_mul * sl_atr, 2)
+            if hold_minutes >= disable_below:
+                take_profit = round(spot_price - short_tp_mul * sl_atr, 2)
 
     reasoning = _build_reasoning(
         signal, confidence, breakdown, timeframes, report,
@@ -601,7 +719,14 @@ def score_pulse(
         "tsmom_direction": tsmom_direction,
         "tsmom_strength": tsmom_strength,
         "tsmom_gated_out": tsmom_gated_out,
+        "tsmom_gate_reason": tsmom_gate_reason,
+        "tsmom_gate_mode": str(
+            cfg.get("confluence", "tsmom_gate", "mode", default="confidence_weighted")
+        ),
         "regime_mode": regime_mode,
+        "sr_source": sr_source,
+        "sr_near_side": sr_near_side,
+        "z_4h_return": z_4h_return,
     }
 
 

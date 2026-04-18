@@ -1251,7 +1251,68 @@ async def walk_forward_validate(ticker: str):
 # ── API Endpoints ─────────────────────────────────────────────────────
 
 @app.get("/api/health")
-async def health():
+async def health(tick: int = 0):
+    """Health check + optional self-scheduling pulse tick (free-tier survival).
+
+    Query param ``?tick=1`` turns this endpoint into a "fire pulses if due"
+    trigger. Point an external uptime pinger (UptimeRobot, cron-job.org, etc.)
+    at ``/api/health?tick=1`` every N minutes and you get:
+        1. The Render free-tier idle timer reset (no cold start)
+        2. Pulses fired on cadence, even if the in-process asyncio scheduler
+           died during the 15-min idle window.
+
+    Cadence is taken from the persisted pulse scheduler state; if the pulse
+    scheduler is DISABLED in the UI, no pulses are fired regardless of tick=1.
+    """
+    ran: list = []
+    if tick:
+        try:
+            # Only self-tick when the pulse scheduler is enabled in the UI.
+            if _pulse_state.get("enabled"):
+                interval_min = int(
+                    _pulse_state.get("interval_minutes", _PULSE_INTERVAL_MINUTES)
+                )
+                last_run_iso = _pulse_state.get("last_run")
+                now = datetime.now(timezone.utc)
+                due = True
+                if last_run_iso:
+                    try:
+                        last_run_dt = datetime.fromisoformat(last_run_iso)
+                        if last_run_dt.tzinfo is None:
+                            last_run_dt = last_run_dt.replace(tzinfo=timezone.utc)
+                        due = (now - last_run_dt).total_seconds() >= interval_min * 60 - 5
+                    except Exception:
+                        due = True
+                if due:
+                    tickers = _pulse_state.get("tickers", ["BTC-USD"])
+                    loop = asyncio.get_event_loop()
+                    # Run each ticker in the default threadpool (don't block health check)
+                    async def _fire_one(tkr: str):
+                        return await loop.run_in_executor(None, _run_single_pulse, tkr)
+                    results = await asyncio.gather(
+                        *(_fire_one(t) for t in tickers),
+                        return_exceptions=True,
+                    )
+                    for t, r in zip(tickers, results):
+                        if isinstance(r, Exception):
+                            ran.append({"ticker": t, "ok": False, "error": str(r)})
+                        else:
+                            try:
+                                _append_pulse(t, r)
+                                ran.append({
+                                    "ticker": t, "ok": True,
+                                    "signal": r.get("signal"),
+                                    "confidence": r.get("confidence"),
+                                })
+                            except Exception as e:
+                                ran.append({"ticker": t, "ok": False, "error": str(e)})
+                    _pulse_state["last_run"] = now.isoformat()
+                    _pulse_state["last_status"] = "ok (self-tick)"
+                    _save_pulse_scheduler_state()
+        except Exception as e:
+            logger.warning(f"[Health] Self-tick failed: {e}")
+            ran.append({"ok": False, "error": str(e)})
+
     return {
         "status": "ok",
         "version": "1.0.0",
@@ -1261,7 +1322,18 @@ async def health():
             "history": True,
             "streaming": True,
         },
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pulse": {
+            "enabled": _pulse_state.get("enabled", False),
+            "interval_minutes": _pulse_state.get(
+                "interval_minutes", _PULSE_INTERVAL_MINUTES
+            ),
+            "last_run": _pulse_state.get("last_run"),
+            "last_status": _pulse_state.get("last_status"),
+            "tickers": _pulse_state.get("tickers", []),
+        },
+        "ticked": tick == 1,
+        "ran": ran,
     }
 
 
@@ -3249,11 +3321,13 @@ def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
     NOT async — runs synchronously. Locking is done by the caller.
     """
     from tradingagents.agents.quant_pulse_data import build_pulse_report
-    from tradingagents.agents.quant_pulse_engine import score_pulse
     from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
     from tradingagents.pulse.config import get_config
     from tradingagents.pulse.tsmom import load_tsmom
     from tradingagents.pulse.regime import detect_regime
+    from tradingagents.pulse.support_resistance import compute_support_resistance
+    from tradingagents.pulse.pulse_assembly import PulseInputs, score_pulse_from_inputs
+    import numpy as _np
 
     cfg = get_config()
     rd = results_dir or str(EVAL_RESULTS_DIR)
@@ -3272,6 +3346,7 @@ def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
     # --- Regime (from 1h history; reuse 1h fetch) --------------------
     regime_mode = "mixed"
     regime_snapshot = None
+    df_1h = None   # reused below for S/R + z_4h computation
     try:
         # Fetch enough 1h history for regime (500 bars is plenty)
         from datetime import timedelta as _td
@@ -3348,21 +3423,99 @@ def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
     except Exception:
         pass
 
-    # --- Score -------------------------------------------------------
-    result = score_pulse(
-        report,
+    # --- Support / Resistance (pivots + L2 book clusters) ------------
+    support = None
+    resistance = None
+    sr_source = "none"
+    try:
+        # 1h candles were already fetched for regime; reuse via client cache.
+        # Fetch 4h candles (cheap, cached) for longer-term pivots.
+        atr_1h_for_sr = (report.get("timeframes") or {}).get("1h", {}).get("atr")
+        df_4h_sr = hl.get_ohlcv(
+            base_asset, "4h",
+            start=(datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d"),
+            end=(datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=3600,
+        )
+        # Small 5m slice for the liquidity-sweep spoof filter
+        df_5m_sr = hl.get_ohlcv(
+            base_asset, "5m",
+            start=(datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%d"),
+            end=(datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=60,
+        )
+        # L2 snapshot (best-effort)
+        try:
+            l2_snap = hl.get_l2_snapshot(
+                base_asset,
+                max_age_override=int(cfg.get("confluence", "book_imbalance", "cache_seconds", default=60)),
+            )
+        except Exception:
+            l2_snap = None
+
+        sr = compute_support_resistance(
+            spot_price=report.get("spot_price"),
+            df_1h=df_1h,
+            df_4h=df_4h_sr,
+            atr_1h=atr_1h_for_sr,
+            l2_snapshot=l2_snap,
+            df_5m=df_5m_sr,
+            cluster_atr_mul=float(cfg.get("confluence", "sr_proximity", "cluster_atr_mul", default=0.15)),
+            pivot_left=int(cfg.get("confluence", "sr_proximity", "pivot_left", default=3)),
+            pivot_right=int(cfg.get("confluence", "sr_proximity", "pivot_right", default=3)),
+            band_pct=float(cfg.get("confluence", "sr_proximity", "book_band_pct", default=0.02)),
+            min_book_notional_usd=float(cfg.get("confluence", "sr_proximity", "min_book_notional_usd", default=500_000)),
+            recency_half_life_hours=float(cfg.get("confluence", "sr_proximity", "recency_half_life_hours", default=24.0)),
+        )
+        support = sr.support
+        resistance = sr.resistance
+        sr_source = sr.source
+    except Exception as e:
+        logger.warning(f"[Pulse] S/R compute failed for {ticker}: {e}")
+
+    # --- 4h return z-score (for parabolic soft-gate) -----------------
+    z_4h_return = None
+    try:
+        if df_1h is not None and len(df_1h) >= 100:
+            closes = df_1h["close"].astype(float).values
+            # 4h log return = sum of last 4 hourly log-returns
+            log_rets_1h = _np.diff(_np.log(_np.clip(closes, 1e-12, None)))
+            if len(log_rets_1h) >= 96:
+                ret_4h_series = _np.convolve(log_rets_1h, _np.ones(4), mode="valid")
+                last = float(ret_4h_series[-1])
+                # Reference distribution: last ~90 observations (exclude current)
+                ref = ret_4h_series[-91:-1]
+                sd = float(_np.std(ref, ddof=1)) if len(ref) > 1 else 0.0
+                mu = float(_np.mean(ref)) if len(ref) > 0 else 0.0
+                if sd > 1e-12:
+                    z_4h_return = (last - mu) / sd
+    except Exception:
+        z_4h_return = None
+
+    # --- Score via unified PulseInputs -------------------------------
+    signal_threshold_cfg = float(
+        cfg.get("confluence", "signal_threshold", default=0.22)
+    )
+    inputs = PulseInputs(
+        report=report,
+        signal_threshold=signal_threshold_cfg,
         backtest_mode=False,
         tsmom_direction=tsmom_direction,
         tsmom_strength=tsmom_strength,
         regime_mode=regime_mode,
-        liquidation_score=liq_score,
         realized_vol_recent=rv_recent,
         realized_vol_prior=rv_prior,
+        liquidation_score=liq_score,
         book_imbalance=book_imbalance,
         prev_signal=prev_signal,
         ema_liquidity_ok=ema_liquidity_ok,
+        support=support,
+        resistance=resistance,
+        sr_source=sr_source,
+        z_4h_return=z_4h_return,
         cfg=cfg,
     )
+    result = score_pulse_from_inputs(inputs)
 
     # v3 pulse entry schema ------------------------------------------
     atr_1h = (report.get("timeframes") or {}).get("1h", {}).get("atr")
@@ -3392,11 +3545,19 @@ def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
         "tsmom_direction": tsmom_direction,
         "tsmom_strength": tsmom_strength,
         "tsmom_gated_out": result.get("tsmom_gated_out", False),
+        "tsmom_gate_reason": result.get("tsmom_gate_reason"),
+        "tsmom_gate_mode": result.get("tsmom_gate_mode"),
         "regime_mode": regime_mode,
         "regime_snapshot": regime_snapshot,
         "book_imbalance": book_imbalance,
         "liquidation_score": liq_score,
         "day_volume_usd": report.get("day_volume"),
+        # --- Support / Resistance (v3.1) -----------------------------
+        "support": support,
+        "resistance": resistance,
+        "sr_source": sr_source,
+        "sr_near_side": result.get("sr_near_side"),
+        "z_4h_return": z_4h_return,
         "scored": False,
     }
     return pulse_entry
@@ -3429,6 +3590,10 @@ def _append_pulse(ticker: str, entry: dict):
     Append is naturally atomic on POSIX for small writes < PIPE_BUF (4 KB).
     Pulse entries are ~1-2 KB so safe. For multi-line rewrites we use
     _score_pending_pulses's atomic tmp+rename.
+
+    Free-tier survival: if GITHUB_TOKEN + PULSE_GIST_ID are set, every append
+    triggers an async push to a GitHub Gist (see `tradingagents.pulse.gist_sync`).
+    This is the only way pulse history survives Render free-tier filesystem wipes.
     """
     pulse_dir = PULSE_DIR / ticker
     pulse_dir.mkdir(parents=True, exist_ok=True)
@@ -3448,6 +3613,19 @@ def _append_pulse(ticker: str, entry: dict):
         return
     with open(pulse_path, "a") as f:
         f.write(line)
+
+    # Free-tier persistence: best-effort push to GitHub Gist.
+    # Fire-and-forget in a thread so we never block the caller.
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_enabled():
+            threading.Thread(
+                target=gist_sync.push_ticker,
+                args=(PULSE_DIR, ticker),
+                daemon=True,
+            ).start()
+    except Exception:
+        pass
 
 
 def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
@@ -3582,6 +3760,17 @@ async def _tsmom_refresh_loop():
 
 @app.on_event("startup")
 async def _start_pulse_scheduler():
+    # Free-tier survival: if GitHub Gist persistence is configured, pull
+    # pulse.jsonl files back before anything else so the UI shows history
+    # immediately after a filesystem-wipe restart.
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_enabled():
+            result = gist_sync.pull_all(PULSE_DIR)
+            logger.info(f"[GistSync] Startup pull: {result}")
+    except Exception as e:
+        logger.warning(f"[GistSync] Startup pull failed: {e}")
+
     if _pulse_state.get("enabled") and not _pulse_state.get("task"):
         _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
         logger.info("[Pulse] Auto-restored scheduler after restart")

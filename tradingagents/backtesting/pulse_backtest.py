@@ -33,6 +33,10 @@ from tradingagents.dataflows.hyperliquid_client import (
     HyperliquidClient,
     _INTERVAL_SECONDS,
 )
+from tradingagents.pulse.config import get_config
+from tradingagents.pulse.pulse_assembly import PulseInputs, score_pulse_from_inputs
+from tradingagents.pulse.regime import detect_regime
+from tradingagents.pulse.support_resistance import compute_support_resistance
 
 logger = logging.getLogger(__name__)
 
@@ -188,12 +192,111 @@ class PulseBacktestEngine:
                     prev_funding_rate = report["funding_rate"]
                 continue
 
-            # Score
-            result = score_pulse(
-                report,
+            # Score via unified PulseInputs (v3 parity with live pipeline)
+            cfg = get_config()
+
+            # --- Regime ---
+            regime_mode = "mixed"
+            try:
+                df_1h_slice = candles.get("1h")
+                if df_1h_slice is not None and not df_1h_slice.empty:
+                    mask = df_1h_slice["timestamp"] <= current
+                    hist = df_1h_slice[mask]
+                    if len(hist) >= 30:
+                        regime_mode = detect_regime(hist.tail(500)).mode
+            except Exception:
+                regime_mode = "mixed"
+
+            # --- Realized vol windows (30m recent vs 30m prior, from 1m) ---
+            rv_recent = None
+            rv_prior = None
+            try:
+                df_1m = candles.get("1m")
+                if df_1m is not None and not df_1m.empty:
+                    mask = df_1m["timestamp"] <= current
+                    recent = df_1m[mask].tail(60)
+                    if len(recent) >= 60:
+                        closes = recent["close"].astype(float).values
+                        log_rets = np.diff(np.log(np.clip(closes, 1e-12, None)))
+                        if len(log_rets) >= 30:
+                            rv_recent = float(np.std(log_rets[-30:], ddof=1))
+                            rv_prior = float(np.std(log_rets[:30], ddof=1))
+            except Exception:
+                pass
+
+            # --- Support/Resistance from historical pivots (pivots only; no L2 in backtest) ---
+            support = None
+            resistance = None
+            sr_source = "none"
+            try:
+                df_1h_hist = candles.get("1h")
+                df_4h_hist = candles.get("4h")
+                atr_1h_hist = (report.get("timeframes") or {}).get("1h", {}).get("atr")
+                if df_1h_hist is not None and not df_1h_hist.empty:
+                    mask1 = df_1h_hist["timestamp"] <= current
+                    df_1h_slice = df_1h_hist[mask1].tail(200)
+                else:
+                    df_1h_slice = None
+                if df_4h_hist is not None and not df_4h_hist.empty:
+                    mask4 = df_4h_hist["timestamp"] <= current
+                    df_4h_slice = df_4h_hist[mask4].tail(120)
+                else:
+                    df_4h_slice = None
+                sr = compute_support_resistance(
+                    spot_price=report.get("spot_price"),
+                    df_1h=df_1h_slice,
+                    df_4h=df_4h_slice,
+                    atr_1h=atr_1h_hist,
+                    l2_snapshot=None,     # honest: no historical L2 data
+                    df_5m=None,
+                    now=current,
+                )
+                support = sr.support
+                resistance = sr.resistance
+                sr_source = sr.source
+            except Exception:
+                pass
+
+            # --- 4h return z-score ---
+            z_4h_return = None
+            try:
+                df_1h_hist = candles.get("1h")
+                if df_1h_hist is not None and not df_1h_hist.empty:
+                    mask = df_1h_hist["timestamp"] <= current
+                    closes = df_1h_hist[mask].tail(100)["close"].astype(float).values
+                    if len(closes) >= 100:
+                        log_rets_1h = np.diff(np.log(np.clip(closes, 1e-12, None)))
+                        if len(log_rets_1h) >= 96:
+                            ret_4h_series = np.convolve(log_rets_1h, np.ones(4), mode="valid")
+                            last = float(ret_4h_series[-1])
+                            ref = ret_4h_series[-91:-1]
+                            sd = float(np.std(ref, ddof=1)) if len(ref) > 1 else 0.0
+                            mu = float(np.mean(ref)) if len(ref) > 0 else 0.0
+                            if sd > 1e-12:
+                                z_4h_return = (last - mu) / sd
+            except Exception:
+                pass
+
+            inputs = PulseInputs(
+                report=report,
                 signal_threshold=self.threshold,
                 backtest_mode=True,
+                tsmom_direction=None,      # honest: no historical TSMOM reconstruction yet
+                tsmom_strength=None,
+                regime_mode=regime_mode,
+                realized_vol_recent=rv_recent,
+                realized_vol_prior=rv_prior,
+                liquidation_score=None,    # no historical liq cluster data
+                book_imbalance=None,       # no historical L2 data
+                prev_signal=last_signal_direction,
+                ema_liquidity_ok=True,
+                support=support,
+                resistance=resistance,
+                sr_source=sr_source,
+                z_4h_return=z_4h_return,
+                cfg=cfg,
             )
+            result = score_pulse_from_inputs(inputs)
 
             if report.get("funding_rate") is not None:
                 prev_funding_rate = report["funding_rate"]

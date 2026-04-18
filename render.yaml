@@ -1,0 +1,49 @@
+services:
+  # ── Backend: FastAPI + Pulse engine ────────────────────────────────
+  - type: web
+    name: tradingagents-api
+    runtime: python
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TRADINGAGENTS_RESULTS_DIR
+        value: /opt/render/project/src/eval_results
+      # Free-tier persistence (GitHub Gist). See RENDER_FREE_TIER.md.
+      - key: GITHUB_TOKEN
+        sync: false        # set manually in dashboard; DO NOT commit
+      - key: PULSE_GIST_ID
+        sync: false
+      # Optional LLM keys — only if you use the analyst graph
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Optional alert channels
+      - key: PULSE_DISCORD_WEBHOOK_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+  # ── Frontend: Vite + React static site ─────────────────────────────
+  - type: web
+    name: tradingagents-frontend
+    runtime: static
+    plan: free
+    branch: main
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        sync: false        # set to https://tradingagents-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

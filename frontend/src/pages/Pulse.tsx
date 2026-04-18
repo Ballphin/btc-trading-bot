@@ -44,7 +44,15 @@ interface PulseEntry {
   tsmom_direction?: number | null;
   tsmom_strength?: number | null;
   tsmom_gated_out?: boolean;
+  tsmom_gate_reason?: string | null;
+  tsmom_gate_mode?: string | null;
   regime_mode?: string;
+  // S/R (v3.1)
+  support?: number | null;
+  resistance?: number | null;
+  sr_source?: 'pivot' | 'book' | 'both' | 'none';
+  sr_near_side?: 'support' | 'resistance' | null;
+  z_4h_return?: number | null;
   regime_snapshot?: {
     mode: string;
     vol_z_clipped?: number;
@@ -154,27 +162,75 @@ function ConfBar({ value }: { value: number }) {
 
 // ── v3 Status badges (TSMOM, Regime, Override, EngineVersion) ──────
 
-function TsmomBadge({ direction, strength, gated }: {
-  direction?: number | null; strength?: number | null; gated?: boolean;
+function TsmomBadge({ direction, strength, gated, gateReason }: {
+  direction?: number | null; strength?: number | null; gated?: boolean; gateReason?: string | null;
 }) {
   if (direction === null || direction === undefined) {
-    return <span className="text-[10px] text-slate-600 px-1.5 py-0.5 rounded bg-white/5">TSMOM n/a</span>;
+    return <span className="text-[10px] text-slate-600 px-1.5 py-0.5 rounded bg-white/5" title="Trend (1–24h) momentum unavailable — insufficient history">Trend n/a</span>;
   }
   const color = direction > 0 ? 'text-emerald-400 bg-emerald-500/10 ring-emerald-500/30'
               : direction < 0 ? 'text-red-400 bg-red-500/10 ring-red-500/30'
               : 'text-slate-400 bg-slate-500/10 ring-slate-500/30';
+  const label = direction > 0 ? 'up' : direction < 0 ? 'down' : 'flat';
   const arrow = direction > 0 ? '↑' : direction < 0 ? '↓' : '·';
   const strPct = strength != null ? ` ${(strength * 100).toFixed(0)}%` : '';
+  const titleText = gated
+    ? `Trend (1–24h) gate blocked this signal: ${gateReason || 'disagreement'}`
+    : 'Trend (1–24h) — Time-Series Momentum. Primary alpha gate: a BUY/SHORT only fires if confluence agrees OR counter-trend confluence is strong enough (confidence_weighted mode).';
   return (
     <span
-      title={gated ? 'TSMOM gated out this signal' : 'Time-Series Momentum layer'}
+      title={titleText}
       className={clsx(
         'inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ring-1 font-semibold',
         color,
         gated && 'line-through opacity-60',
       )}
     >
-      <Activity className="w-2.5 h-2.5" /> TSMOM {arrow}{strPct}
+      <Activity className="w-2.5 h-2.5" /> Trend {arrow} {label}{strPct}
+    </span>
+  );
+}
+
+function HorizonBadge({ holdMinutes }: { holdMinutes?: number }) {
+  if (holdMinutes == null) return null;
+  const label = holdMinutes < 60
+    ? `${holdMinutes}m`
+    : holdMinutes < 1440
+      ? `${Math.round(holdMinutes / 60)}h`
+      : `${Math.round(holdMinutes / 1440)}d`;
+  return (
+    <span
+      title={`Short-term hold: ~${label}. Pulse signals are intraday; horizons span 5 min to 8 h.`}
+      className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 ring-1 ring-sky-500/30 font-semibold"
+    >
+      ⏱ {label}
+    </span>
+  );
+}
+
+function SRChip({ support, resistance, source, nearSide }: {
+  support?: number | null;
+  resistance?: number | null;
+  source?: string;
+  nearSide?: 'support' | 'resistance' | null;
+}) {
+  if ((support == null && resistance == null) || source === 'none') return null;
+  const fmt = (v: number | null | undefined) =>
+    v == null ? '—' : v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : v.toFixed(2);
+  const srcLabel = source === 'both' ? 'pivot+book' : source;
+  return (
+    <span
+      title={`S/R source: ${srcLabel}. Price counts as "near a level" within 0.3 × ATR.${nearSide ? ` Currently near ${nearSide}.` : ''}`}
+      className="inline-flex items-center gap-1.5 text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-300 ring-1 ring-white/10 font-mono"
+    >
+      📍
+      <span className={clsx('text-red-400', nearSide === 'support' && 'font-bold ring-1 ring-red-500/40 px-1 rounded')}>
+        S {fmt(support)}
+      </span>
+      <span className="text-slate-600">/</span>
+      <span className={clsx('text-emerald-400', nearSide === 'resistance' && 'font-bold ring-1 ring-emerald-500/40 px-1 rounded')}>
+        R {fmt(resistance)}
+      </span>
     </span>
   );
 }
@@ -397,7 +453,7 @@ export default function Pulse() {
           </div>
           <div>
             <h1 className="text-xl font-bold text-white">Quant Pulse</h1>
-            <p className="text-xs text-slate-500">Deterministic short-term signal engine</p>
+            <p className="text-xs text-slate-500">Intraday long/short signals — holds range from 5 min to 8 h, anchored to support/resistance.</p>
           </div>
         </div>
 
@@ -456,6 +512,14 @@ export default function Pulse() {
                   direction={latestPulse.tsmom_direction}
                   strength={latestPulse.tsmom_strength}
                   gated={latestPulse.tsmom_gated_out}
+                  gateReason={latestPulse.tsmom_gate_reason}
+                />
+                <HorizonBadge holdMinutes={latestPulse.hold_minutes} />
+                <SRChip
+                  support={latestPulse.support}
+                  resistance={latestPulse.resistance}
+                  source={latestPulse.sr_source}
+                  nearSide={latestPulse.sr_near_side}
                 />
                 <RegimeBadge mode={latestPulse.regime_mode} />
                 <OverrideBadge reason={latestPulse.override_reason} />
@@ -584,6 +648,14 @@ export default function Pulse() {
                   direction={p.tsmom_direction}
                   strength={p.tsmom_strength}
                   gated={p.tsmom_gated_out}
+                  gateReason={p.tsmom_gate_reason}
+                />
+                <HorizonBadge holdMinutes={p.hold_minutes} />
+                <SRChip
+                  support={p.support}
+                  resistance={p.resistance}
+                  source={p.sr_source}
+                  nearSide={p.sr_near_side}
                 />
                 <RegimeBadge mode={p.regime_mode} />
                 <OverrideBadge reason={p.override_reason} />
