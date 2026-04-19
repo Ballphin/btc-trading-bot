@@ -152,3 +152,99 @@ def push_ticker(pulse_dir: Path, ticker: str) -> bool:
 def is_enabled() -> bool:
     """Public helper for startup logs."""
     return _enabled()
+
+
+# ── Shadow decisions sync (analysis-based backtests) ──────────────────
+# Mirrors the pulse pull/push pair but uses a `shadow_<TICKER>.jsonl`
+# filename prefix inside the same gist so pulse and shadow don't collide.
+
+def _shadow_filename_for(ticker: str) -> str:
+    return f"shadow_{ticker.replace('/', '_')}.jsonl"
+
+
+def pull_shadow_all(shadow_root: Path) -> dict:
+    """Download every `shadow_*.jsonl` from the gist into
+    ``shadow_root/<ticker>/decisions.jsonl``.
+    """
+    if not _enabled():
+        return {"pulled": [], "skipped": True}
+    try:
+        import requests
+    except ImportError:
+        return {"pulled": [], "skipped": True}
+
+    gist_id = os.environ["PULSE_GIST_ID"]
+    try:
+        r = requests.get(f"{_GIST_API}/{gist_id}", headers=_headers(), timeout=15)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.warning(f"[GistSync] Shadow pull failed: {e}")
+        return {"pulled": [], "skipped": False, "error": str(e)}
+
+    pulled = []
+    for filename, file_meta in (data.get("files") or {}).items():
+        if not filename.startswith("shadow_") or not filename.endswith(".jsonl"):
+            continue
+        ticker = filename[len("shadow_"):-len(".jsonl")]
+        content = file_meta.get("content")
+        if file_meta.get("truncated") and file_meta.get("raw_url"):
+            try:
+                rr = requests.get(file_meta["raw_url"], headers=_headers(), timeout=30)
+                rr.raise_for_status()
+                content = rr.text
+            except Exception as e:
+                logger.warning(f"[GistSync] Shadow raw fetch failed for {filename}: {e}")
+                continue
+        if content is None:
+            continue
+
+        dest = shadow_root / ticker / "decisions.jsonl"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and dest.stat().st_size >= len(content.encode("utf-8")):
+            continue
+        dest.write_text(content)
+        pulled.append(ticker)
+
+    logger.info(f"[GistSync] Shadow pulled {len(pulled)} ticker(s): {pulled}")
+    return {"pulled": pulled, "skipped": False}
+
+
+def push_shadow(shadow_root: Path, ticker: str) -> bool:
+    """Upload ``shadow_root/<ticker>/decisions.jsonl`` to the gist."""
+    if not _enabled():
+        return False
+    try:
+        import requests
+    except ImportError:
+        return False
+
+    path = shadow_root / ticker / "decisions.jsonl"
+    if not path.exists():
+        return False
+
+    try:
+        text = path.read_text()
+        max_bytes = 900_000
+        if len(text.encode("utf-8")) > max_bytes:
+            lines = text.splitlines()[-5000:]
+            text = "\n".join(lines) + "\n"
+    except Exception as e:
+        logger.warning(f"[GistSync] Shadow read {path} failed: {e}")
+        return False
+
+    gist_id = os.environ["PULSE_GIST_ID"]
+    filename = _shadow_filename_for(ticker)
+    payload = {"files": {filename: {"content": text}}}
+    try:
+        r = requests.patch(
+            f"{_GIST_API}/{gist_id}",
+            headers=_headers(),
+            json=payload,
+            timeout=15,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning(f"[GistSync] Shadow push {filename} failed: {e}")
+        return False

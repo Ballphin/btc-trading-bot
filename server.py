@@ -853,6 +853,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 }
                 with open(_ens_shadow_dir / "decisions.jsonl", "a") as _sf:
                     _sf.write(json.dumps(_ens_shadow_entry, default=str) + "\n")
+                _push_shadow_async(ticker)
             except Exception as _shadow_err:
                 print(f"[Analysis {job_id}] Ensemble shadow record failed (non-fatal): {_shadow_err}")
 
@@ -1168,6 +1169,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             }
             with open(shadow_dir / "decisions.jsonl", "a") as _sf:
                 _sf.write(json.dumps(shadow_entry, default=str) + "\n")
+            _push_shadow_async(ticker)
         except Exception as _shadow_err:
             print(f"[Analysis {job_id}] Shadow record failed (non-fatal): {_shadow_err}")
 
@@ -3108,6 +3110,24 @@ async def get_backtest_result(job_id: str):
 SHADOW_DIR = EVAL_RESULTS_DIR / "shadow"
 
 
+def _push_shadow_async(ticker: str) -> None:
+    """Best-effort fire-and-forget push of shadow decisions to GitHub Gist.
+
+    Free-tier survival for analysis-based backtests — mirrors the pulse
+    gist sync path. No-op when GITHUB_TOKEN / PULSE_GIST_ID aren't set.
+    """
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_enabled():
+            threading.Thread(
+                target=gist_sync.push_shadow,
+                args=(SHADOW_DIR, ticker),
+                daemon=True,
+            ).start()
+    except Exception as _e:
+        print(f"[GistSync] Shadow push dispatch failed (non-fatal): {_e}")
+
+
 class ShadowDecision(BaseModel):
     ticker: str
     date: str  # yyyy-mm-dd
@@ -3144,6 +3164,7 @@ async def shadow_record(decision: ShadowDecision):
     log_file = ticker_dir / "decisions.jsonl"
     with open(log_file, "a") as f:
         f.write(json.dumps(entry, default=str) + "\n")
+    _push_shadow_async(ticker)
 
     return {"status": "recorded", "ticker": ticker, "date": decision.date, "signal": entry["signal"]}
 
@@ -3761,6 +3782,8 @@ async def _start_pulse_scheduler():
         if gist_sync.is_enabled():
             result = gist_sync.pull_all(PULSE_DIR)
             logger.info(f"[GistSync] Startup pull: {result}")
+            shadow_result = gist_sync.pull_shadow_all(SHADOW_DIR)
+            logger.info(f"[GistSync] Shadow startup pull: {shadow_result}")
     except Exception as e:
         logger.warning(f"[GistSync] Startup pull failed: {e}")
 
