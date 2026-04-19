@@ -615,22 +615,12 @@ export default function Pulse() {
           )}
           {[...pulses].reverse().map((p, i) => {
             const eligible = explainEligible(p);
-            const RowWrap: React.ElementType = eligible ? Link : 'div';
-            const rowProps: Record<string, unknown> = eligible
-              ? {
-                  to: `/pulse/explain/${encodeURIComponent(ticker)}/${encodeURIComponent(p.ts)}`,
-                  title: 'Click for chart + pattern explanation',
-                }
-              : {};
-            return (
-            <RowWrap
-              key={i}
-              {...rowProps}
-              className={clsx(
-                'block rounded-xl bg-navy-900/50 border border-white/5 px-4 py-3 transition-colors',
-                eligible && 'hover:border-accent-teal/30 hover:bg-navy-900/70 cursor-pointer',
-              )}
-            >
+            const rowClass = clsx(
+              'block rounded-xl bg-navy-900/50 border border-white/5 px-4 py-3 transition-colors',
+              eligible && 'hover:border-accent-teal/30 hover:bg-navy-900/70 cursor-pointer',
+            );
+            const explainHref = `/pulse/explain/${encodeURIComponent(ticker)}/${encodeURIComponent(p.ts)}`;
+            const inner = (<>
               <div className="flex items-center gap-4">
                 <SignalBadge signal={p.signal} />
                 <div className="flex-1 min-w-0">
@@ -689,7 +679,13 @@ export default function Pulse() {
                 <PartialBarBadge flags={p.partial_bar_flags} />
                 <EngineBadge version={p.engine_version} hash={p.config_hash} />
               </div>
-            </RowWrap>
+            </>);
+            return eligible ? (
+              <Link key={i} to={explainHref} className={rowClass} title="Open chart + pattern explanation">
+                {inner}
+              </Link>
+            ) : (
+              <div key={i} className={rowClass}>{inner}</div>
             );
           })}
         </div>

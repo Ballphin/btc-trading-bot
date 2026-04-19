@@ -209,7 +209,13 @@ const TradingViewCandles = forwardRef<TradingViewCandlesHandle, Props>(
       screenshot: () => chartRef.current?.takeScreenshot() ?? null,
     }));
 
-    return <div ref={containerRef} className="w-full rounded-lg overflow-hidden" />;
+    return (
+      <div
+        ref={containerRef}
+        className="w-full rounded-lg overflow-hidden"
+        style={{ height, minHeight: height }}
+      />
+    );
   },
 );
 

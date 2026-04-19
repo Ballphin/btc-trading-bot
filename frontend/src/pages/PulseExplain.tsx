@@ -78,6 +78,22 @@ export default function PulseExplain() {
   const [tf, setTf] = useState<TfKey>('1h');
   const [highlighted, setHighlighted] = useState<string | null>(null);
 
+  // Overlay visibility toggles (persisted in localStorage)
+  const [vis, setVis] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem('pulseExplain.vis');
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return {
+      entry: true, sl: true, tp: true, sr: true,
+      patterns: true, markers: true, volume: true,
+    };
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pulseExplain.vis', JSON.stringify(vis)); } catch { /* ignore */ }
+  }, [vis]);
+  const toggle = (k: string) => setVis((v) => ({ ...v, [k]: !v[k] }));
+
   useEffect(() => {
     let cancelled = false;
     setErr(null);
@@ -85,15 +101,32 @@ export default function PulseExplain() {
     fetchPulseExplain(ticker, ts)
       .then((d) => {
         if (cancelled) return;
+        console.log('[PulseExplain] loaded', {
+          ticker,
+          ts,
+          candleTFs: Object.fromEntries(Object.entries(d.candles).map(([k, v]) => [k, v.length])),
+          patterns: d.chart_patterns.length,
+          bias: d.timeframe_bias,
+        });
         setData(d);
-        // Default TF = one with the most high-scoring patterns, or timeframe_bias, or 1h.
-        if (d.timeframe_bias && (d.candles[d.timeframe_bias] ?? []).length > 0) {
-          setTf(d.timeframe_bias as TfKey);
-        } else if (d.chart_patterns.length > 0) {
-          setTf(d.chart_patterns[0].timeframe as TfKey);
+        // Default TF priority:
+        //  1. timeframe_bias if it has candles
+        //  2. the highest-scoring pattern's TF
+        //  3. first TF (of 1h/4h/15m/5m) that has candles
+        const tryTfs: TfKey[] = [
+          d.timeframe_bias as TfKey,
+          (d.chart_patterns[0]?.timeframe ?? '') as TfKey,
+          '1h', '4h', '15m', '5m',
+        ];
+        for (const t of tryTfs) {
+          if (t && (d.candles[t]?.length ?? 0) > 0) {
+            setTf(t);
+            break;
+          }
         }
       })
       .catch((e) => {
+        console.error('[PulseExplain] fetch failed:', e);
         if (!cancelled) setErr(String(e.message || e));
       });
     return () => {
@@ -121,22 +154,22 @@ export default function PulseExplain() {
     return base;
   }, [tfPatterns, highlighted]);
 
-  // Build TV inputs
+  // Build TV inputs (filtered by visibility toggles)
   const priceLines = useMemo<PriceLineSpec[]>(() => {
     if (!data) return [];
     const lines: PriceLineSpec[] = [];
     const lv = data.levels;
     const entry = data.entry.price;
-    if (entry) lines.push({ price: entry, color: SEMANTIC.entry, lineWidth: 2, lineStyle: LineStyle.Solid, title: `Entry ${entry.toFixed(2)}` });
-    if (lv.stop_loss) lines.push({ price: lv.stop_loss, color: SEMANTIC.sl, lineWidth: 2, lineStyle: LineStyle.Dashed, title: `SL ${lv.stop_loss.toFixed(2)}` });
-    if (lv.take_profit) lines.push({ price: lv.take_profit, color: SEMANTIC.tp, lineWidth: 2, lineStyle: LineStyle.Dashed, title: `TP ${lv.take_profit.toFixed(2)}` });
-    if (lv.support) lines.push({ price: lv.support, color: SEMANTIC.support, lineWidth: 1, lineStyle: LineStyle.Solid, title: `S ${lv.support.toFixed(2)}` });
-    if (lv.resistance) lines.push({ price: lv.resistance, color: SEMANTIC.resistance, lineWidth: 1, lineStyle: LineStyle.Solid, title: `R ${lv.resistance.toFixed(2)}` });
+    if (vis.entry && entry) lines.push({ price: entry, color: SEMANTIC.entry, lineWidth: 2, lineStyle: LineStyle.Solid, title: `Entry ${entry.toFixed(2)}` });
+    if (vis.sl && lv.stop_loss) lines.push({ price: lv.stop_loss, color: SEMANTIC.sl, lineWidth: 2, lineStyle: LineStyle.Dashed, title: `SL ${lv.stop_loss.toFixed(2)}` });
+    if (vis.tp && lv.take_profit) lines.push({ price: lv.take_profit, color: SEMANTIC.tp, lineWidth: 2, lineStyle: LineStyle.Dashed, title: `TP ${lv.take_profit.toFixed(2)}` });
+    if (vis.sr && lv.support) lines.push({ price: lv.support, color: SEMANTIC.support, lineWidth: 1, lineStyle: LineStyle.Solid, title: `S ${lv.support.toFixed(2)}` });
+    if (vis.sr && lv.resistance) lines.push({ price: lv.resistance, color: SEMANTIC.resistance, lineWidth: 1, lineStyle: LineStyle.Solid, title: `R ${lv.resistance.toFixed(2)}` });
     return lines;
-  }, [data]);
+  }, [data, vis]);
 
   const trendLines = useMemo<TrendLineSpec[]>(() => {
-    if (candles.length === 0) return [];
+    if (candles.length === 0 || !vis.patterns) return [];
     const out: TrendLineSpec[] = [];
     for (const p of overlayPatterns) {
       if (p.state === 'invalidated') continue;
@@ -160,29 +193,31 @@ export default function PulseExplain() {
       }
     }
     return out;
-  }, [candles, overlayPatterns, highlighted]);
+  }, [candles, overlayPatterns, highlighted, vis]);
 
   const markers = useMemo<SeriesMarker<UTCTimestamp>[]>(() => {
-    if (candles.length === 0) return [];
+    if (candles.length === 0 || !vis.markers) return [];
     const out: SeriesMarker<UTCTimestamp>[] = [];
-    for (const p of overlayPatterns) {
-      if (p.state === 'invalidated') continue;
-      const dim = highlighted !== null && highlighted !== p.name;
-      const color = resolveColor(p.color_token);
-      for (const a of p.anchors) {
-        const bar = candles[a.idx];
-        if (!bar) continue;
-        out.push({
-          time: bar.ts as UTCTimestamp,
-          position: a.role === 'peak' ? 'aboveBar' : 'belowBar',
-          color: dim ? `${color}66` : color,
-          shape: a.role === 'peak' ? 'arrowDown' : a.role === 'trough' ? 'arrowUp' : 'circle',
-          text: a.label,
-        });
+    if (vis.patterns) {
+      for (const p of overlayPatterns) {
+        if (p.state === 'invalidated') continue;
+        const dim = highlighted !== null && highlighted !== p.name;
+        const color = resolveColor(p.color_token);
+        for (const a of p.anchors) {
+          const bar = candles[a.idx];
+          if (!bar) continue;
+          out.push({
+            time: bar.ts as UTCTimestamp,
+            position: a.role === 'peak' ? 'aboveBar' : 'belowBar',
+            color: dim ? `${color}66` : color,
+            shape: a.role === 'peak' ? 'arrowDown' : a.role === 'trough' ? 'arrowUp' : 'circle',
+            text: a.label,
+          });
+        }
       }
     }
     // Entry marker
-    if (data?.entry.ts) {
+    if (vis.entry && data?.entry.ts) {
       const entryDt = Math.floor(new Date(data.entry.ts).getTime() / 1000);
       const nearest = candles.reduce<CandleBar | null>((acc, c) => {
         if (!acc) return c;
@@ -199,7 +234,7 @@ export default function PulseExplain() {
       }
     }
     return out.sort((a, b) => (a.time as number) - (b.time as number));
-  }, [candles, overlayPatterns, highlighted, data]);
+  }, [candles, overlayPatterns, highlighted, data, vis]);
 
   if (err) {
     return (
@@ -262,8 +297,8 @@ export default function PulseExplain() {
         </div>
       )}
 
-      {/* TF toggle */}
-      <div className="mb-3 flex items-center gap-2">
+      {/* TF + overlay toggles */}
+      <div className="mb-3 flex items-center gap-2 flex-wrap">
         <span className="text-xs text-slate-500">Timeframe:</span>
         {(['5m', '15m', '1h', '4h'] as TfKey[]).map((t) => (
           <button
@@ -286,6 +321,49 @@ export default function PulseExplain() {
             Bias: <span className="text-slate-300">{data.timeframe_bias}</span>
           </span>
         )}
+
+        <span className="mx-2 h-4 w-px bg-white/10" aria-hidden />
+        <span className="text-xs text-slate-500">Show:</span>
+        {([
+          { key: 'entry',    label: 'Entry',      dot: SEMANTIC.entry },
+          { key: 'sl',       label: 'SL',         dot: SEMANTIC.sl },
+          { key: 'tp',       label: 'TP',         dot: SEMANTIC.tp },
+          { key: 'sr',       label: 'S/R',        dot: SEMANTIC.support },
+          { key: 'patterns', label: 'Patterns',   dot: '#94A3B8' },
+          { key: 'markers',  label: 'Markers',    dot: '#94A3B8' },
+          { key: 'volume',   label: 'Volume',     dot: '#94A3B8' },
+        ] as const).map((opt) => {
+          const on = vis[opt.key];
+          return (
+            <button
+              key={opt.key}
+              onClick={() => toggle(opt.key)}
+              aria-pressed={on}
+              className={clsx(
+                'inline-flex items-center gap-1.5 px-2 py-1 text-[11px] rounded border transition-colors',
+                on
+                  ? 'border-white/20 bg-white/5 text-slate-200'
+                  : 'border-white/5 bg-transparent text-slate-500 hover:text-slate-300',
+              )}
+            >
+              <span
+                className={clsx(
+                  'w-3 h-3 rounded-[3px] border flex items-center justify-center',
+                  on ? 'border-transparent' : 'border-slate-500/40',
+                )}
+                style={on ? { backgroundColor: opt.dot } : undefined}
+                aria-hidden
+              >
+                {on && (
+                  <svg viewBox="0 0 10 10" className="w-2 h-2" fill="none" stroke="#0B1220" strokeWidth="2">
+                    <path d="M2 5 L4.2 7 L8 3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
+              {opt.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Main layout: chart + sidebar */}
@@ -302,6 +380,7 @@ export default function PulseExplain() {
               priceLines={priceLines}
               trendLines={trendLines}
               markers={markers}
+              showVolume={vis.volume}
               height={560}
             />
           )}
