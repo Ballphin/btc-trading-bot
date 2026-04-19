@@ -71,29 +71,75 @@ backtest_jobs: Dict[str, Dict[str, Any]] = {}
 # The 4H auto-analysis scheduler. Manually activated from the frontend.
 _SCHEDULER_TICKERS = ["BTC-USD"]  # tickers to run automatically
 _SCHEDULER_INTERVAL_HOURS = 4     # run every 4 hours, synced to UTC boundary
-_DATA_DELAY_SECONDS = 300         # 5-min offset so data APIs have the closed candle
+# Data-ready delay after candle close. 600s (10 min) gives crypto exchanges
+# enough time to publish the closed 4H candle even during volatile regimes
+# where feeds sometimes lag 30–90s (plan Part 2 action #6). Override via env
+# `ANALYSIS_DATA_DELAY_SECONDS` if you need to tune.
+_DATA_DELAY_SECONDS = int(os.environ.get("ANALYSIS_DATA_DELAY_SECONDS", "600"))
 
 _SCHEDULER_STATE_FILE = EVAL_RESULTS_DIR / ".scheduler_state.json"
 _MODEL_CONFIG_FILE = EVAL_RESULTS_DIR / ".model_config.json"
 
+# Boundary-claim lock: the in-process 4H scheduler AND the /api/health self-tick
+# both write to _scheduler_state["last_run"]. Without a lock they can race and
+# launch duplicate analyses for the same boundary (plan Part 2 BLOCKER #1).
+# Acquire, check `last_run == expected_label`, persist the claim, then release —
+# only then launch analysis threads.
+_BOUNDARY_CLAIM_LOCK = threading.Lock()
+
+# Per-ticker in-flight analysis lock (plan Part 2 action #7): refuse to
+# launch a new auto/self-tick analysis for a ticker if one is already
+# running. Prevents thread pile-up when the LLM is slow.
+_ANALYSIS_IN_FLIGHT: set = set()
+_ANALYSIS_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def _try_claim_ticker(ticker: str) -> bool:
+    """Atomically claim a ticker for an auto/self-tick analysis. Returns
+    True if the caller acquired it, False if another thread owns it."""
+    with _ANALYSIS_IN_FLIGHT_LOCK:
+        if ticker in _ANALYSIS_IN_FLIGHT:
+            return False
+        _ANALYSIS_IN_FLIGHT.add(ticker)
+        return True
+
+
+def _release_ticker(ticker: str) -> None:
+    with _ANALYSIS_IN_FLIGHT_LOCK:
+        _ANALYSIS_IN_FLIGHT.discard(ticker)
+
 
 def _load_model_config_into_default() -> None:
-    """Merge persisted model/ensemble settings into DEFAULT_CONFIG (survives restarts)."""
+    """Merge persisted model/ensemble settings into DEFAULT_CONFIG (survives restarts).
+    If the lock is enforced and persisted provider is not allowed, force-coerce
+    to DeepSeek defaults (plan Part 3)."""
     try:
         from tradingagents.default_config import DEFAULT_CONFIG
-        if not _MODEL_CONFIG_FILE.exists():
-            return
-        saved = json.loads(_MODEL_CONFIG_FILE.read_text())
-        keys = (
-            "llm_provider",
-            "deep_think_llm",
-            "quick_think_llm",
-            "enable_ensemble",
-            "ensemble_runs",
-        )
-        for k in keys:
-            if k in saved and saved[k] is not None:
-                DEFAULT_CONFIG[k] = saved[k]
+        if _MODEL_CONFIG_FILE.exists():
+            saved = json.loads(_MODEL_CONFIG_FILE.read_text())
+            keys = (
+                "llm_provider",
+                "deep_think_llm",
+                "quick_think_llm",
+                "enable_ensemble",
+                "ensemble_runs",
+            )
+            for k in keys:
+                if k in saved and saved[k] is not None:
+                    DEFAULT_CONFIG[k] = saved[k]
+
+        # Coerce any non-allowed provider back to DeepSeek defaults when locked
+        lock_on = os.environ.get("DEEPSEEK_LOCK_OVERRIDE", "").strip() not in ("1", "true", "TRUE")
+        if lock_on and DEFAULT_CONFIG.get("llm_provider") not in {"deepseek"}:
+            logger.warning(
+                "[ModelLock] Persisted provider '%s' not allowed; coercing to deepseek",
+                DEFAULT_CONFIG.get("llm_provider"),
+            )
+            DEFAULT_CONFIG["llm_provider"] = "deepseek"
+            DEFAULT_CONFIG["deep_think_llm"] = "deepseek-chat"
+            DEFAULT_CONFIG["quick_think_llm"] = "deepseek-chat"
+            DEFAULT_CONFIG["enable_ensemble"] = False
+
         logger.info(
             "Loaded persisted model config: provider=%s ensemble=%s",
             DEFAULT_CONFIG.get("llm_provider"),
@@ -104,7 +150,8 @@ def _load_model_config_into_default() -> None:
 
 
 def _save_model_config() -> None:
-    """Write user-facing model fields to disk."""
+    """Write user-facing model fields to disk AND mirror to primary gist so
+    the model choice survives Render free-tier restarts."""
     try:
         from tradingagents.default_config import DEFAULT_CONFIG
         _MODEL_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +163,17 @@ def _save_model_config() -> None:
             "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs"),
         }
         _MODEL_CONFIG_FILE.write_text(json.dumps(payload, indent=2))
+        # Fire-and-forget gist mirror
+        try:
+            from tradingagents.pulse import gist_sync
+            if gist_sync.is_enabled():
+                threading.Thread(
+                    target=gist_sync.push_state,
+                    args=("model_config.json", payload),
+                    daemon=True,
+                ).start()
+        except Exception:
+            pass
     except Exception as e:
         logger.warning("Failed to persist model config: %s", e)
 
@@ -142,18 +200,63 @@ def _load_scheduler_state() -> Dict[str, Any]:
     return defaults
 
 def _save_scheduler_state():
-    """Persist scheduler state to disk."""
+    """Persist scheduler state to disk AND mirror to primary gist so the
+    `enabled` flag survives Render free-tier filesystem wipes (plan Part 2)."""
+    payload = {
+        "enabled": _scheduler_state.get("enabled", False),
+        "last_run": _scheduler_state.get("last_run"),
+        "last_status": _scheduler_state.get("last_status"),
+        "tickers": _scheduler_state.get("tickers", _SCHEDULER_TICKERS),
+    }
     try:
         _SCHEDULER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SCHEDULER_STATE_FILE.write_text(json.dumps({
-            "enabled": _scheduler_state.get("enabled", False),
-            "last_run": _scheduler_state.get("last_run"),
-            "last_status": _scheduler_state.get("last_status"),
-            "tickers": _scheduler_state.get("tickers", _SCHEDULER_TICKERS),
-        }, indent=2))
+        _SCHEDULER_STATE_FILE.write_text(json.dumps(payload, indent=2))
     except Exception as e:
         logger.warning(f"Failed to persist scheduler state: {e}")
+    # Fire-and-forget gist mirror — ignore failures
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_enabled():
+            threading.Thread(
+                target=gist_sync.push_state,
+                args=("scheduler_state.json", payload),
+                daemon=True,
+            ).start()
+    except Exception:
+        pass
 
+def _hydrate_state_from_gist() -> None:
+    """On Render free tier, `.scheduler_state.json` and `.model_config.json`
+    live under EVAL_RESULTS_DIR which is wiped on restart. Try pulling them
+    from the primary gist (see gist_sync.pull_state) before we load locally,
+    so the 4H scheduler "enabled" flag and model choice survive restarts
+    without user intervention. Safe no-op when gist isn't configured.
+    """
+    try:
+        from tradingagents.pulse import gist_sync
+        if not gist_sync.is_enabled():
+            return
+        for gist_filename, local_path in (
+            ("scheduler_state.json", _SCHEDULER_STATE_FILE),
+            ("model_config.json", _MODEL_CONFIG_FILE),
+        ):
+            if local_path.exists():
+                continue  # local already present (redeploy with cached disk), keep it
+            remote = gist_sync.pull_state(gist_filename)
+            if remote is None:
+                continue
+            try:
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_text(json.dumps(remote, indent=2))
+                logger.info(f"[GistSync] Hydrated {local_path.name} from gist")
+            except Exception as e:
+                logger.warning(f"[GistSync] Write hydrated {local_path.name} failed: {e}")
+    except Exception as e:
+        logger.warning(f"[GistSync] State hydration failed: {e}")
+
+
+# Hydrate from gist FIRST, then load from (possibly just-written) disk files.
+_hydrate_state_from_gist()
 _scheduler_state: Dict[str, Any] = _load_scheduler_state()
 
 # Restore LLM / ensemble choices after restarts (must run after DEFAULT_CONFIG exists)
@@ -204,6 +307,15 @@ async def _auto_analysis_scheduler():
             logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
             logical_date = boundary_utc.strftime("%Y-%m-%d")
 
+            # Atomic boundary claim: skip this boundary if self-tick already ran it
+            with _BOUNDARY_CLAIM_LOCK:
+                if _scheduler_state.get("last_run") == logical_label:
+                    print(f"[Scheduler] Boundary {logical_label} already claimed (self-tick ran it); skipping", flush=True)
+                    continue
+                _scheduler_state["last_run"] = logical_label
+                _scheduler_state["last_status"] = "ok (claimed by in-process)"
+                _save_scheduler_state()
+
             from tradingagents.default_config import DEFAULT_CONFIG
             from tradingagents.graph.ensemble_orchestrator import should_use_ensemble
             current_provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
@@ -219,6 +331,9 @@ async def _auto_analysis_scheduler():
                 print(f"[Scheduler] Running auto-analysis for {_SCHEDULER_TICKERS} @ {logical_label} (provider: {current_provider})", flush=True)
             
             for ticker in _SCHEDULER_TICKERS:
+                if not _try_claim_ticker(ticker):
+                    print(f"[Scheduler] Skipping {ticker} — analysis already in flight", flush=True)
+                    continue
                 job_id = str(uuid.uuid4())[:8]
                 eq = JobEventQueue()
                 jobs[job_id] = {
@@ -231,15 +346,16 @@ async def _auto_analysis_scheduler():
                     "scheduled": True,
                     "candle_time": logical_label,
                 }
-                thread = threading.Thread(
-                    target=_run_analysis,
-                    args=(job_id, ticker, logical_date, True, logical_label),
-                    daemon=True,
-                )
+                def _run_and_release(jid=job_id, tkr=ticker, ld=logical_date, ll=logical_label):
+                    try:
+                        _run_analysis(jid, tkr, ld, True, ll)
+                    finally:
+                        _release_ticker(tkr)
+                thread = threading.Thread(target=_run_and_release, daemon=True)
                 thread.start()
                 print(f"[Scheduler] Launched job {job_id} for {ticker} @ {logical_label}", flush=True)
 
-            _scheduler_state["last_run"] = logical_label
+            # last_run already set during boundary claim above; just clear errors
             _scheduler_state["last_status"] = "ok"
             _scheduler_state["error_count"] = 0
             _save_scheduler_state()
@@ -387,54 +503,106 @@ class ModelConfigRequest(BaseModel):
     parallel_mode: bool = True
 
 
+# DeepSeek hard-lock: production deployments only allow these providers.
+# Environment escape hatch for local dev: set DEEPSEEK_LOCK_OVERRIDE=1.
+_ALLOWED_PROVIDERS = {"deepseek"}
+_ALLOWED_MODELS = {"deepseek-chat", "deepseek-coder"}
+
+
+def _provider_lock_enforced() -> bool:
+    return os.environ.get("DEEPSEEK_LOCK_OVERRIDE", "").strip() not in ("1", "true", "TRUE")
+
+
 @app.get("/api/model/config")
 async def get_model_config():
-    """Get current model configuration including ensemble settings."""
+    """Get current model configuration. If legacy persisted state has a
+    non-allowed provider, silently coerce to DeepSeek and re-save."""
     from tradingagents.default_config import DEFAULT_CONFIG
-    
+
+    provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
+    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-chat")
+
+    # Legacy coercion: any stale non-deepseek state (from pre-lock deployment
+    # or from gist hydration) gets flipped back to the locked default.
+    if _provider_lock_enforced() and provider not in _ALLOWED_PROVIDERS:
+        logger.info(f"[ModelLock] Coercing legacy provider '{provider}' to 'deepseek'")
+        DEFAULT_CONFIG["llm_provider"] = "deepseek"
+        DEFAULT_CONFIG["deep_think_llm"] = "deepseek-chat"
+        DEFAULT_CONFIG["quick_think_llm"] = "deepseek-chat"
+        DEFAULT_CONFIG["enable_ensemble"] = False
+        _save_model_config()
+        provider, model = "deepseek", "deepseek-chat"
+
     return {
-        "provider": DEFAULT_CONFIG.get("llm_provider", "openrouter"),
-        "model": DEFAULT_CONFIG.get("deep_think_llm", "qwen/qwen3.6-plus"),
-        "ensemble_enabled": DEFAULT_CONFIG.get("enable_ensemble", True),
+        "provider": provider,
+        "model": model,
+        "ensemble_enabled": DEFAULT_CONFIG.get("enable_ensemble", False),
         "ensemble_runs": DEFAULT_CONFIG.get("ensemble_runs", 1),
         "ensemble_providers": DEFAULT_CONFIG.get("ensemble_enabled_providers", ["openrouter"]),
         "single_run_providers": DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"]),
         "fallback_model": DEFAULT_CONFIG.get("openrouter_fallback_model", "anthropic/claude-3.5-sonnet"),
+        "provider_locked": _provider_lock_enforced(),
+        "allowed_providers": sorted(_ALLOWED_PROVIDERS),
+        "allowed_models": sorted(_ALLOWED_MODELS),
     }
 
 
 @app.post("/api/model/config")
 async def set_model_config(req: ModelConfigRequest):
-    """Update model configuration; persisted to disk so it survives server restarts.
+    """Update model configuration; persisted to disk + mirrored to gist.
 
-    Ensemble is auto-disabled for providers in ensemble_disabled_providers.
+    Enforces DeepSeek-only in production (plan Part 3 BLOCKER #3). Returns
+    HTTP 400 with structured error_code if the caller sends a non-allowed
+    provider — frontend shows an actionable message.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
-    
+
+    provider_lc = (req.provider or "").lower()
+    model_lc = (req.model or "").lower()
+
+    if _provider_lock_enforced():
+        if provider_lc not in _ALLOWED_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "PROVIDER_LOCKED",
+                    "message": "This deployment is locked to DeepSeek. Other providers are disabled.",
+                    "allowed_providers": sorted(_ALLOWED_PROVIDERS),
+                    "received": req.provider,
+                },
+            )
+        if model_lc not in _ALLOWED_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "MODEL_NOT_ALLOWED",
+                    "message": f"Model '{req.model}' is not in the allow-list for this deployment.",
+                    "allowed_models": sorted(_ALLOWED_MODELS),
+                    "received": req.model,
+                },
+            )
+
     # Update configuration
-    DEFAULT_CONFIG["llm_provider"] = req.provider
+    DEFAULT_CONFIG["llm_provider"] = provider_lc
     DEFAULT_CONFIG["deep_think_llm"] = req.model
-    # For third-party providers, quick_think must also use the selected model
-    # (the OpenAI default gpt-5-mini would be routed through the provider and billed)
     DEFAULT_CONFIG["quick_think_llm"] = req.model
-    
+
     # Check if provider supports ensemble
     disabled_providers = DEFAULT_CONFIG.get("ensemble_disabled_providers", ["deepseek"])
     enabled_providers = DEFAULT_CONFIG.get("ensemble_enabled_providers", ["openrouter"])
-    
-    if req.provider.lower() in disabled_providers:
+
+    if provider_lc in disabled_providers:
         DEFAULT_CONFIG["enable_ensemble"] = False
         ensemble_active = False
         message = f"Ensemble disabled (not supported for {req.provider})"
-    elif req.provider.lower() in enabled_providers:
+    elif provider_lc in enabled_providers:
         DEFAULT_CONFIG["enable_ensemble"] = req.parallel_mode
         ensemble_active = req.parallel_mode
         message = f"Ensemble {'enabled' if req.parallel_mode else 'disabled'} for {req.provider}"
     else:
-        # Default to user preference
         DEFAULT_CONFIG["enable_ensemble"] = req.parallel_mode
         ensemble_active = req.parallel_mode
-        message = f"Configuration updated"
+        message = "Configuration updated"
 
     _save_model_config()
 
@@ -445,6 +613,45 @@ async def set_model_config(req: ModelConfigRequest):
         "ensemble_active": ensemble_active,
         "message": message,
     }
+
+
+@app.get("/api/model/sanity_check")
+async def model_sanity_check(ticker: str = "BTC-USD"):
+    """Quick verification that the locked DeepSeek provider produces a
+    parseable signal. Plan Part 3 BLOCKER #3 — ships with the lock so
+    users can confirm reasoning quality immediately after deploy.
+
+    Runs ONE quick-path LLM call (no full graph) and returns the raw
+    response. Does NOT write to shadow / pulse / history.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+    provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
+    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-chat")
+    try:
+        # Use the lightweight quant pulse pipeline as a proxy: it's fast,
+        # deterministic, and exercises the LLM path without spawning a full
+        # multi-agent analysis.
+        from tradingagents.agents.quant_pulse_engine import score_pulse
+        sample = score_pulse(ticker.upper())
+        return {
+            "status": "ok",
+            "provider": provider,
+            "model": model,
+            "ticker": ticker.upper(),
+            "signal": sample.get("signal"),
+            "confidence": sample.get("confidence"),
+            "reasoning": (sample.get("reasoning") or "")[:500],
+            "breakdown": sample.get("breakdown"),
+            "provider_locked": _provider_lock_enforced(),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "provider": provider,
+            "model": model,
+            "error": str(e)[:500],
+            "provider_locked": _provider_lock_enforced(),
+        }
 
 
 @app.get("/api/model/providers")
@@ -706,9 +913,18 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 heartbeat_stop.set()
 
             if consensus_result.ensemble_metadata.get("error") == "no_valid_ensemble_results":
-                message = "All ensemble runs failed (provider returned no valid outputs)."
+                # Plan Part 4.1 — surface the real underlying error
+                member_errors = consensus_result.ensemble_metadata.get("member_errors") or []
+                first = member_errors[0] if member_errors else "unknown provider error"
+                runs = consensus_result.ensemble_metadata.get("runs", 0)
+                message = (
+                    f"Analysis failed: {first}. "
+                    f"(All {runs} ensemble run(s) returned unparseable output. "
+                    f"Switch to DeepSeek single-run mode to avoid ensemble parsing issues.)"
+                )
                 jobs[job_id]["status"] = "error"
                 jobs[job_id]["error"] = message
+                jobs[job_id]["member_errors"] = member_errors
                 eq.put({"event": "error", "message": message})
                 return
             
@@ -854,6 +1070,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
                 with open(_ens_shadow_dir / "decisions.jsonl", "a") as _sf:
                     _sf.write(json.dumps(_ens_shadow_entry, default=str) + "\n")
                 _push_shadow_async(ticker)
+                _push_history_async(ticker)
             except Exception as _shadow_err:
                 print(f"[Analysis {job_id}] Ensemble shadow record failed (non-fatal): {_shadow_err}")
 
@@ -1170,6 +1387,7 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
             with open(shadow_dir / "decisions.jsonl", "a") as _sf:
                 _sf.write(json.dumps(shadow_entry, default=str) + "\n")
             _push_shadow_async(ticker)
+            _push_history_async(ticker)
         except Exception as _shadow_err:
             print(f"[Analysis {job_id}] Shadow record failed (non-fatal): {_shadow_err}")
 
@@ -1312,6 +1530,64 @@ async def health(tick: int = 0):
             logger.warning(f"[Health] Self-tick failed: {e}")
             ran.append({"ok": False, "error": str(e)})
 
+    # 4H auto-analysis self-tick (plan Part 2): fire the scheduled analysis
+    # if its previous-boundary window is due and hasn't been claimed yet.
+    # This is the failsafe that survives Render free-tier restarts where
+    # the in-process asyncio loop died.
+    analysis_ran: list = []
+    if tick and _scheduler_state.get("enabled"):
+        try:
+            import pytz
+            now_utc = datetime.now(pytz.utc)
+            next_boundary = _next_4h_utc_boundary()
+            prev_boundary = next_boundary - timedelta(hours=_SCHEDULER_INTERVAL_HOURS)
+            physical_trigger = prev_boundary + timedelta(seconds=_DATA_DELAY_SECONDS)
+            expected_label = prev_boundary.strftime("%Y-%m-%dT%H")
+
+            if now_utc >= physical_trigger:
+                # Atomic boundary claim
+                launched = []
+                with _BOUNDARY_CLAIM_LOCK:
+                    if _scheduler_state.get("last_run") != expected_label:
+                        _scheduler_state["last_run"] = expected_label
+                        _scheduler_state["last_status"] = "ok (self-tick)"
+                        _save_scheduler_state()
+                        claim_won = True
+                    else:
+                        claim_won = False
+
+                if claim_won:
+                    logical_date = prev_boundary.strftime("%Y-%m-%d")
+                    for ticker in _scheduler_state.get("tickers", _SCHEDULER_TICKERS):
+                        if not _try_claim_ticker(ticker):
+                            logger.info(f"[Health] Self-tick skipping {ticker} — analysis already in flight")
+                            continue
+                        job_id = str(uuid.uuid4())[:8]
+                        eq = JobEventQueue()
+                        jobs[job_id] = {
+                            "ticker": ticker,
+                            "date": logical_date,
+                            "status": "running",
+                            "queue": eq,
+                            "result": None,
+                            "error": None,
+                            "scheduled": True,
+                            "candle_time": expected_label,
+                        }
+                        def _run_and_release(jid=job_id, tkr=ticker, ld=logical_date, ll=expected_label):
+                            try:
+                                _run_analysis(jid, tkr, ld, True, ll)
+                            finally:
+                                _release_ticker(tkr)
+                        thread = threading.Thread(target=_run_and_release, daemon=True)
+                        thread.start()
+                        launched.append({"ticker": ticker, "job_id": job_id})
+                        logger.info(f"[Health] Self-tick launched 4H analysis {job_id} for {ticker} @ {expected_label}")
+                    analysis_ran.append({"boundary": expected_label, "launched": launched})
+        except Exception as e:
+            logger.warning(f"[Health] 4H self-tick failed: {e}")
+            analysis_ran.append({"ok": False, "error": str(e)})
+
     return {
         "status": "ok",
         "version": "1.0.0",
@@ -1333,6 +1609,13 @@ async def health(tick: int = 0):
         },
         "ticked": tick == 1,
         "ran": ran,
+        "scheduler": {
+            "enabled": _scheduler_state.get("enabled", False),
+            "last_run": _scheduler_state.get("last_run"),
+            "last_status": _scheduler_state.get("last_status"),
+            "tickers": _scheduler_state.get("tickers", []),
+        },
+        "analysis_ran": analysis_ran,
     }
 
 
@@ -3128,6 +3411,24 @@ def _push_shadow_async(ticker: str) -> None:
         print(f"[GistSync] Shadow push dispatch failed (non-fatal): {_e}")
 
 
+def _push_history_async(ticker: str) -> None:
+    """Best-effort fire-and-forget push of full analysis logs to the
+    HISTORY gist so the History page survives Render free-tier wipes.
+    Uses a separate gist (HISTORY_GIST_ID) to isolate large payloads
+    from the hot-path pulse gist.
+    """
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_history_enabled():
+            threading.Thread(
+                target=gist_sync.push_history,
+                args=(EVAL_RESULTS_DIR, ticker),
+                daemon=True,
+            ).start()
+    except Exception as _e:
+        print(f"[GistSync] History push dispatch failed (non-fatal): {_e}")
+
+
 class ShadowDecision(BaseModel):
     ticker: str
     date: str  # yyyy-mm-dd
@@ -3784,6 +4085,9 @@ async def _start_pulse_scheduler():
             logger.info(f"[GistSync] Startup pull: {result}")
             shadow_result = gist_sync.pull_shadow_all(SHADOW_DIR)
             logger.info(f"[GistSync] Shadow startup pull: {shadow_result}")
+        if gist_sync.is_history_enabled():
+            history_result = gist_sync.pull_history_all(EVAL_RESULTS_DIR)
+            logger.info(f"[GistSync] History startup pull: {history_result}")
     except Exception as e:
         logger.warning(f"[GistSync] Startup pull failed: {e}")
 

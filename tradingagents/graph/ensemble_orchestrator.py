@@ -223,10 +223,14 @@ class EnsembleAnalysisOrchestrator:
                 logger.warning(
                     "Returning empty consensus after retries (rate limits / timeouts / partial failures)"
                 )
+                # Plan Part 4.1: pass through per-member errors so UI can
+                # show the concrete reason instead of a generic message.
+                member_errs = [str(r.error) for r in error_results if r.error]
                 return self.consensus_engine.compute_consensus(
                     [],
                     entry_price=entry_price,
                     ticker=ticker,
+                    member_errors=member_errs,
                 )
             
             # Convert to dict format for consensus engine

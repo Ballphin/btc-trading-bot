@@ -801,15 +801,20 @@ def run_calibration_study(
 
     # Use ALL scored decisions (no truncation — Bayesian shrinkage handles small-n)
 
-    # Deduplicate: keep one decision per day (highest confidence) to preserve independence
-    # when the 4H scheduler produces multiple decisions per day
-    by_day: Dict[str, Any] = {}
+    # Deduplicate per-(ticker, candle_time) — NOT per-day — to preserve each 4H
+    # boundary as an independent observation. Per-day dedup collapsed 6 decisions/day
+    # into 1 and silently biased calibration toward whichever confidence "won" the
+    # day. See plan Part 2 BLOCKER #2.
+    by_key: Dict[str, Any] = {}
     for d in scored:
-        date_key = d.get("date", "").split("T")[0].split(" ")[0]
-        existing = by_day.get(date_key)
+        tkr = d.get("ticker", "")
+        # Prefer candle_time (unique per 4H boundary); fall back to date if missing
+        candle = d.get("candle_time") or d.get("date", "")
+        key = f"{tkr}|{candle}"
+        existing = by_key.get(key)
         if existing is None or d.get("confidence", 0) > existing.get("confidence", 0):
-            by_day[date_key] = d
-    deduped = list(by_day.values())
+            by_key[key] = d
+    deduped = list(by_key.values())
 
     key_7d = f"was_correct_{CALIBRATION_HORIZON_DAYS}d"
 

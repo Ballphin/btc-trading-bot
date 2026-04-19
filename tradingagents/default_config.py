@@ -7,19 +7,22 @@ DEFAULT_CONFIG = {
         os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
         "dataflows/data_cache",
     ),
-    # LLM settings - OpenRouter primary, DeepSeek fallback
-    "llm_provider": "openrouter",
-    "deep_think_llm": "qwen/qwen3.6-plus",
-    "quick_think_llm": "qwen/qwen3.6-plus",
-    "backend_url": "https://openrouter.ai/api/v1",
+    # LLM settings — DeepSeek is the locked default provider (plan Part 3).
+    # Other providers are rejected at the API layer; keep the configs here so
+    # developers can flip locally by editing DEFAULT_CONFIG, but production
+    # deployments enforce DeepSeek via `/api/model/config` validation.
+    "llm_provider": "deepseek",
+    "deep_think_llm": "deepseek-chat",
+    "quick_think_llm": "deepseek-chat",
+    "backend_url": "https://api.deepseek.com",
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
-    "llm_temperature": 0.4,             # 0.0=deterministic, 0.4=modest diversity
-    
+    "llm_temperature": 0.3,             # 0.3 compromise (SQR+WCT) for DeepSeek single-shot
+
     # Ensemble analysis settings
-    "enable_ensemble": True,             # User/UI can disable; OpenRouter-only when on
+    "enable_ensemble": False,            # Default off: DeepSeek is in ensemble_disabled_providers
     "ensemble_runs": 1,                  # Safe default (raise for consensus diversity if needed)
     "ensemble_max_retries": 1,           # Re-run attempts on divergence
     "ensemble_divergence_range_threshold": 0.20,  # HIGH FIX: Range threshold (not std)

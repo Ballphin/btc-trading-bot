@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Cpu, RefreshCw, DollarSign, Save, Check } from 'lucide-react';
+import { Cpu, RefreshCw, DollarSign, Save, Check, Lock } from 'lucide-react';
 import { API_BASE_URL } from '../lib/api';
+
+// Providers locked to DeepSeek in production (backend enforces via /api/model/config).
+// Keep the list in sync with server.py `_ALLOWED_PROVIDERS`.
+const LOCKED_ALLOWED_PROVIDERS = new Set(['deepseek']);
 
 interface ModelConfig {
   provider: 'openrouter' | 'deepseek' | 'openai' | 'anthropic';
@@ -32,34 +36,39 @@ const ENSEMBLE_DISABLED_PROVIDERS = ['deepseek'];
 
 export default function ModelSelectorTicker({ currentTicker, onConfigChange }: ModelSelectorTickerProps) {
   const [config, setConfig] = useState<ModelConfig>({
-    provider: 'openrouter',
-    model: 'google/gemma-4-26b-a4b-it',
-    parallelMode: true,
+    provider: 'deepseek',
+    model: 'deepseek-chat',
+    parallelMode: false,
   });
   const [savedConfig, setSavedConfig] = useState<ModelConfig>(config);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
+  const [lockError, setLockError] = useState<string | null>(null);
 
   const isDirty = config.provider !== savedConfig.provider
     || config.model !== savedConfig.model
     || config.parallelMode !== savedConfig.parallelMode;
 
-  // Load config on mount
+  // Load config on mount. Drop stale localStorage that violates the lock.
   useEffect(() => {
     const saved = localStorage.getItem('modelConfig');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        setConfig(parsed);
-        setSavedConfig(parsed);
-        onConfigChange?.(parsed);
+        if (LOCKED_ALLOWED_PROVIDERS.has((parsed.provider || '').toLowerCase())) {
+          setConfig(parsed);
+          setSavedConfig(parsed);
+          onConfigChange?.(parsed);
+          return;
+        }
+        // Stale non-deepseek state — clear it and re-fetch from backend
+        localStorage.removeItem('modelConfig');
       } catch (e) {
         console.error('Failed to parse saved model config:', e);
       }
-    } else {
-      fetchModelConfig();
     }
+    fetchModelConfig();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -69,9 +78,9 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
       if (res.ok) {
         const data = await res.json();
         const newConfig: ModelConfig = {
-          provider: data.provider || 'openrouter',
-          model: data.model || 'google/gemma-4-26b-a4b-it',
-          parallelMode: data.ensemble_enabled ?? true,
+          provider: data.provider || 'deepseek',
+          model: data.model || 'deepseek-chat',
+          parallelMode: data.ensemble_enabled ?? false,
         };
         setConfig(newConfig);
         setSavedConfig(newConfig);
@@ -83,6 +92,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
 
   const handleSave = useCallback(async () => {
     setIsLoading(true);
+    setLockError(null);
     try {
       const res = await fetch(`${API_BASE_URL}/model/config`, {
         method: 'POST',
@@ -100,10 +110,23 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
         setJustSaved(true);
         setTimeout(() => setJustSaved(false), 2000);
       } else {
-        console.error('Failed to save model config');
+        // Surface structured PROVIDER_LOCKED / MODEL_NOT_ALLOWED errors
+        let msg = 'Failed to save model config';
+        try {
+          const body = await res.json();
+          const detail = body?.detail;
+          if (detail?.error_code === 'PROVIDER_LOCKED' || detail?.error_code === 'MODEL_NOT_ALLOWED') {
+            msg = detail.message || msg;
+          } else if (typeof detail === 'string') {
+            msg = detail;
+          }
+        } catch { /* keep default */ }
+        setLockError(msg);
+        console.error(msg);
       }
     } catch (e) {
       console.error('Failed to save model config:', e);
+      setLockError('Network error while saving model config.');
     } finally {
       setIsLoading(false);
     }
@@ -203,16 +226,22 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
               <label className="text-[10px] text-slate-500 uppercase tracking-wider">
                 Provider
               </label>
-              <select
-                value={config.provider}
-                onChange={(e) => handleProviderChange(e.target.value)}
-                className="bg-navy-900 border border-white/10 rounded px-3 py-1.5 text-xs text-slate-200 focus:border-accent-teal focus:outline-none"
-              >
-                <option value="openrouter">OpenRouter</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
+              <div className="flex items-center gap-2">
+                <select
+                  value={config.provider}
+                  onChange={(e) => handleProviderChange(e.target.value)}
+                  className="bg-navy-900 border border-white/10 rounded px-3 py-1.5 text-xs text-slate-200 focus:border-accent-teal focus:outline-none"
+                >
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openrouter" disabled>OpenRouter (locked)</option>
+                  <option value="openai" disabled>OpenAI (locked)</option>
+                  <option value="anthropic" disabled>Anthropic (locked)</option>
+                </select>
+                <Lock
+                  className="w-3 h-3 text-slate-500"
+                  aria-label="Provider locked for this deployment"
+                />
+              </div>
             </div>
 
             {/* Model Select */}
@@ -298,6 +327,9 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
                   : ' Disabled - single analysis will run.'}
                 {isDirty && (
                   <span className="block mt-1 text-amber-400 font-medium">⚠ Unsaved changes — click Save to apply.</span>
+                )}
+                {lockError && (
+                  <span className="block mt-1 text-red-400 font-medium">🔒 {lockError}</span>
                 )}
               </p>
             </div>

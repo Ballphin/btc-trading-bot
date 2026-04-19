@@ -72,6 +72,7 @@ class ConsensusEngine:
         results: List[Dict],
         entry_price: float,
         ticker: str = "",
+        member_errors: Optional[List[str]] = None,
     ) -> ConsensusResult:
         """Compute consensus from multiple signal results.
         
@@ -103,11 +104,15 @@ class ConsensusEngine:
                     "take_profit_range_pct": 0.0,
                 },
                 ensemble_metadata={
-                    "runs": 0,
+                    "runs": len(member_errors or []),
                     "valid_runs": 0,
                     "retry_count": 0,
                     "entry_price_snapshot": entry_price,
                     "error": "no_valid_ensemble_results",
+                    # Plan Part 4.1 — surface concrete per-member errors so the
+                    # UI can tell the user WHY all runs failed rather than a
+                    # generic "provider returned no valid outputs".
+                    "member_errors": list(member_errors or []),
                     "divergence_metrics": {
                         "confidence_range": 0.0,
                         "signal_agreement": 0.0,
