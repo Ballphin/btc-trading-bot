@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { FileText } from 'lucide-react';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+import { API_BASE_URL } from '../lib/api';
 
 interface BacktestSummary {
   id: string;
@@ -29,7 +30,7 @@ export default function RecentBacktests() {
 
   const fetchRecentBacktests = async () => {
     try {
-      const response = await fetch('/api/backtests/recent');
+      const response = await fetch(`${API_BASE_URL}/backtests/recent`);
       if (response.ok) {
         const data = await response.json();
         setBacktests(data);

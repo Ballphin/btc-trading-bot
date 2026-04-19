@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Cpu, RefreshCw, DollarSign, Save, Check } from 'lucide-react';
+import { API_BASE_URL } from '../lib/api';
 
 interface ModelConfig {
   provider: 'openrouter' | 'deepseek' | 'openai' | 'anthropic';
@@ -64,7 +65,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
 
   const fetchModelConfig = async () => {
     try {
-      const res = await fetch('/api/model/config');
+      const res = await fetch(`${API_BASE_URL}/model/config`);
       if (res.ok) {
         const data = await res.json();
         const newConfig: ModelConfig = {
@@ -83,7 +84,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
   const handleSave = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/model/config', {
+      const res = await fetch(`${API_BASE_URL}/model/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
