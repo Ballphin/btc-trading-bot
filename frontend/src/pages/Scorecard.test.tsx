@@ -132,7 +132,7 @@ function mockFetchResponses(overrides: Record<string, any> = {}) {
     'walk-forward': overrides['walk-forward'] ?? mockWalkForwardData,
   };
 
-  return vi.fn((url: string, opts?: RequestInit) => {
+  return vi.fn((url: string, _opts?: RequestInit) => {
     const urlStr = typeof url === 'string' ? url : '';
     let data: any = {};
 
