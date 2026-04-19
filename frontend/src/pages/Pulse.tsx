@@ -331,6 +331,12 @@ export default function Pulse() {
   // State
   const [ticker, setTicker] = useState('BTC-USD');
   const [pulses, setPulses] = useState<PulseEntry[]>([]);
+  const [highConfOnly, setHighConfOnly] = useState<boolean>(() => {
+    try { return localStorage.getItem('pulse.highConfOnly') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pulse.highConfOnly', highConfOnly ? '1' : '0'); } catch { /* ignore */ }
+  }, [highConfOnly]);
   const [loading, setLoading] = useState(false);
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
@@ -609,11 +615,58 @@ export default function Pulse() {
       {/* Tab Content */}
       {activeTab === 'signals' && (
         <div className="space-y-2">
+          {/* Filter bar */}
+          <div className="flex items-center justify-between gap-3 pb-1">
+            <button
+              onClick={() => setHighConfOnly((v) => !v)}
+              aria-pressed={highConfOnly}
+              className={clsx(
+                'inline-flex items-center gap-2 px-2.5 py-1 text-[11px] rounded border transition-colors',
+                highConfOnly
+                  ? 'border-accent-teal/50 bg-accent-teal/10 text-accent-teal'
+                  : 'border-white/10 bg-navy-900/40 text-slate-400 hover:text-slate-200 hover:border-white/20',
+              )}
+              title="Show only pulses with confidence ≥ 75%"
+            >
+              <span
+                className={clsx(
+                  'w-3 h-3 rounded-[3px] border flex items-center justify-center',
+                  highConfOnly ? 'border-transparent bg-accent-teal' : 'border-slate-500/40',
+                )}
+                aria-hidden
+              >
+                {highConfOnly && (
+                  <svg viewBox="0 0 10 10" className="w-2 h-2" fill="none" stroke="#0B1220" strokeWidth="2">
+                    <path d="M2 5 L4.2 7 L8 3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
+              </span>
+              High-confidence only (≥ 75%)
+            </button>
+            {(() => {
+              const total = pulses.length;
+              const shown = highConfOnly ? pulses.filter((p) => (p.confidence ?? 0) >= 0.75).length : total;
+              return (
+                <span className="text-[11px] text-slate-500">
+                  {highConfOnly ? `${shown} of ${total}` : `${total}`} signal{total === 1 ? '' : 's'}
+                </span>
+              );
+            })()}
+          </div>
+
           {loading && <div className="text-sm text-slate-500 py-4 text-center">Loading...</div>}
           {!loading && pulses.length === 0 && (
             <div className="text-sm text-slate-500 py-12 text-center">No pulse signals yet. Click "Run Now" to generate your first signal.</div>
           )}
-          {[...pulses].reverse().map((p, i) => {
+          {!loading && pulses.length > 0 && highConfOnly && pulses.every((p) => (p.confidence ?? 0) < 0.75) && (
+            <div className="text-sm text-slate-500 py-8 text-center">
+              No signals meet the ≥ 75% confidence threshold. <button onClick={() => setHighConfOnly(false)} className="text-accent-teal hover:underline">Show all</button>.
+            </div>
+          )}
+          {[...pulses]
+            .filter((p) => !highConfOnly || (p.confidence ?? 0) >= 0.75)
+            .reverse()
+            .map((p, i) => {
             const eligible = explainEligible(p);
             const rowClass = clsx(
               'block rounded-xl bg-navy-900/50 border border-white/5 px-4 py-3 transition-colors',
