@@ -62,8 +62,16 @@ class OpenAIClient(BaseLLMClient):
             llm_kwargs["base_url"] = base_url
             if api_key_env:
                 api_key = os.environ.get(api_key_env)
-                if api_key:
-                    llm_kwargs["api_key"] = api_key
+                if not api_key:
+                    # Fail loudly with the actual missing env var name instead
+                    # of letting langchain-openai fall through to OPENAI_API_KEY
+                    # and produce a misleading error.
+                    raise RuntimeError(
+                        f"Missing {api_key_env} environment variable for provider "
+                        f"'{self.provider}'. Set it in your deployment env "
+                        f"(Render: Dashboard → Environment → Add Variable)."
+                    )
+                llm_kwargs["api_key"] = api_key
             else:
                 llm_kwargs["api_key"] = "ollama"
         elif self.base_url:
