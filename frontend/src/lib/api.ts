@@ -293,3 +293,105 @@ export function streamAnalysis(jobId: string, onEvent: (e: SSEEvent) => void): (
     es?.close();
   };
 }
+
+
+// ── Pulse Explain Chart ────────────────────────────────────────────
+
+export interface CandleBar {
+  ts: number;     // unix seconds
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export type PatternState =
+  | 'forming'
+  | 'completed'
+  | 'confirmed'
+  | 'retested'
+  | 'invalidated';
+
+export interface PatternAnchor {
+  label: string;
+  ts: string;       // ISO
+  price: number;
+  role: string;
+  idx: number;
+}
+
+export interface PatternLine {
+  from_idx: number;
+  to_idx: number;
+  role: string;
+  style: 'solid' | 'dashed' | 'dotted';
+  weight: 1 | 2 | 3;
+  color_token: string;
+}
+
+export interface ChartPattern {
+  name: string;
+  display_name: string;
+  bias: 'bullish' | 'bearish' | 'neutral';
+  state: PatternState;
+  fit_score: number;
+  duration_score: number;
+  volume_score: number;
+  combined_score: number;
+  timeframe: string;
+  anchors: PatternAnchor[];
+  lines: PatternLine[];
+  bars_in_pattern: number;
+  regime_aligned: boolean;
+  description: string;
+  color_token: string;
+}
+
+export interface PulseExplain {
+  ticker: string;
+  entry: {
+    ts: string;
+    price: number | null;
+    signal: string;
+    confidence: number;
+    normalized_score: number | null;
+  };
+  levels: {
+    stop_loss: number | null;
+    take_profit: number | null;
+    support: number | null;
+    resistance: number | null;
+    sr_source?: string | null;
+    sr_near_side?: string | null;
+  };
+  tsmom: {
+    direction: number | null;
+    strength: number | null;
+    gated_out: boolean | null;
+  };
+  timeframe_bias: string | null;
+  regime_mode: string | null;
+  breakdown_top3: { key: string; weight: number }[];
+  breakdown: Record<string, number>;
+  candles: Record<string, CandleBar[]>;
+  chart_patterns: ChartPattern[];
+  candlestick_patterns: { tf: string; name: string }[];
+  reasoning_prose: string;
+  detector_errors: { detector: string; tf: string; error: string }[];
+  pattern_detection_degraded: boolean;
+}
+
+export async function fetchPulseExplain(
+  ticker: string,
+  ts: string,
+): Promise<PulseExplain> {
+  const url = `${API_BASE_URL}/pulse/explain/${encodeURIComponent(ticker)}/${encodeURIComponent(ts)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`PulseExplain ${res.status}: ${body || res.statusText}`);
+  }
+  return res.json();
+}
+

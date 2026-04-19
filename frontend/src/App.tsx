@@ -12,6 +12,7 @@ const BacktestResults = lazy(() => import('./pages/BacktestResults'));
 const RecentBacktests = lazy(() => import('./pages/RecentBacktests'));
 const Scorecard = lazy(() => import('./pages/Scorecard'));
 const Pulse = lazy(() => import('./pages/Pulse'));
+const PulseExplain = lazy(() => import('./pages/PulseExplain'));
 
 function PageLoader() {
   return (
@@ -41,6 +42,7 @@ export default function App() {
                 <Route path="/backtests" element={<RecentBacktests />} />
                 <Route path="/scorecard" element={<Scorecard />} />
                 <Route path="/pulse" element={<Pulse />} />
+                <Route path="/pulse/explain/:ticker/:ts" element={<ErrorBoundary><PulseExplain /></ErrorBoundary>} />
               </Routes>
             </Suspense>
           </ErrorBoundary>

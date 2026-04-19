@@ -1,0 +1,76 @@
+# Chart-pattern detector tolerances.
+#
+# All thresholds use the canonical formula:
+#   tolerance = max(k_atr * ATR_ref, k_pct * price)
+# ATR-normalized gives adaptive scaling across vol regimes; percentage floor
+# prevents micro-noise matches in low-vol periods.
+#
+# Edit this file (no code change) to retune detectors after field audit.
+
+global:
+  k_tf_minutes: 60              # min real-time minutes between pivots
+  pivot_prominence_atr: 0.5     # required pivot prominence in ATR multiples
+  atr_period: 14
+  exclude_funding_bars: true    # drop :00 UTC bars from ATR sample (Hyperliquid)
+
+head_and_shoulders:
+  min_bars: 25
+  min_bars_between_shoulders: 6
+  shoulder_diff:
+    k_atr: 0.5
+    k_pct: 0.005
+  head_excess:                  # head must exceed shoulders by at least this
+    k_atr: 1.0
+    k_pct: 0.01
+  neckline_slope_per_bar:
+    k_atr: 0.25
+    k_pct: 0.002
+
+double_top:
+  min_bars: 15
+  peak_diff:
+    k_atr: 0.3
+    k_pct: 0.003
+  trough_depth:                 # how much the trough must drop from peaks
+    k_atr: 1.0
+    k_pct: 0.01
+
+triple_top:
+  min_bars: 25
+  peak_diff:
+    k_atr: 0.4
+    k_pct: 0.004
+  trough_depth:
+    k_atr: 1.0
+    k_pct: 0.01
+
+cup_and_handle:
+  min_bars: 40
+  cup_depth_atr: 2.0
+  handle_max_depth_frac: 0.5    # handle dip <= 50% of cup depth
+  cup_symmetry_tol: 0.35
+
+triangle:
+  min_bars: 20
+  min_pivots_per_side: 2
+  r2_threshold: 0.80            # regression fit quality
+  apex_max_bars_ahead: 30
+
+flag:
+  min_bars: 10
+  pole_height_atr: 3.0
+  channel_slope_opposite: true
+
+pennant:
+  min_bars: 10
+  pole_height_atr: 3.0
+
+wedge:
+  min_bars: 20
+  r2_threshold: 0.80
+  min_slope_diff_atr_per_bar: 0.05
+
+channel:
+  min_bars: 20
+  r2_threshold: 0.85
+  min_pivots_per_side: 2

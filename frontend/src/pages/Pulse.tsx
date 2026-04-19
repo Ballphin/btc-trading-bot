@@ -1,8 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert, ChevronRight } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+
+// Pulse Explain Chart gating: only BUY/SHORT at >= 75% confidence are clickable.
+const EXPLAIN_MIN_CONFIDENCE = 0.75;
+function explainEligible(p: { signal: string; confidence: number }): boolean {
+  return (
+    (p.signal === 'BUY' || p.signal === 'SHORT') &&
+    (p.confidence ?? 0) >= EXPLAIN_MIN_CONFIDENCE
+  );
+}
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -603,8 +613,24 @@ export default function Pulse() {
           {!loading && pulses.length === 0 && (
             <div className="text-sm text-slate-500 py-12 text-center">No pulse signals yet. Click "Run Now" to generate your first signal.</div>
           )}
-          {[...pulses].reverse().map((p, i) => (
-            <div key={i} className="rounded-xl bg-navy-900/50 border border-white/5 px-4 py-3">
+          {[...pulses].reverse().map((p, i) => {
+            const eligible = explainEligible(p);
+            const RowWrap: React.ElementType = eligible ? Link : 'div';
+            const rowProps: Record<string, unknown> = eligible
+              ? {
+                  to: `/pulse/explain/${encodeURIComponent(ticker)}/${encodeURIComponent(p.ts)}`,
+                  title: 'Click for chart + pattern explanation',
+                }
+              : {};
+            return (
+            <RowWrap
+              key={i}
+              {...rowProps}
+              className={clsx(
+                'block rounded-xl bg-navy-900/50 border border-white/5 px-4 py-3 transition-colors',
+                eligible && 'hover:border-accent-teal/30 hover:bg-navy-900/70 cursor-pointer',
+              )}
+            >
               <div className="flex items-center gap-4">
                 <SignalBadge signal={p.signal} />
                 <div className="flex-1 min-w-0">
@@ -621,6 +647,7 @@ export default function Pulse() {
                   </div>
                 </div>
                 <ConfBar value={p.confidence} />
+                {eligible && <ChevronRight className="w-4 h-4 text-slate-500 flex-shrink-0" />}
                 {p.scored && (
                   <div className="flex gap-2 text-xs">
                     {p['hit_+5m'] !== undefined && (
@@ -662,8 +689,9 @@ export default function Pulse() {
                 <PartialBarBadge flags={p.partial_bar_flags} />
                 <EngineBadge version={p.engine_version} hash={p.config_hash} />
               </div>
-            </div>
-          ))}
+            </RowWrap>
+            );
+          })}
         </div>
       )}
 

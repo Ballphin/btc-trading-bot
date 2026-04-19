@@ -3,3 +3,5 @@ fastapi
 uvicorn[standard]
 sse-starlette
 feedparser
+scipy
+pyyaml

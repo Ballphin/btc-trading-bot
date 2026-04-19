@@ -3960,6 +3960,55 @@ def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
     return entries[-limit:]
 
 
+def _read_pulse_at(ticker: str, ts: str) -> Optional[dict]:
+    """Return the pulse entry with exact or nearest-match timestamp.
+
+    Match strategy:
+      1. Exact string match on ``ts`` field.
+      2. Nearest by UTC timestamp within 60 seconds.
+    Returns None if no match.
+    """
+    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    if not pulse_path.exists():
+        return None
+    target_dt: Optional[datetime] = None
+    try:
+        target_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        target_dt = None
+
+    best: Optional[dict] = None
+    best_delta: float = float("inf")
+    with open(pulse_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry_ts = entry.get("ts", "")
+            if entry_ts == ts:
+                return entry
+            if target_dt is not None:
+                try:
+                    e_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+                    if e_dt.tzinfo is None:
+                        e_dt = e_dt.replace(tzinfo=timezone.utc)
+                    delta = abs((e_dt - target_dt).total_seconds())
+                    if delta < best_delta:
+                        best_delta = delta
+                        best = entry
+                except Exception:
+                    continue
+    if best is not None and best_delta <= 60.0:
+        return best
+    return None
+
+
 async def _tick_ticker(ticker: str, skip_count: dict) -> None:
     """Run one pulse for one ticker with skip-on-overlap lock semantics."""
     lock = _get_pulse_lock(ticker)
@@ -4116,6 +4165,184 @@ async def get_latest_pulse(ticker: str):
     if not pulses:
         return {"ticker": ticker.upper(), "pulse": None}
     return {"ticker": ticker.upper(), "pulse": pulses[-1]}
+
+
+# ── Pulse Explain Chart ──────────────────────────────────────────────
+
+# Window sizes (bars) per TF for the explain endpoint. Centered on signal ts
+# with the majority BEFORE the entry so patterns have context; small tail
+# AFTER so state-FSM can see breakouts.
+_EXPLAIN_WINDOWS = {
+    "5m":  {"before": 36, "after": 12, "interval_sec": 300},
+    "15m": {"before": 36, "after": 12, "interval_sec": 900},
+    "1h":  {"before": 54, "after": 18, "interval_sec": 3600},
+    "4h":  {"before": 30, "after": 10, "interval_sec": 14400},
+}
+
+
+def _floor_ts_5min(ts: str) -> int:
+    """Return ts floored to 5-min boundary (unix seconds). Deterministic cache key."""
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() // 300 * 300)
+    except Exception:
+        return 0
+
+
+def _fetch_explain_candles(ticker: str, ts: str) -> Dict[str, Any]:
+    """Fetch candle windows for all TFs around the given signal ts.
+
+    Returns dict of TF → list[dict{ts,o,h,l,c,v}] plus raw DataFrames (not
+    serialized) for detector use.
+    """
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+    base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
+    hl = HyperliquidClient()
+
+    try:
+        target_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        target_dt = datetime.now(timezone.utc)
+
+    candles_serial: Dict[str, List[dict]] = {}
+    candles_df: Dict[str, Any] = {}
+
+    for tf, win in _EXPLAIN_WINDOWS.items():
+        interval_sec = win["interval_sec"]
+        start_dt = target_dt - timedelta(seconds=interval_sec * win["before"])
+        end_dt = target_dt + timedelta(seconds=interval_sec * win["after"])
+        start_str = start_dt.strftime("%Y-%m-%d")
+        # end date inclusive, add 1 day padding to ensure tail bars present
+        end_str = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        try:
+            df = hl.get_ohlcv(base_asset, interval=tf, start=start_str, end=end_str)
+        except Exception as e:
+            logger.warning(f"[explain] fetch failed {ticker} {tf}: {e}")
+            continue
+        if df is None or df.empty:
+            continue
+
+        # Trim to the requested window by timestamp
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        if df.empty:
+            continue
+
+        candles_df[tf] = df
+        candles_serial[tf] = [
+            {
+                "ts": int(row.timestamp.timestamp()),
+                "o": float(row.open),
+                "h": float(row.high),
+                "l": float(row.low),
+                "c": float(row.close),
+                "v": float(row.volume),
+            }
+            for row in df.itertuples(index=False)
+        ]
+
+    return {"serial": candles_serial, "df": candles_df}
+
+
+@app.get("/api/pulse/explain/{ticker}/{ts}")
+async def get_pulse_explain(ticker: str, ts: str):
+    """Return chart-ready explain payload for a single pulse signal.
+
+    Includes candles (5m/15m/1h/4h), pulse entry data (SL/TP/S/R/TSMOM),
+    and detected chart patterns with full geometry. Display-only — patterns
+    do NOT feed back into signal logic.
+    """
+    ticker = ticker.upper()
+    # URL-decode the ts path param (frontend double-encodes ':' etc.)
+    try:
+        from urllib.parse import unquote
+        ts = unquote(ts)
+    except Exception:
+        pass
+
+    entry = _read_pulse_at(ticker, ts)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pulse entry for {ticker} at {ts}",
+        )
+
+    # Fetch candle windows
+    fetched = await asyncio.get_event_loop().run_in_executor(
+        None, _fetch_explain_candles, ticker, entry.get("ts", ts)
+    )
+    candles_serial: Dict[str, List[dict]] = fetched["serial"]
+    candles_df: Dict[str, Any] = fetched["df"]
+
+    # Detect patterns
+    from tradingagents.patterns import detect_all
+    matches, detector_errors = await asyncio.get_event_loop().run_in_executor(
+        None, detect_all, candles_df, ("1h", "4h")
+    )
+
+    # Apply regime alignment (WCT request)
+    liq_score = float(entry.get("liquidation_score") or 0.0)
+    for m in matches:
+        if liq_score > 0.5:
+            if (m.bias == "bearish" and entry.get("signal") in ("SHORT", "SELL")) or \
+               (m.bias == "bullish" and entry.get("signal") in ("BUY", "COVER")):
+                m.regime_aligned = True
+
+    chart_patterns = [m.to_dict() for m in matches]
+
+    # Candlestick patterns from persisted indicator_detail (if present)
+    candlestick_patterns: List[dict] = []
+    for tf, detail in (entry.get("indicator_detail") or {}).items():
+        for patt in (detail.get("patterns") or []):
+            candlestick_patterns.append({"tf": tf, "name": patt})
+
+    # Breakdown top-3 by absolute weight
+    breakdown = entry.get("breakdown") or {}
+    top3 = sorted(
+        [(k, float(v)) for k, v in breakdown.items() if isinstance(v, (int, float))],
+        key=lambda t: abs(t[1]),
+        reverse=True,
+    )[:3]
+
+    return {
+        "ticker": ticker,
+        "entry": {
+            "ts": entry.get("ts"),
+            "price": entry.get("price"),
+            "signal": entry.get("signal"),
+            "confidence": entry.get("confidence"),
+            "normalized_score": entry.get("normalized_score"),
+        },
+        "levels": {
+            "stop_loss": entry.get("stop_loss"),
+            "take_profit": entry.get("take_profit"),
+            "support": entry.get("support"),
+            "resistance": entry.get("resistance"),
+            "sr_source": entry.get("sr_source"),
+            "sr_near_side": entry.get("sr_near_side"),
+        },
+        "tsmom": {
+            "direction": entry.get("tsmom_direction"),
+            "strength": entry.get("tsmom_strength"),
+            "gated_out": entry.get("tsmom_gated_out"),
+        },
+        "timeframe_bias": entry.get("timeframe_bias"),
+        "regime_mode": entry.get("regime_mode"),
+        "breakdown_top3": [{"key": k, "weight": w} for k, w in top3],
+        "breakdown": breakdown,
+        "candles": candles_serial,
+        "chart_patterns": chart_patterns,
+        "candlestick_patterns": candlestick_patterns,
+        "reasoning_prose": entry.get("reasoning", ""),
+        "detector_errors": detector_errors,
+        "pattern_detection_degraded": len(detector_errors) >= 3,
+    }
 
 
 @app.post("/api/pulse/run/{ticker}")
