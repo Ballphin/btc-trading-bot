@@ -1179,9 +1179,6 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         print(f"[Analysis {job_id}] Done event sent")
 
     except Exception as e:
-        # #region agent log
-        import json as _dj2; open('/Users/daniel/Desktop/TradingAgents/.cursor/debug-f18c74.log','a').write(_dj2.dumps({"sessionId":"f18c74","hypothesisId":"H2","location":"server.py:outer_exception","message":"analysis outer exception","data":{"job_id":job_id,"error":str(e)[:500],"type":type(e).__name__},"timestamp":int(__import__('time').time()*1000)})+'\n')
-        # #endregion
         print(f"[Analysis {job_id}] ERROR: {e}")
         import traceback
         traceback.print_exc()
@@ -1250,7 +1247,7 @@ async def walk_forward_validate(ticker: str):
 
 # ── API Endpoints ─────────────────────────────────────────────────────
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health(tick: int = 0):
     """Health check + optional self-scheduling pulse tick (free-tier survival).
 
@@ -1374,10 +1371,6 @@ async def stream_analysis(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     eq: JobEventQueue = jobs[job_id]["queue"]
-    # #region agent log
-    _hist_len = len(eq._history)
-    import json as _dj; open('/Users/daniel/Desktop/TradingAgents/.cursor/debug-f18c74.log','a').write(_dj.dumps({"sessionId":"f18c74","hypothesisId":"H1","location":"server.py:sse_connect","message":"SSE stream connecting","data":{"job_id":job_id,"history_len":_hist_len,"history_events":[e.get("event")+"@step"+str(e.get("step","?")) for e in eq._history[:20]]},"timestamp":int(__import__('time').time()*1000)})+'\n')
-    # #endregion
     eq.set_loop(asyncio.get_event_loop())
     my_queue = eq._queue
 
