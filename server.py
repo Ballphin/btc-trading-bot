@@ -80,6 +80,27 @@ _DATA_DELAY_SECONDS = int(os.environ.get("ANALYSIS_DATA_DELAY_SECONDS", "600"))
 _SCHEDULER_STATE_FILE = EVAL_RESULTS_DIR / ".scheduler_state.json"
 _MODEL_CONFIG_FILE = EVAL_RESULTS_DIR / ".model_config.json"
 
+# ── User display timezone ───────────────────────────────────────────
+# All human-facing timestamps (Telegram alerts, analysis detail views,
+# scheduler "next run") are rendered in this timezone regardless of the
+# server host timezone. Hosts like Render run in UTC, which produced
+# mismatched display strings ("EDT" vs "UTC") depending on where each
+# alert was formatted and created confusion when the UI was shared with
+# users in other timezones. Override with env `USER_DISPLAY_TZ` if the
+# owner of the deployment lives elsewhere.
+#
+# The zone string is passed to ZoneInfo so DST is handled automatically
+# (EST in winter, EDT in summer). America/New_York is the canonical
+# IANA identifier for US Eastern.
+try:
+    from zoneinfo import ZoneInfo  # py3.9+
+    _USER_DISPLAY_TZ = ZoneInfo(os.environ.get("USER_DISPLAY_TZ", "America/New_York"))
+except Exception:  # pragma: no cover — zoneinfo missing on pre-3.9
+    import pytz as _pytz_fallback
+    _USER_DISPLAY_TZ = _pytz_fallback.timezone(
+        os.environ.get("USER_DISPLAY_TZ", "America/New_York")
+    )
+
 # Boundary-claim lock: the in-process 4H scheduler AND the /api/health self-tick
 # both write to _scheduler_state["last_run"]. Without a lock they can race and
 # launch duplicate analyses for the same boundary (plan Part 2 BLOCKER #1).
@@ -416,9 +437,13 @@ async def scheduler_status():
     import pytz
     try:
         boundary_utc = _next_4h_utc_boundary()
-        # Convert to local time for display
-        local_tz = datetime.now().astimezone().tzinfo
-        boundary_local = boundary_utc.astimezone(local_tz)
+        # Convert to the user's configured display timezone (EST/EDT by default).
+        # Previously used `datetime.now().astimezone().tzinfo` which picks the
+        # SERVER host TZ — on Render that's UTC, so the "local" ISO sent to the
+        # frontend was really UTC and the UI's toLocaleTimeString() silently
+        # re-offset it to the viewer's browser TZ. That caused apparent drift
+        # when a friend in another timezone opened the same link.
+        boundary_local = boundary_utc.astimezone(_USER_DISPLAY_TZ)
         next_run_local = boundary_local.isoformat() if _scheduler_state["enabled"] else None
         next_run_utc = boundary_utc.isoformat() if _scheduler_state["enabled"] else None
     except Exception:
@@ -1980,7 +2005,11 @@ def _send_telegram_alert(result: dict):
                 normalized = f"{raw_date}:00:00"
                 dt = datetime.fromisoformat(normalized.replace("Z", ""))
                 dt = dt.replace(tzinfo=timezone.utc)
-                local_dt = dt.astimezone()
+                # Always display in the user's configured timezone (EST/EDT),
+                # NOT the server host timezone. Render / other cloud hosts run
+                # in UTC which otherwise shows mismatched 'EDT' vs 'UTC'
+                # across alerts and when a friend in another TZ opens the UI.
+                local_dt = dt.astimezone(_USER_DISPLAY_TZ)
                 return local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
             
             # Format 3: ISO format YYYY-MM-DDTHH:MM:SS
@@ -1988,7 +2017,7 @@ def _send_telegram_alert(result: dict):
                 from datetime import timezone
                 dt = datetime.fromisoformat(raw_date.replace("Z", "").replace("+00:00", ""))
                 dt = dt.replace(tzinfo=timezone.utc)
-                local_dt = dt.astimezone()
+                local_dt = dt.astimezone(_USER_DISPLAY_TZ)
                 return local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
             
             # Format 4: Simple date YYYY-MM-DD
@@ -2204,10 +2233,12 @@ async def get_analysis(ticker: str, analysis_date: str):
             # Convert to nicer display format
             date_formatted = f"{date_part} at {hour}:{minute} {am_pm}"
         else:
-            # Legacy format with T separator
+            # Legacy format with T separator — always render in user's
+            # configured display TZ (see _USER_DISPLAY_TZ) so the UI and
+            # Telegram alerts agree regardless of server host timezone.
             analysis_dt = datetime.fromisoformat(analysis_date.replace("Z", ""))
             analysis_dt = analysis_dt.replace(tzinfo=timezone.utc)
-            local_dt = analysis_dt.astimezone()
+            local_dt = analysis_dt.astimezone(_USER_DISPLAY_TZ)
             date_formatted = local_dt.strftime("%b %d, %Y at %I:%M %p %Z")
     except Exception:
         date_formatted = analysis_date

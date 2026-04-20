@@ -332,7 +332,19 @@ export default function ScorecardPage() {
               </p>
               <p className="text-xs text-slate-500 mt-0.5">
                 {scheduler.enabled && scheduler.next_run_local
-                  ? `Next run: ${new Date(scheduler.next_run_local).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })} local`
+                  // Render the server-provided ISO (already in the configured
+                  // USER_DISPLAY_TZ, EST/EDT by default) in the same zone
+                  // regardless of which viewer's browser this runs in. Using
+                  // toLocaleTimeString() without a `timeZone` option would
+                  // re-offset to the browser's zone and cause drift when the
+                  // page is shared across time zones.
+                  ? `Next run: ${new Date(scheduler.next_run_local).toLocaleTimeString('en-US', {
+                      hour: 'numeric',
+                      minute: '2-digit',
+                      hour12: true,
+                      timeZone: 'America/New_York',
+                      timeZoneName: 'short',
+                    })}`
                   : scheduler.last_run
                   ? `Last run: ${scheduler.last_run}`
                   : 'Enable to run BTC-USD analysis every 4 hours'}
