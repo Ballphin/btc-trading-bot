@@ -18,6 +18,7 @@ Provides:
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -4770,6 +4771,443 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
             }
 
     return EventSourceResponse(run_backtest())
+
+
+# ── Auto-Tune Endpoints (Stage 2 Phase A) ────────────────────────────
+#
+# The auto-tune orchestrator (``tradingagents.backtesting.autotune``)
+# runs a walk-forward Latin-Hypercube sweep over a curated 6-parameter
+# space and produces a ``TuneReport`` with a verdict (PROPOSE /
+# PROVISIONAL / REJECT). Endpoints here:
+#
+#   POST /api/pulse/autotune/{ticker}           start job, SSE progress
+#   GET  /api/pulse/autotune/jobs/{job_id}      poll status / resume
+#   GET  /api/pulse/autotune/artifacts          list recent tune artifacts
+#   GET  /api/pulse/autotune/artifacts/{name}   fetch a specific artifact
+#   POST /api/pulse/autotune/apply              apply a PROPOSE-verdict artifact
+#
+# The apply endpoint NEVER auto-applies — it requires an explicit user
+# request + re-checks verdict gates defensively before writing the YAML
+# (preserves the propose-only contract from the plan even if an artifact
+# file was tampered with).
+
+class PulseAutoTuneRequest(BaseModel):
+    """Shape of POST /api/pulse/autotune/{ticker} body.
+
+    Defaults match the user-confirmed Balanced profile:
+      * 60-day window → fast iteration (labeled PROVISIONAL if trades<400)
+      * 3 folds       → minimum for PBO / cross-validation
+      * 30 configs    → 6-dim LHS at N=30 gets good coverage
+    """
+    start_date: str
+    end_date: str
+    n_folds: int = 3
+    n_configs: int = 30
+    active_regime: str = "base"
+    pulse_interval_minutes: int = 15
+    seed: int = 42
+
+
+class PulseAutoTuneApplyRequest(BaseModel):
+    artifact_path: str
+    # Optional sanity check: must match the hash in the artifact to
+    # prevent "apply an old artifact" after config has drifted.
+    expected_current_config_hash: Optional[str] = None
+
+
+#: In-process registry of auto-tune jobs. Survives page refresh since
+#: the server thread holds it, but not a full process restart — for
+#: that we rely on the checkpoint JSONL (on-disk) and the artifact
+#: (on-disk). State fields: status, progress (last emitted event),
+#: result (TuneReport dict once done), error.
+_AUTOTUNE_JOBS: Dict[str, Dict[str, Any]] = {}
+_AUTOTUNE_JOB_LOCK = threading.Lock()
+
+
+def _autotune_spec_from_request(ticker: str, req: PulseAutoTuneRequest):
+    """Build a :class:`TuneSpec` — validates inputs, raises HTTPException."""
+    from tradingagents.backtesting.autotune import TuneSpec
+
+    try:
+        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date")
+
+    days = (end_dt - start_dt).days
+    if days < 14:
+        raise HTTPException(status_code=400,
+                            detail="Window too short (≥14 days required)")
+    # Cap at 2 years — anything longer is usually a mistake and
+    # murders the CI/rate-limit budget.
+    if days > 730:
+        raise HTTPException(status_code=400, detail="Window too large (max 730 days)")
+
+    valid_regimes = {"base", "bull", "bear", "sideways", "ambiguous"}
+    if req.active_regime not in valid_regimes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"active_regime must be one of {sorted(valid_regimes)}",
+        )
+
+    if not (2 <= req.n_folds <= 10):
+        raise HTTPException(status_code=400, detail="n_folds must be in [2, 10]")
+    if not (4 <= req.n_configs <= 100):
+        raise HTTPException(status_code=400, detail="n_configs must be in [4, 100]")
+
+    return TuneSpec(
+        ticker=ticker,
+        start_date=req.start_date,
+        end_date=req.end_date,
+        active_regime=req.active_regime,
+        n_folds=req.n_folds,
+        n_configs=req.n_configs,
+        pulse_interval_minutes=req.pulse_interval_minutes,
+        seed=req.seed,
+    )
+
+
+@app.post("/api/pulse/autotune/apply")
+async def apply_pulse_autotune(req: PulseAutoTuneApplyRequest):
+    """Apply a PROPOSE-verdict artifact to ``config/pulse_scoring.yaml``.
+
+    (Moved to the top of the autotune route group so that
+    ``POST /api/pulse/autotune/apply`` isn't matched as
+    ``{ticker}="apply"`` — FastAPI resolves routes in declaration order.)
+    See full docstring on the implementation below.
+    """
+    return await _apply_pulse_autotune_impl(req)
+
+
+@app.post("/api/pulse/autotune/{ticker}")
+async def start_pulse_autotune(ticker: str, req: PulseAutoTuneRequest):
+    """Launch a walk-forward auto-tune sweep — returns SSE stream.
+
+    The actual orchestration runs in the default threadpool executor
+    via ``contextvars.copy_context().run(...)`` so any ContextVar
+    overrides set by the orchestrator propagate into the backtest
+    engine (critical for config isolation — see the ContextVar docstring
+    in ``tradingagents/pulse/config.py``).
+
+    The server tracks job state in ``_AUTOTUNE_JOBS`` so a poll endpoint
+    (``GET /api/pulse/autotune/jobs/{job_id}``) can recover if the SSE
+    connection drops before the final ``result`` event is emitted.
+    """
+    ticker = ticker.upper()
+    if not ticker.endswith("-USD") and not ticker.endswith("USDT"):
+        raise HTTPException(
+            status_code=400,
+            detail="Pulse auto-tune is crypto-only (ticker must end with -USD)",
+        )
+
+    spec = _autotune_spec_from_request(ticker, req)
+
+    job_id = str(uuid.uuid4())[:12]
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
+
+    with _AUTOTUNE_JOB_LOCK:
+        _AUTOTUNE_JOBS[job_id] = {
+            "job_id": job_id,
+            "ticker": ticker,
+            "spec": spec,
+            "status": "running",
+            "progress": None,
+            "result": None,
+            "error": None,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    loop = asyncio.get_event_loop()
+
+    def progress_cb(event: dict) -> None:
+        """Invoked by the orchestrator on each backtest completion.
+
+        Must be thread-safe relative to the asyncio event loop — we
+        schedule the enqueue via ``call_soon_threadsafe`` since this
+        runs inside the executor thread.
+        """
+        with _AUTOTUNE_JOB_LOCK:
+            _AUTOTUNE_JOBS[job_id]["progress"] = event
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, {"event": "progress", "data": event})
+        except Exception:
+            pass  # queue full or loop closed — drop the event
+
+    def run_job() -> None:
+        from tradingagents.backtesting.autotune import AutoTuner
+        try:
+            tuner = AutoTuner(spec=spec, progress_cb=progress_cb, job_id=job_id)
+            report = tuner.run()
+            payload = {
+                "job_id": job_id,
+                "verdict": report.verdict,
+                "reasons": report.reasons,
+                "current_config_hash": report.current_config_hash,
+                "proposed_config": report.proposed_config,
+                "proposed_config_hash": report.proposed_config_hash,
+                "diff": report.diff,
+                "metrics": report.metrics,
+                "per_fold": report.per_fold,
+                "artifact_path": report.artifact_path,
+                "ran_at": report.ran_at,
+            }
+            with _AUTOTUNE_JOB_LOCK:
+                _AUTOTUNE_JOBS[job_id]["status"] = "done"
+                _AUTOTUNE_JOBS[job_id]["result"] = payload
+            loop.call_soon_threadsafe(queue.put_nowait, {"event": "result", "data": payload})
+            loop.call_soon_threadsafe(queue.put_nowait, {"event": "done", "data": {"status": "completed"}})
+        except Exception as e:
+            logger.error(f"[AutoTune job={job_id}] failed: {e}")
+            import traceback
+            traceback.print_exc()
+            with _AUTOTUNE_JOB_LOCK:
+                _AUTOTUNE_JOBS[job_id]["status"] = "error"
+                _AUTOTUNE_JOBS[job_id]["error"] = str(e)
+            loop.call_soon_threadsafe(queue.put_nowait, {"event": "error", "data": {"error": str(e)}})
+
+    # Launch via copy_context().run so the ContextVar override system
+    # the engine uses is properly propagated. We do NOT ``await`` the
+    # future — the job should run concurrently with the SSE drain loop,
+    # otherwise progress events wouldn't reach the client until after
+    # the whole job completed (defeats the point of streaming).
+    ctx = contextvars.copy_context()
+    job_future = loop.run_in_executor(None, ctx.run, run_job)
+    # Retaining the future prevents GC (which would cancel the task)
+    # and lets us observe exceptions in the drain loop.
+    with _AUTOTUNE_JOB_LOCK:
+        _AUTOTUNE_JOBS[job_id]["_future"] = job_future
+
+    async def sse_stream():
+        """Drain the progress queue until a terminal event is seen."""
+        try:
+            while True:
+                msg = await asyncio.wait_for(queue.get(), timeout=3600)
+                yield {"event": msg["event"], "data": json.dumps(msg["data"], default=str)}
+                if msg["event"] in ("done", "error"):
+                    return
+        except asyncio.TimeoutError:
+            yield {"event": "error", "data": json.dumps({"error": "timeout"})}
+
+    return EventSourceResponse(sse_stream())
+
+
+@app.get("/api/pulse/autotune/jobs/{job_id}")
+async def get_pulse_autotune_job(job_id: str):
+    """Return the current snapshot of a job — for post-refresh resume.
+
+    Callers that lost the SSE connection can poll this endpoint; the
+    response includes the latest progress event and, if complete, the
+    full result payload. 404 when the job is unknown (process restart
+    or purged).
+    """
+    with _AUTOTUNE_JOB_LOCK:
+        job = _AUTOTUNE_JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job_id not found")
+        # Return a copy — spec dataclass isn't directly JSON-serializable.
+        from dataclasses import asdict
+        return {
+            "job_id": job["job_id"],
+            "ticker": job["ticker"],
+            "spec": asdict(job["spec"]),
+            "status": job["status"],
+            "progress": job["progress"],
+            "result": job["result"],
+            "error": job["error"],
+            "started_at": job["started_at"],
+        }
+
+
+@app.get("/api/pulse/autotune/artifacts")
+async def list_pulse_autotune_artifacts(limit: int = 50):
+    """Return the last N auto-tune artifact filenames + summary metadata.
+
+    Used by the UI's "recent proposals" list. Artifacts are immutable
+    once written (the apply endpoint never rewrites them) so cheap to
+    scan — we only read the top-level keys for the summary.
+    """
+    artifact_dir = Path("results/autotune")
+    if not artifact_dir.exists():
+        return {"artifacts": []}
+    entries: List[Dict[str, Any]] = []
+    for f in sorted(artifact_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+        try:
+            payload = json.loads(f.read_text())
+        except Exception:
+            continue
+        entries.append({
+            "artifact": f.name,
+            "path": str(f),
+            "ran_at": payload.get("ran_at"),
+            "ticker": payload.get("spec", {}).get("ticker"),
+            "active_regime": payload.get("spec", {}).get("active_regime"),
+            "verdict": payload.get("verdict"),
+            "current_config_hash": payload.get("current_config_hash"),
+            "proposed_config_hash": payload.get("proposed_config_hash"),
+            "n_changes": len(payload.get("diff", [])),
+        })
+    return {"artifacts": entries}
+
+
+@app.get("/api/pulse/autotune/artifacts/{name}")
+async def get_pulse_autotune_artifact(name: str):
+    """Fetch the full payload of a specific artifact by filename.
+
+    Path traversal guard: we only accept a bare filename ending in
+    ``.json`` and restrict lookup to ``results/autotune/``.
+    """
+    if "/" in name or ".." in name or not name.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Invalid artifact name")
+    path = Path("results/autotune") / name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    try:
+        return json.loads(path.read_text())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Corrupt artifact: {e}")
+
+
+async def _apply_pulse_autotune_impl(req: PulseAutoTuneApplyRequest):
+    """Apply a PROPOSE-verdict artifact to ``config/pulse_scoring.yaml``.
+
+    Safety layers (defense in depth):
+
+      1. Artifact must exist under ``results/autotune/``.
+      2. Artifact ``verdict`` must be ``PROPOSE`` exactly. PROVISIONAL
+         artifacts are 409-rejected with a message pointing to the
+         sample-size requirement.
+      3. Optional ``expected_current_config_hash`` — if supplied, must
+         match the artifact's ``current_config_hash``. Prevents applying
+         a stale artifact on top of a newer base.
+      4. The proposed configuration is re-validated through
+         ``_validate()`` in the config module before writing.
+      5. For ``active_regime != "base"``, the proposal is written into
+         ``regime_profiles.<regime>`` only — base is untouched.
+      6. Atomic write (tmp + rename) via ``write_config_atomic``.
+      7. Calibration metadata (``calibrated_at``, ``deflated_sharpe``,
+         ``pbo``, ``oos_sharpe``) is stamped.
+    """
+    from tradingagents.pulse.config import (
+        DEFAULT_CONFIG_PATH, _validate, deep_merge, write_config_atomic,
+    )
+
+    # Path-traversal guard: treat the user-supplied path as relative to
+    # the artifact directory and refuse anything outside.
+    raw_path = Path(req.artifact_path)
+    if raw_path.is_absolute():
+        artifact_path = raw_path
+    else:
+        artifact_path = Path(req.artifact_path)
+    if ".." in str(artifact_path):
+        raise HTTPException(status_code=400, detail="Invalid artifact_path")
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    try:
+        payload = json.loads(artifact_path.read_text())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Corrupt artifact: {e}")
+
+    verdict = payload.get("verdict")
+    if verdict != "PROPOSE":
+        # Distinguish PROVISIONAL (sample-size gate) from REJECT (failed
+        # other gates) so the UI can show a useful error.
+        detail = (
+            "PROVISIONAL verdict — widen the tuning window (or lower "
+            "n_configs) until OOS trade count meets the per-regime "
+            "minimum (see MIN_TRADES_OOS_BY_REGIME)."
+            if verdict == "PROVISIONAL"
+            else f"Cannot apply artifact with verdict={verdict!r} — must be PROPOSE"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+    if req.expected_current_config_hash and \
+            payload.get("current_config_hash") != req.expected_current_config_hash:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Config has drifted since this artifact was produced "
+                f"(artifact base_hash={payload.get('current_config_hash')!r} vs "
+                f"expected {req.expected_current_config_hash!r}). Re-run the tune."
+            ),
+        )
+
+    proposed_flat = payload.get("proposed_config") or {}
+    if not proposed_flat:
+        raise HTTPException(status_code=400, detail="Artifact has empty proposed_config")
+
+    # Flatten dotted-path candidate → nested overlay.
+    overlay: Dict[str, Any] = {}
+    for path, value in proposed_flat.items():
+        keys = str(path).split(".")
+        node = overlay
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+
+    # Re-read current YAML to compose the write payload.
+    import yaml as _yaml
+    try:
+        current_data = _yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cannot read live config: {e}")
+
+    active_regime = payload.get("spec", {}).get("active_regime", "base")
+    if active_regime in (None, "", "base"):
+        # Merge directly into base.
+        new_data = deep_merge(current_data, overlay)
+    else:
+        # Merge into ``regime_profiles.<regime>`` only; base untouched.
+        profiles = dict(current_data.get("regime_profiles") or {})
+        profile_now = profiles.get(active_regime) or {}
+        profiles[active_regime] = deep_merge(profile_now, overlay)
+        new_data = dict(current_data)
+        new_data["regime_profiles"] = profiles
+
+    # Stamp calibration metadata so the scorecard UI surfaces provenance.
+    metrics = payload.get("metrics") or {}
+    new_data["calibrated_at"] = datetime.now(timezone.utc).isoformat()
+    new_data["calibration_window"] = {
+        "start_date": payload.get("spec", {}).get("start_date"),
+        "end_date": payload.get("spec", {}).get("end_date"),
+        "n_trades_oos": metrics.get("oos_n_trades_total"),
+        "n_folds_used": metrics.get("n_folds_used"),
+        "n_effective": metrics.get("n_eff"),
+        "engine_version": int(new_data.get("engine_version", 3)),
+        "active_regime": active_regime,
+        "artifact": artifact_path.name,
+    }
+    new_data["deflated_sharpe"] = metrics.get("deflated_oos_sharpe")
+    new_data["oos_sharpe"] = metrics.get("oos_sharpe_point")
+    new_data["pbo"] = metrics.get("pbo")
+    new_data["n_eff"] = metrics.get("n_eff")
+
+    # Final validation before the atomic write. The module's ``_validate``
+    # raises ValueError on any out-of-range param — catch and surface
+    # as 400 so a UI copy-paste bug never corrupts the live YAML.
+    try:
+        _validate(new_data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Proposed config invalid: {e}")
+
+    try:
+        cfg_after = write_config_atomic(new_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+
+    logger.info(
+        f"[AutoTune.apply] Applied artifact={artifact_path.name} "
+        f"regime={active_regime} new_hash={cfg_after.hash_short()}"
+    )
+    return {
+        "applied": True,
+        "new_config_hash": cfg_after.content_hash,
+        "active_regime": active_regime,
+        "calibrated_at": new_data["calibrated_at"],
+        "calibration_window": new_data["calibration_window"],
+    }
 
 
 # ── Main ──────────────────────────────────────────────────────────────

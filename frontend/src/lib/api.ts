@@ -395,3 +395,276 @@ export async function fetchPulseExplain(
   return res.json();
 }
 
+
+// ── Auto-Tune ────────────────────────────────────────────────────────
+// Mirrors `server.py /api/pulse/autotune/*` and
+// `tradingagents/backtesting/autotune.py` TuneReport shape.
+
+export type AutoTuneVerdict = 'PROPOSE' | 'PROVISIONAL' | 'REJECT';
+export type AutoTuneRegime = 'base' | 'bull' | 'bear' | 'sideways' | 'ambiguous';
+
+export interface AutoTuneRequest {
+  start_date: string;           // YYYY-MM-DD
+  end_date: string;             // YYYY-MM-DD
+  n_folds?: number;             // default 3, range [2, 10]
+  n_configs?: number;           // default 30, range [4, 100]
+  active_regime?: AutoTuneRegime;
+  pulse_interval_minutes?: number;
+  seed?: number;
+}
+
+export interface AutoTuneSpec extends AutoTuneRequest {
+  ticker: string;
+  active_regime: AutoTuneRegime;
+  n_folds: number;
+  n_configs: number;
+  seed: number;
+  max_pbo: number;
+  min_oos_over_is_ratio: number;
+  min_deflated_sharpe: number;
+  regime_floor_ratio: number;
+  checkpoint_dir: string;
+}
+
+export interface AutoTuneDiffEntry {
+  path: string;
+  old: number | null;
+  new: number | null;
+  delta: number | null;
+}
+
+export interface AutoTuneMetrics {
+  n_folds_used?: number;
+  is_sharpes?: number[];
+  oos_sharpes?: number[];
+  oos_n_trades_total?: number;
+  oos_sharpe_ci_lower?: number;
+  oos_sharpe_point?: number;
+  oos_sharpe_ci_upper?: number;
+  pbo?: number;
+  deflated_oos_sharpe?: number;
+  n_eff?: number;
+}
+
+export interface AutoTuneFoldRow {
+  fold: number;
+  config_idx: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  is_sharpe: number;
+  oos_sharpe: number;
+  is_n_trades: number;
+  oos_n_trades: number;
+  oos_returns: number[];
+}
+
+export interface AutoTuneResult {
+  job_id: string;
+  verdict: AutoTuneVerdict;
+  reasons: string[];
+  current_config_hash: string;
+  proposed_config: Record<string, number>;
+  proposed_config_hash: string;
+  diff: AutoTuneDiffEntry[];
+  metrics: AutoTuneMetrics;
+  per_fold: AutoTuneFoldRow[];
+  artifact_path: string | null;
+  ran_at: string;
+}
+
+export interface AutoTuneJobStatus {
+  job_id: string;
+  ticker: string;
+  spec: AutoTuneSpec;
+  status: 'running' | 'done' | 'error';
+  progress: AutoTuneProgressEvent | null;
+  result: AutoTuneResult | null;
+  error: string | null;
+  started_at: string;
+}
+
+export interface AutoTuneProgressEvent {
+  phase?: 'backtest' | 'selection' | 'done';
+  fold?: number;
+  config_idx?: number;
+  total?: number;
+  done?: number;
+  verdict?: AutoTuneVerdict;
+}
+
+export interface AutoTuneArtifactSummary {
+  artifact: string;
+  path: string;
+  ran_at: string;
+  ticker: string;
+  active_regime: AutoTuneRegime;
+  verdict: AutoTuneVerdict;
+  current_config_hash: string;
+  proposed_config_hash: string;
+  n_changes: number;
+}
+
+export interface AutoTuneArtifact {
+  spec: AutoTuneSpec;
+  verdict: AutoTuneVerdict;
+  reasons: string[];
+  current_config_hash: string;
+  proposed_config_hash: string;
+  proposed_config: Record<string, number>;
+  diff: AutoTuneDiffEntry[];
+  metrics: AutoTuneMetrics;
+  per_fold: AutoTuneFoldRow[];
+  ran_at: string;
+}
+
+export interface AutoTuneApplyResponse {
+  applied: true;
+  new_config_hash: string;
+  active_regime: AutoTuneRegime;
+  calibrated_at: string;
+  calibration_window: Record<string, unknown>;
+}
+
+/**
+ * Stream auto-tune progress via SSE. Returns an unsubscribe fn.
+ *
+ * The backend emits three event kinds:
+ *   - `progress`  — {phase, fold?, config_idx?, total?, done?}
+ *   - `result`    — full AutoTuneResult payload
+ *   - `done`/`error` — terminal markers
+ *
+ * The stream reconnects on network errors until a terminal event is
+ * seen or the caller cancels. Terminal state is signalled through
+ * `onResult` / `onError`.
+ */
+export function streamAutoTune(
+  ticker: string,
+  req: AutoTuneRequest,
+  handlers: {
+    onProgress?: (e: AutoTuneProgressEvent) => void;
+    onResult?: (r: AutoTuneResult) => void;
+    onError?: (msg: string) => void;
+    onDone?: () => void;
+    onJobId?: (id: string) => void;
+  },
+): { cancel: () => void; promise: Promise<AutoTuneResult | null> } {
+  const ctrl = new AbortController();
+  let resolved = false;
+  // Use the executor to capture `resolve`; cast through unknown to avoid
+  // TS narrowing the closure-assigned variable to `never` inside the async IIFE.
+  let settle!: (v: AutoTuneResult | null) => void;
+  const promise = new Promise<AutoTuneResult | null>((resolve) => { settle = resolve; });
+
+  (async () => {
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/pulse/autotune/${encodeURIComponent(ticker)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(req),
+          signal: ctrl.signal,
+        },
+      );
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        handlers.onError?.(`${res.status}: ${body || res.statusText}`);
+        settle(null); resolved = true; return;
+      }
+      const reader = res.body?.getReader();
+      if (!reader) { handlers.onError?.('No response body'); settle(null); resolved = true; return; }
+
+      const decoder = new TextDecoder();
+      let buf = '';
+      let curEvent = 'message';
+      let curData = '';
+
+      // Minimal SSE parser — good enough for our server's line format.
+      // (Using ReadableStream rather than EventSource so we can POST.)
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const raw of lines) {
+          const line = raw.replace(/\r$/, '');
+          if (line === '') {
+            // Dispatch accumulated event
+            if (curData) {
+              try {
+                const parsed = JSON.parse(curData);
+                if (curEvent === 'progress') {
+                  handlers.onProgress?.(parsed);
+                } else if (curEvent === 'result') {
+                  handlers.onResult?.(parsed);
+                  handlers.onJobId?.(parsed.job_id);
+                  settle(parsed); resolved = true;
+                } else if (curEvent === 'error') {
+                  handlers.onError?.(parsed.error || 'unknown error');
+                  settle(null); resolved = true;
+                } else if (curEvent === 'done') {
+                  handlers.onDone?.();
+                }
+              } catch { /* malformed */ }
+            }
+            curEvent = 'message'; curData = '';
+            continue;
+          }
+          if (line.startsWith('event:')) curEvent = line.slice(6).trim();
+          else if (line.startsWith('data:')) curData += line.slice(5).trim();
+        }
+      }
+      if (!resolved) settle(null);
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        handlers.onError?.((e as Error).message);
+      }
+      settle(null);
+    }
+  })();
+
+  return { cancel: () => ctrl.abort(), promise };
+}
+
+export async function getAutoTuneJob(jobId: string): Promise<AutoTuneJobStatus> {
+  const res = await fetch(`${API_BASE_URL}/pulse/autotune/jobs/${encodeURIComponent(jobId)}`);
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function listAutoTuneArtifacts(
+  limit = 50,
+): Promise<AutoTuneArtifactSummary[]> {
+  const res = await fetch(`${API_BASE_URL}/pulse/autotune/artifacts?limit=${limit}`);
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  const data = await res.json();
+  return data.artifacts ?? [];
+}
+
+export async function getAutoTuneArtifact(name: string): Promise<AutoTuneArtifact> {
+  const res = await fetch(`${API_BASE_URL}/pulse/autotune/artifacts/${encodeURIComponent(name)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${body || res.statusText}`);
+  }
+  return res.json();
+}
+
+export async function applyAutoTuneArtifact(
+  artifact_path: string,
+  expected_current_config_hash?: string,
+): Promise<AutoTuneApplyResponse> {
+  const res = await fetch(`${API_BASE_URL}/pulse/autotune/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ artifact_path, expected_current_config_hash }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}

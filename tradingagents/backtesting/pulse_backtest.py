@@ -33,7 +33,17 @@ from tradingagents.dataflows.hyperliquid_client import (
     HyperliquidClient,
     _INTERVAL_SECONDS,
 )
-from tradingagents.pulse.config import get_config
+from tradingagents.dataflows.historical_router import (
+    fetch_funding_historical,
+    fetch_ohlcv_historical,
+)
+from tradingagents.pulse.config import (
+    PulseConfig,
+    compute_config_hash,
+    get_config,
+    use_config_override,
+)
+from tradingagents.pulse.fills import realistic_roundtrip_cost
 from tradingagents.pulse.pulse_assembly import PulseInputs, score_pulse_from_inputs
 from tradingagents.pulse.regime import detect_regime
 from tradingagents.pulse.support_resistance import compute_support_resistance
@@ -42,7 +52,15 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────
 
-_EXEC_COST = 0.0005  # 5 bps
+# Legacy fallback used only when the active config is missing the
+# ``fill_models`` section. The default round-trip cost is ~1.2 bps
+# (spread 2 + 2×slip 5 = 12 bps → 0.0012). Previously hard-coded at
+# 5 bps (0.0005) which treated entry+exit as one half-spread trade;
+# :func:`realistic_roundtrip_cost` now computes the full picture.
+_DEFAULT_EXEC_COST = 0.0012
+#: Back-compat alias — external callers (scripts, tests) may import this.
+#: Prefer :func:`realistic_roundtrip_cost` + ``PulseBacktestEngine._exec_cost_for_run``.
+_EXEC_COST = _DEFAULT_EXEC_COST
 _POSITION_SIZE = 0.05  # 5% of equity per trade
 _MIN_COVERAGE = 0.60  # exclude pulses with <60% indicator coverage
 _MAX_CURVE_POINTS = 500  # downsample profitability curve for API
@@ -59,7 +77,30 @@ class PulseBacktestEngine:
         pulse_interval_minutes: int = 15,
         signal_threshold: float = 0.25,
         results_dir: str = "./eval_results",
+        *,
+        config_override: Optional[PulseConfig] = None,
+        active_regime: str = "base",
     ):
+        """Initialize a backtest run.
+
+        Args:
+            ticker / start_date / end_date / pulse_interval_minutes /
+            signal_threshold / results_dir: unchanged.
+
+            config_override: Auto-tune candidates pass a custom
+                :class:`PulseConfig` here. :meth:`run` installs it via
+                :func:`use_config_override` so every downstream
+                ``get_config()`` call in this run sees the override.
+                When ``None`` (live / manual backtest), the on-disk YAML
+                is used unchanged.
+
+            active_regime: Tag for the active regime-profile ("base" /
+                "bull" / "bear" / "sideways"). Propagated onto every
+                produced signal and the final result so the scorecard
+                can split aggregations by profile. When a ``config_override``
+                is supplied, callers should pass the same ``active_regime``
+                that was baked into it.
+        """
         self.ticker = ticker
         self.base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
         self.start_date = start_date
@@ -71,14 +112,35 @@ class PulseBacktestEngine:
         self.start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         self.end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
+        self._config_override = config_override
+        self._active_regime = active_regime
+        # Provenance — stamped by :meth:`_prefetch` based on router routing
+        # decision. Auto-tune surfaces these on every Apply proposal.
+        self._data_source: str = "unknown"
+        self._funding_source: str = "unknown"
+        self._stitch_report: Optional[dict] = None
+
     def run(self) -> Dict[str, Any]:
         """Execute the full backtest pipeline.
 
-        Returns:
-            Results dict matching the plan output shape.
+        If a ``config_override`` was passed to the constructor, it is
+        installed for the duration of this call via
+        :func:`use_config_override`. Workers that want to dispatch phases
+        across an executor must wrap their executor submission with
+        ``contextvars.copy_context().run(...)`` — see the context-var
+        docstring for the propagation contract.
         """
-        logger.info(f"[PulseBacktest] Starting {self.ticker} "
-                     f"{self.start_date} → {self.end_date}")
+        if self._config_override is not None:
+            with use_config_override(self._config_override):
+                return self._run_pipeline()
+        return self._run_pipeline()
+
+    def _run_pipeline(self) -> Dict[str, Any]:
+        logger.info(
+            f"[PulseBacktest] Starting {self.ticker} "
+            f"{self.start_date} → {self.end_date} "
+            f"regime={self._active_regime}"
+        )
 
         # Phase 1: Pre-fetch
         candles, funding_df = self._prefetch()
@@ -87,7 +149,7 @@ class PulseBacktestEngine:
         signals = self._replay(candles, funding_df)
 
         # Phase 3: Score forward returns
-        scored = self._score_signals(signals, candles)
+        scored = self._score_signals(signals, candles, funding_df)
 
         # Phase 4: Compute metrics
         return self._compute_metrics(scored, candles)
@@ -95,46 +157,74 @@ class PulseBacktestEngine:
     # ── Phase 1: Pre-fetch ────────────────────────────────────────────
 
     def _prefetch(self) -> tuple:
-        """Bulk-fetch all historical data needed for the backtest."""
-        hl = HyperliquidClient()
+        """Bulk-fetch OHLCV + funding via the era-aware router.
 
-        # Pad 2 days before and 1 day after
+        Pre-2023-02-15 windows route to Binance Futures automatically,
+        post-launch windows to Hyperliquid, and straddling windows are
+        stitched with overlap validation (see
+        :mod:`tradingagents.dataflows.historical_router`). The routing
+        decision is stamped onto ``self._data_source`` for the final
+        result so downstream scorecard / config_hash logic can split
+        results by provenance.
+        """
+        # Pad 2 days before and 1 day after so indicator warmup has data.
         fetch_start = (self.start_dt - timedelta(days=2)).strftime("%Y-%m-%d")
         fetch_end = (self.end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
         candles: Dict[str, pd.DataFrame] = {}
+        data_sources: set[str] = set()
         for tf in PULSE_TIMEFRAMES:
-            logger.info(f"[PulseBacktest] Fetching {tf} candles...")
+            logger.info(f"[PulseBacktest] Fetching {tf} candles via router...")
             try:
-                df = hl.get_ohlcv(
-                    self.base_asset, tf,
-                    start=fetch_start, end=fetch_end,
-                    max_age_override=3600,
+                result = fetch_ohlcv_historical(
+                    self.ticker, tf, fetch_start, fetch_end,
                 )
-                candles[tf] = df
-                logger.info(f"[PulseBacktest] {tf}: {len(df)} candles")
+                candles[tf] = result.df
+                data_sources.add(result.source)
+                if result.overlap_report and tf == PULSE_TIMEFRAMES[0]:
+                    # Keep the first overlap report as the canonical one
+                    # (it's the same stitch window regardless of TF).
+                    self._stitch_report = result.overlap_report
+                logger.info(
+                    f"[PulseBacktest] {tf}: {len(result.df)} candles "
+                    f"from {result.source}"
+                )
             except Exception as e:
                 logger.warning(f"[PulseBacktest] Failed to fetch {tf}: {e}")
                 candles[tf] = pd.DataFrame(
                     columns=["timestamp", "open", "high", "low", "close", "volume"]
                 )
 
-        # Funding history
-        logger.info("[PulseBacktest] Fetching funding history...")
-        days_range = (self.end_dt - self.start_dt).days + 4
+        # Collapse per-TF source labels into a single provenance string.
+        # In practice all TFs route the same way, but if they don't
+        # (e.g. one TF falls back to Binance because HL returned empty)
+        # we surface the mixed label so it's visible in the result.
+        if len(data_sources) == 1:
+            self._data_source = next(iter(data_sources))
+        elif len(data_sources) > 1:
+            self._data_source = "mixed:" + "+".join(sorted(data_sources))
+        else:
+            self._data_source = "unknown"
+
+        # Funding history — router applies the same era routing. For
+        # pre-HL windows this returns REAL Binance funding (not synthetic).
+        logger.info("[PulseBacktest] Fetching funding history via router...")
         try:
-            funding_df = hl.get_funding_history(
-                self.base_asset,
-                start=fetch_start,
-                end=fetch_end,
-                max_age_override=3600,
+            funding_df, funding_source = fetch_funding_historical(
+                self.ticker, fetch_start, fetch_end,
             )
+            self._funding_source = funding_source
         except Exception as e:
             logger.warning(f"[PulseBacktest] Funding history failed: {e}")
             funding_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
+            self._funding_source = "failed"
 
-        logger.info(f"[PulseBacktest] Pre-fetch complete. "
-                     f"Funding entries: {len(funding_df)}")
+        logger.info(
+            f"[PulseBacktest] Pre-fetch complete. "
+            f"data_source={self._data_source} "
+            f"funding_source={self._funding_source} "
+            f"funding_entries={len(funding_df)}"
+        )
         return candles, funding_df
 
     # ── Phase 2: Replay ───────────────────────────────────────────────
@@ -453,12 +543,35 @@ class PulseBacktestEngine:
         self,
         signals: List[Dict],
         candles: Dict[str, pd.DataFrame],
+        funding_df: Optional[pd.DataFrame] = None,
     ) -> List[Dict]:
-        """Score each signal's forward returns using candle OPEN."""
+        """Score each signal's forward returns using candle OPEN.
+
+        ``funding_df`` is optional for back-compat with legacy callers
+        (existing unit tests). When omitted, funding P&L is skipped
+        (equivalent to an all-zero funding series).
+
+
+        Two material changes vs the legacy flat-cost version:
+
+        1. **Realistic round-trip cost** — pulled per-run from the active
+           PulseConfig's ``fill_models`` section via
+           :func:`realistic_roundtrip_cost`. Spread + 2× slippage +
+           2× sqrt-impact, fraction units.
+
+        2. **Funding P&L** — every held position accrues / pays funding
+           at the 8h funding-stamp cadence. In a bear regime longs pay
+           shorts; in a bull regime shorts pay longs. Ignoring this on
+           the legacy path systematically overstates SHORT P&L in bulls
+           and LONG P&L in bears by ~8% annualized, which biased the
+           auto-tune toward counter-trend setups. See adversarial review
+           action #3 in the final plan.
+        """
         if not signals or candles["1m"].empty:
             return signals
 
         candles_1m = candles["1m"]
+        exec_cost = self._exec_cost_for_run()
 
         thresholds = {"+5m": (5, 0.0005), "+15m": (15, 0.0010), "+1h": (60, 0.0015)}
 
@@ -483,7 +596,13 @@ class PulseBacktestEngine:
                     target_candle = candles_1m[mask].iloc[0]
                     fwd_price = float(target_candle["open"])
                     raw_return = (fwd_price - price) / price * direction
-                    net_return = raw_return - _EXEC_COST
+                    funding_cost = self._integrate_funding(
+                        funding_df, pulse_ts, target_ts, direction,
+                    )
+                    # Horizons <=1h rarely span a funding stamp (funding
+                    # fires every 8h) but we keep the integration honest
+                    # — 0 funding periods crossed → 0 cost, no harm.
+                    net_return = raw_return - exec_cost - funding_cost
                     entry[f"hit_{horizon}"] = net_return >= min_move
                     entry[f"return_{horizon}"] = round(net_return, 6)
 
@@ -500,32 +619,133 @@ class PulseBacktestEngine:
             entry["exit_return"] = None
 
             if not hold_candles.empty and sl is not None and tp is not None:
+                exit_ts = None
                 for _, c in hold_candles.iterrows():
+                    c_ts = pd.Timestamp(c["timestamp"]).to_pydatetime()
+                    if c_ts.tzinfo is None:
+                        c_ts = c_ts.replace(tzinfo=timezone.utc)
                     if direction == 1:  # BUY
                         if c["low"] <= sl:
                             entry["exit_type"] = "sl_hit"
-                            entry["exit_return"] = round((sl - price) / price - _EXEC_COST, 6)
+                            funding_cost = self._integrate_funding(
+                                funding_df, pulse_ts, c_ts, direction,
+                            )
+                            entry["exit_return"] = round(
+                                (sl - price) / price - exec_cost - funding_cost, 6,
+                            )
+                            exit_ts = c_ts
                             break
                         if c["high"] >= tp:
                             entry["exit_type"] = "tp_hit"
-                            entry["exit_return"] = round((tp - price) / price - _EXEC_COST, 6)
+                            funding_cost = self._integrate_funding(
+                                funding_df, pulse_ts, c_ts, direction,
+                            )
+                            entry["exit_return"] = round(
+                                (tp - price) / price - exec_cost - funding_cost, 6,
+                            )
+                            exit_ts = c_ts
                             break
                     else:  # SHORT
                         if c["high"] >= sl:
                             entry["exit_type"] = "sl_hit"
-                            entry["exit_return"] = round((price - sl) / price - _EXEC_COST, 6)
+                            funding_cost = self._integrate_funding(
+                                funding_df, pulse_ts, c_ts, direction,
+                            )
+                            entry["exit_return"] = round(
+                                (price - sl) / price - exec_cost - funding_cost, 6,
+                            )
+                            exit_ts = c_ts
                             break
                         if c["low"] <= tp:
                             entry["exit_type"] = "tp_hit"
-                            entry["exit_return"] = round((price - tp) / price - _EXEC_COST, 6)
+                            funding_cost = self._integrate_funding(
+                                funding_df, pulse_ts, c_ts, direction,
+                            )
+                            entry["exit_return"] = round(
+                                (price - tp) / price - exec_cost - funding_cost, 6,
+                            )
+                            exit_ts = c_ts
                             break
 
                 if entry["exit_type"] == "timeout" and not hold_candles.empty:
-                    exit_price = float(hold_candles.iloc[-1]["close"])
+                    last_row = hold_candles.iloc[-1]
+                    exit_price = float(last_row["close"])
+                    last_ts = pd.Timestamp(last_row["timestamp"]).to_pydatetime()
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
                     raw = (exit_price - price) / price * direction
-                    entry["exit_return"] = round(raw - _EXEC_COST, 6)
+                    funding_cost = self._integrate_funding(
+                        funding_df, pulse_ts, last_ts, direction,
+                    )
+                    entry["exit_return"] = round(raw - exec_cost - funding_cost, 6)
+                    exit_ts = last_ts
+
+                if exit_ts is not None:
+                    entry["exit_ts"] = exit_ts.isoformat()
 
         return signals
+
+    # ── Cost / funding helpers ────────────────────────────────────────
+
+    def _exec_cost_for_run(self) -> float:
+        """Read fill-model knobs from the active :class:`PulseConfig`.
+
+        Lives in a helper so the ContextVar-installed override (if any)
+        is seen here — ``get_config()`` returns the override when one is
+        active. A config missing the ``fill_models`` section falls back
+        to :data:`_DEFAULT_EXEC_COST` with a debug log.
+        """
+        try:
+            cfg = get_config()
+            fm = cfg.data.get("fill_models") or {}
+            return realistic_roundtrip_cost(
+                spread_bps=float(fm.get("spread_bps", 2.0)),
+                slippage_bps=float(fm.get("slippage_bps", 5.0)),
+                # notional + adv default to 0 → impact term zero.
+                notional_usd=float(fm.get("notional_usd", 0.0)),
+                adv_usd=float(fm.get("adv_usd", 0.0)),
+                impact_coefficient=float(fm.get("impact_coefficient", 10.0)),
+            )
+        except Exception as e:
+            logger.debug(
+                f"[PulseBacktest] fill_models lookup failed ({e}); "
+                f"using default {_DEFAULT_EXEC_COST}"
+            )
+            return _DEFAULT_EXEC_COST
+
+    def _integrate_funding(
+        self,
+        funding_df: pd.DataFrame,
+        entry_ts: datetime,
+        exit_ts: datetime,
+        direction: int,
+    ) -> float:
+        """Sum funding payments crossed between ``entry_ts`` and ``exit_ts``.
+
+        Convention: ``funding_rate > 0`` means longs pay shorts, so a
+        long position pays ``rate`` and a short receives ``rate`` — we
+        return the cost **as an addition to be subtracted from net P&L**.
+
+        Returns a fraction (not bps). Zero when the window doesn't cross
+        any funding stamp (the typical case for sub-8h holds).
+        """
+        if funding_df is None or funding_df.empty:
+            return 0.0
+        # Normalize to tz-naive pandas Timestamps for comparison — the
+        # router returns tz-naive UTC and pulses are tz-aware UTC.
+        entry_np = pd.Timestamp(entry_ts).tz_localize(None) \
+            if pd.Timestamp(entry_ts).tz is not None else pd.Timestamp(entry_ts)
+        exit_np = pd.Timestamp(exit_ts).tz_localize(None) \
+            if pd.Timestamp(exit_ts).tz is not None else pd.Timestamp(exit_ts)
+        if exit_np <= entry_np:
+            return 0.0
+        mask = (funding_df["timestamp"] > entry_np) & (funding_df["timestamp"] <= exit_np)
+        crossed = funding_df.loc[mask, "funding_rate"]
+        if crossed.empty:
+            return 0.0
+        # Long pays (+), short receives (−). Multiply by direction.
+        total = float(crossed.sum()) * direction
+        return total
 
     # ── Phase 4: Compute metrics ──────────────────────────────────────
 
@@ -580,10 +800,14 @@ class PulseBacktestEngine:
                 "hit_1h": round(hits / len(scored_bucket), 4) if scored_bucket else 0,
             }
 
-        # Stop-and-reverse equity curve
+        # Stop-and-reverse equity curve. Uses the active config's
+        # round-trip cost (see :meth:`_exec_cost_for_run`) so auto-tune
+        # candidates with tighter spreads / higher impact coefficients
+        # see their cost implications in the Sharpe number.
         equity = 1.0
         equity_curve = [1.0]
         trade_returns = []
+        exec_cost = self._exec_cost_for_run()
 
         current_direction = None
         entry_price = None
@@ -599,7 +823,7 @@ class PulseBacktestEngine:
             if current_direction is not None and sig != current_direction and entry_price is not None:
                 dir_sign = 1 if current_direction == "BUY" else -1
                 close_pnl = (price - entry_price) / entry_price * dir_sign
-                net_pnl = close_pnl - _EXEC_COST
+                net_pnl = close_pnl - exec_cost
                 equity *= (1 + net_pnl * _POSITION_SIZE)
                 trade_returns.append(net_pnl)
 
@@ -616,7 +840,7 @@ class PulseBacktestEngine:
             if last_price and entry_price > 0:
                 dir_sign = 1 if current_direction == "BUY" else -1
                 close_pnl = (last_price - entry_price) / entry_price * dir_sign
-                net_pnl = close_pnl - _EXEC_COST
+                net_pnl = close_pnl - exec_cost
                 equity *= (1 + net_pnl * _POSITION_SIZE)
                 trade_returns.append(net_pnl)
                 equity_curve.append(equity)
@@ -663,6 +887,30 @@ class PulseBacktestEngine:
 
         signal_freq = round(n_signals / total_intervals * 100, 1) if total_intervals > 0 else 0
 
+        # ── Provenance stamp ──────────────────────────────────────
+        # Tells auto-tune + scorecard which data source produced these
+        # numbers and which effective config was active. A Binance-tuned
+        # bear config must never be silently treated as HL-tuned on live.
+        try:
+            cfg = get_config()
+            config_hash = compute_config_hash(
+                cfg.data,
+                active_regime=self._active_regime,
+                venue=self._venue_label(),
+                data_source=self._data_source,
+            )
+        except Exception:
+            config_hash = None
+        provenance = {
+            "data_source": self._data_source,
+            "funding_source": self._funding_source,
+            "active_regime": self._active_regime,
+            "venue": self._venue_label(),
+            "exec_cost_fraction": round(exec_cost, 6),
+            "config_hash": config_hash,
+            "stitch_report": self._stitch_report,
+        }
+
         return {
             "ticker": self.ticker,
             "period": f"{self.start_date} to {self.end_date}",
@@ -687,7 +935,25 @@ class PulseBacktestEngine:
             "return_autocorr_lag1": round(autocorr_lag1, 4),
             "n_trades": len(trade_returns),
             "signals": signals[-200:],  # last 200 for inspection
+            "provenance": provenance,
         }
+
+    def _venue_label(self) -> str:
+        """Return the venue string derived from ``_data_source``.
+
+        ``binance_futures`` data → venue ``binance_futures``.
+        ``hyperliquid`` data → venue ``hyperliquid``.
+        ``binance+hl_stitched`` → venue ``stitched``.
+        Anything else → ``unknown`` so we never silently claim HL.
+        """
+        src = self._data_source
+        if src == "hyperliquid":
+            return "hyperliquid"
+        if src == "binance_futures":
+            return "binance_futures"
+        if src == "binance+hl_stitched":
+            return "stitched"
+        return "unknown"
 
     # ── Regime bucketing ──────────────────────────────────────────────
 

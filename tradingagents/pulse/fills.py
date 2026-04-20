@@ -262,3 +262,51 @@ def simple_fill_returns(
         "maker_rejected": maker_rejected,
         "maker_adverse": maker_adverse,
     }
+
+
+# ── Backtest round-trip cost helper ──────────────────────────────────
+# The pulse-backtest engine previously used a hard-coded
+# ``_EXEC_COST = 0.0005`` (5 bps) flat. That figure is defensible for
+# benign hours on BTC but systematically understates cost during 3am
+# flash-crash regimes where realized slippage on market exits can hit
+# 30–80 bps. Tuning a config against the flat cost produces SL distances
+# that get stop-hunted live. This helper produces a per-trade round-trip
+# cost using the same knobs as :func:`simple_fill_returns` so the backtest
+# matches the scorecard's methodology.
+
+def realistic_roundtrip_cost(
+    *,
+    spread_bps: float = 2.0,
+    slippage_bps: float = 5.0,
+    notional_usd: float = 0.0,
+    adv_usd: float = 0.0,
+    impact_coefficient: float = 10.0,
+) -> float:
+    """Return round-trip cost as a *fraction* (not bps).
+
+    Composition::
+
+        round_trip_bps = 2 × slippage + spread + 2 × sqrt_impact
+                       = entry_slip + exit_slip + (half_spread × 2)
+                         + entry_impact + exit_impact
+
+    Defaults match ``config/pulse_scoring.yaml::fill_models`` — callers
+    that want per-run overrides should read from the active
+    :class:`PulseConfig` and pass through the kwargs. Returning a fraction
+    keeps the caller code identical to the old ``_EXEC_COST`` subtraction
+    pattern (``net_pnl = gross - cost``).
+
+    Notes:
+        * ``notional_usd`` / ``adv_usd`` default to 0 → impact term drops
+          to zero. Callers with position-size knowledge (auto-tune sweep)
+          should pass real numbers so SL/TP tuning reflects the fact that
+          larger positions cost more to exit during a cascade.
+        * The formula assumes taker fills on both legs. A maker-only
+          strategy should use :func:`simple_fill_returns` instead.
+    """
+    impact_one_side = (
+        sqrt_impact_bps(notional_usd, adv_usd, impact_coefficient)
+        if notional_usd > 0 and adv_usd > 0 else 0.0
+    )
+    total_bps = 2.0 * slippage_bps + spread_bps + 2.0 * impact_one_side
+    return total_bps / 10_000.0
