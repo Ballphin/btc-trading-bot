@@ -684,6 +684,117 @@ export async function fetchCurrentRegime(
 }
 
 
+// ── Ensemble (R.5 + R.6) ─────────────────────────────────────────────
+// Mirrors `server.py /api/pulse/ensemble/*` handlers. The frontend is a
+// read-mostly consumer of per-variant pulse streams + their aggregated
+// metrics; the only write op is champion promotion.
+
+export interface EnsembleVariantEntry {
+  ts?: string;
+  signal?: string;
+  confidence?: number;
+  price?: number;
+  ensemble_tick_id?: string;
+  config_name?: string;
+  stop_loss?: number;
+  take_profit?: number;
+  reasoning?: string;
+}
+
+export interface EnsembleLatest {
+  ticker: string;
+  champion: string;
+  champion_tick_id: string | null;
+  champion_signal: string | null;
+  agreement_score: number | null;
+  n_variants: number;
+  variants: Record<string, EnsembleVariantEntry | null>;
+}
+
+export interface EnsembleMetricsBlock {
+  n_signals: number;
+  mean_net_return: number;
+  sharpe_point: number;
+  deflated_sharpe: number;
+}
+
+export interface EnsembleMetricsDoc {
+  overall: EnsembleMetricsBlock & {
+    per_directional_regime?: Record<string, { n: number; mean_net_return: number; thin_sample: boolean }>;
+    exit_type_breakdown?: Record<string, number>;
+  };
+  weekend: EnsembleMetricsBlock & {
+    weekend_eligibility_min: number;
+    champion_eligible: boolean;
+  };
+  oos_validation: EnsembleMetricsBlock & {
+    window_size: number;
+    exit_type_breakdown?: Record<string, number>;
+  };
+}
+
+export interface EnsembleMetricsResponse {
+  ticker: string;
+  champion: string;
+  metrics: Record<string, EnsembleMetricsDoc | null>;
+}
+
+export interface EnsembleDisagreement {
+  ensemble_tick_id: string;
+  ts: string | null;
+  signals: Record<string, string>;
+  confidences: Record<string, number | null>;
+}
+
+export interface EnsembleDisagreementsResponse {
+  ticker: string;
+  count: number;
+  disagreements: EnsembleDisagreement[];
+}
+
+export async function fetchEnsembleLatest(ticker: string): Promise<EnsembleLatest> {
+  const res = await fetch(`${API_BASE_URL}/pulse/ensemble/${encodeURIComponent(ticker)}`);
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchEnsembleMetrics(ticker: string): Promise<EnsembleMetricsResponse> {
+  const res = await fetch(`${API_BASE_URL}/pulse/ensemble/${encodeURIComponent(ticker)}/metrics`);
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchEnsembleDisagreements(
+  ticker: string,
+  limit = 50,
+): Promise<EnsembleDisagreementsResponse> {
+  const res = await fetch(
+    `${API_BASE_URL}/pulse/ensemble/${encodeURIComponent(ticker)}/disagreements?limit=${limit}`,
+  );
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+export async function setEnsembleChampion(
+  ticker: string,
+  config: string,
+): Promise<{ ticker: string; config: string; set_at: string }> {
+  const res = await fetch(
+    `${API_BASE_URL}/pulse/ensemble/${encodeURIComponent(ticker)}/champion`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+
 export async function applyAutoTuneArtifact(
   artifact_path: string,
   expected_current_config_hash?: string,

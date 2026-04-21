@@ -1,0 +1,12 @@
+# strict — higher conviction bar. Raises signal_threshold by ~40%
+# and hardens the TSMOM gate from confidence_weighted → strict.
+# Hypothesis: fewer but sharper signals, net-of-funding.
+description: >-
+  Higher-conviction variant. 40% higher signal threshold and strict
+  TSMOM AND-gate (counter-trend confluence is zeroed, not just shrunk).
+
+confluence:
+  # Baseline default is 0.25 → strict raises to 0.35.
+  signal_threshold: 0.35
+  tsmom_gate:
+    mode: "strict"

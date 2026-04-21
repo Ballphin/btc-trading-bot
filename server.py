@@ -3866,53 +3866,157 @@ def _run_single_pulse(ticker: str, results_dir: str = None) -> dict:
 
     # v3 pulse entry schema ------------------------------------------
     atr_1h = (report.get("timeframes") or {}).get("1h", {}).get("atr")
-    pulse_entry = {
-        "ts": report.get("timestamp", datetime.now(timezone.utc).isoformat()),
-        "engine_version": cfg.engine_version,
-        "config_hash": cfg.hash_short(),
-        "signal": result["signal"],
-        "confidence": result["confidence"],
-        "normalized_score": result["normalized_score"],
-        "raw_normalized_score": result.get("raw_normalized_score"),
-        "price": report.get("spot_price"),
-        "atr_1h_at_pulse": atr_1h,
-        "partial_bar_flags": report.get("partial_bar_flags", {}),
-        "stop_loss": result.get("stop_loss"),
-        "take_profit": result.get("take_profit"),
-        "hold_minutes": result.get("hold_minutes"),
-        "timeframe_bias": result.get("timeframe_bias"),
-        "funding_rate": report.get("funding_rate"),
-        "premium_pct": report.get("premium_pct"),
-        "reasoning": result.get("reasoning", ""),
-        "breakdown": result.get("breakdown", {}),
-        "volatility_flag": result.get("volatility_flag", False),
-        "signal_threshold": result.get("signal_threshold"),
-        "persistence_mul": result.get("persistence_mul"),
-        "override_reason": result.get("override_reason"),
-        "tsmom_direction": tsmom_direction,
-        "tsmom_strength": tsmom_strength,
-        "tsmom_gated_out": result.get("tsmom_gated_out", False),
-        "tsmom_gate_reason": result.get("tsmom_gate_reason"),
-        "tsmom_gate_mode": result.get("tsmom_gate_mode"),
-        "regime_mode": regime_mode,
-        "regime_snapshot": regime_snapshot,
-        "book_imbalance": book_imbalance,
-        "liquidation_score": liq_score,
-        "day_volume_usd": report.get("day_volume"),
-        # --- Support / Resistance (v3.1) -----------------------------
-        "support": support,
-        "resistance": resistance,
-        "sr_source": sr_source,
-        "sr_near_side": result.get("sr_near_side"),
-        "z_4h_return": z_4h_return,
-        "scored": False,
-    }
+
+    def _build_entry(scored: dict, *, config_name: str, ensemble_tick_id: str) -> dict:
+        """Stamp a scored result into the on-disk schema.
+
+        Pure: same shape regardless of variant. ``config_name`` /
+        ``ensemble_tick_id`` (R.2) are the new fields — everything else
+        mirrors the legacy layout so downstream readers don't break.
+        """
+        return {
+            "ts": report.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "engine_version": cfg.engine_version,
+            "config_hash": cfg.hash_short(),
+            "config_name": config_name,
+            "ensemble_tick_id": ensemble_tick_id,
+            "signal": scored["signal"],
+            "confidence": scored["confidence"],
+            "normalized_score": scored["normalized_score"],
+            "raw_normalized_score": scored.get("raw_normalized_score"),
+            "price": report.get("spot_price"),
+            "atr_1h_at_pulse": atr_1h,
+            "partial_bar_flags": report.get("partial_bar_flags", {}),
+            "stop_loss": scored.get("stop_loss"),
+            "take_profit": scored.get("take_profit"),
+            "hold_minutes": scored.get("hold_minutes"),
+            "timeframe_bias": scored.get("timeframe_bias"),
+            "funding_rate": report.get("funding_rate"),
+            "premium_pct": report.get("premium_pct"),
+            "reasoning": scored.get("reasoning", ""),
+            "breakdown": scored.get("breakdown", {}),
+            "volatility_flag": scored.get("volatility_flag", False),
+            "signal_threshold": scored.get("signal_threshold"),
+            "persistence_mul": scored.get("persistence_mul"),
+            "override_reason": scored.get("override_reason"),
+            "tsmom_direction": tsmom_direction,
+            "tsmom_strength": tsmom_strength,
+            "tsmom_gated_out": scored.get("tsmom_gated_out", False),
+            "tsmom_gate_reason": scored.get("tsmom_gate_reason"),
+            "tsmom_gate_mode": scored.get("tsmom_gate_mode"),
+            "regime_mode": regime_mode,
+            "regime_snapshot": regime_snapshot,
+            "book_imbalance": book_imbalance,
+            "liquidation_score": liq_score,
+            "day_volume_usd": report.get("day_volume"),
+            "support": support,
+            "resistance": resistance,
+            "sr_source": sr_source,
+            "sr_near_side": scored.get("sr_near_side"),
+            "z_4h_return": z_4h_return,
+            "scored": False,
+        }
+
+    # ── R.2 Ensemble scatter ─────────────────────────────────────────
+    # Score the same PulseInputs under every non-baseline variant and
+    # persist to per-config streams. Baseline result we already have
+    # above — keep it as the legacy return value so every existing
+    # consumer is unaffected. Failures in a variant are logged by
+    # score_ensemble and silently dropped so one bad overlay can't
+    # take the live loop down.
+    from tradingagents.pulse.ensemble import (
+        generate_ensemble_tick_id, list_variant_names, score_ensemble,
+    )
+    tick_id = generate_ensemble_tick_id()
+    try:
+        variant_names = [n for n in list_variant_names() if n != "baseline"]
+        variant_results = score_ensemble(
+            inputs,
+            variant_names=variant_names,
+            active_regime=cfg.active_regime,
+            venue=cfg.venue,
+            data_source=cfg.data_source,
+            ensemble_tick_id=tick_id,
+        )
+        for vname, vres in variant_results.items():
+            try:
+                ventry = _build_entry(vres, config_name=vname, ensemble_tick_id=tick_id)
+                _append_variant_pulse(ticker, vname, ventry)
+            except Exception as e:
+                logger.warning(f"[Ensemble] write failed for {ticker}/{vname}: {e}")
+    except Exception as e:
+        logger.warning(f"[Ensemble] scatter failed for {ticker}: {e}")
+
+    # Baseline entry — stamped with the same tick_id so the verifier
+    # can join variants to the baseline tick even though the legacy
+    # pulse.jsonl path has no ``config_name`` field historically.
+    pulse_entry = _build_entry(result, config_name="baseline", ensemble_tick_id=tick_id)
+    # Also mirror the baseline entry to configs/baseline/pulse.jsonl so
+    # the ensemble verifier / metrics aggregator can read all variants
+    # uniformly without special-casing the legacy path.
+    try:
+        _append_variant_pulse(ticker, "baseline", pulse_entry)
+    except Exception as e:
+        logger.warning(f"[Ensemble] baseline mirror write failed for {ticker}: {e}")
     return pulse_entry
+
+
+# ── R.5 Champion indirection ─────────────────────────────────────────
+#
+# Every downstream reader of pulse.jsonl MUST route through
+# ``_champion_pulse_path`` so that when an operator promotes a variant
+# (via POST /api/pulse/ensemble/champion), the "live" pulse stream
+# surfaced to UI + risk consumers swaps atomically. Without this
+# indirection the ensemble is decorative (the debate's blocking point
+# against v1 of the plan).
+#
+# Default champion = "baseline"; a missing champion.json falls through
+# to the legacy pulse.jsonl so upgrades are backward-compatible.
+
+def _read_champion_name(ticker: str) -> str:
+    """Return the currently-championed config name for ``ticker``.
+
+    Reads ``PULSE_DIR/<ticker>/champion.json`` — a small JSON doc of
+    shape ``{"config": "<name>", "set_at": "<iso>"}``. Defaults to
+    ``"baseline"`` when the file is absent or malformed.
+    """
+    path = PULSE_DIR / ticker / "champion.json"
+    if not path.exists():
+        return "baseline"
+    try:
+        data = json.loads(path.read_text())
+        name = str(data.get("config") or "baseline")
+        return name or "baseline"
+    except Exception:
+        return "baseline"
+
+
+def _write_champion_name(ticker: str, name: str) -> dict:
+    """Atomic write of ``champion.json`` — returns the new doc."""
+    d = PULSE_DIR / ticker
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"config": name, "set_at": datetime.now(timezone.utc).isoformat()}
+    tmp = d / "champion.json.tmp"
+    tmp.write_text(json.dumps(doc))
+    tmp.replace(d / "champion.json")
+    return doc
+
+
+def _champion_pulse_path(ticker: str) -> Path:
+    """Return the JSONL path that should be treated as "the" pulse
+    stream for this ticker. Falls back to the legacy single-stream
+    path if the champion's variant directory doesn't yet exist (i.e.
+    we haven't written any pulses for that variant yet)."""
+    champ = _read_champion_name(ticker)
+    variant_path = PULSE_DIR / ticker / "configs" / champ / "pulse.jsonl"
+    if variant_path.exists():
+        return variant_path
+    return PULSE_DIR / ticker / "pulse.jsonl"
 
 
 def _read_last_pulse_entry(ticker: str) -> Optional[dict]:
     """Return the most recent pulse entry (or None). Tolerates corrupt lines."""
-    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
         return None
     try:
@@ -3929,6 +4033,31 @@ def _read_last_pulse_entry(ticker: str) -> Optional[dict]:
         return last
     except Exception:
         return None
+
+
+def _append_variant_pulse(ticker: str, variant_name: str, entry: dict) -> None:
+    """Append a variant's pulse entry to its per-config JSONL stream.
+
+    Layout: ``<EVAL_RESULTS>/pulse/<TICKER>/configs/<variant>/pulse.jsonl``.
+    Mirrors ``_append_pulse`` semantics (small-write atomic append; large
+    entries go through tmp+rename). Kept structurally close to the
+    legacy writer so any future atomicity fix to one path applies to
+    both.
+    """
+    if not variant_name:
+        raise ValueError("variant_name is required")
+    vdir = PULSE_DIR / ticker / "configs" / variant_name
+    vdir.mkdir(parents=True, exist_ok=True)
+    vpath = vdir / "pulse.jsonl"
+    line = json.dumps(entry, default=str) + "\n"
+    if len(line.encode()) >= 4096:
+        existing = vpath.read_text() if vpath.exists() else ""
+        final_tmp = vpath.with_suffix(".jsonl.tmp")
+        final_tmp.write_text(existing + line)
+        os.replace(final_tmp, vpath)
+        return
+    with open(vpath, "a") as f:
+        f.write(line)
 
 
 def _append_pulse(ticker: str, entry: dict):
@@ -3976,8 +4105,10 @@ def _append_pulse(ticker: str, entry: dict):
 
 
 def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
-    """Read the last N pulses from JSONL."""
-    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    """Read the last N pulses from JSONL. Routes through the champion
+    indirection so promoting a variant immediately swaps what the UI +
+    ``/api/pulse/latest`` surface (R.5)."""
+    pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
         return []
     entries = []
@@ -3996,11 +4127,11 @@ def _read_pulse_at(ticker: str, ts: str) -> Optional[dict]:
     """Return the pulse entry with exact or nearest-match timestamp.
 
     Match strategy:
-      1. Exact string match on ``ts`` field.
+      1. Exact string match on ``ts``.
       2. Nearest by UTC timestamp within 60 seconds.
-    Returns None if no match.
+    Returns None if no match. R.5: routes via ``_champion_pulse_path``.
     """
-    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
         return None
     target_dt: Optional[datetime] = None
@@ -4179,6 +4310,61 @@ async def _start_pulse_scheduler():
         if not _pulse_state.get("tsmom_task"):
             _pulse_state["tsmom_task"] = asyncio.create_task(_tsmom_refresh_loop())
             logger.info("[TSMOM] Refresh loop started (1h cadence)")
+        # R.3 — ensemble verifier runs every 5 min resolving pending
+        # non-NEUTRAL pulses across all variant streams. Shares
+        # _pulse_state["enabled"] so toggling the scheduler pauses
+        # verification too.
+        if not _pulse_state.get("verifier_task"):
+            _pulse_state["verifier_task"] = asyncio.create_task(_ensemble_verifier_loop())
+            logger.info("[Verifier] Ensemble verifier loop started (5min cadence)")
+
+
+async def _ensemble_verifier_loop():
+    """Run the pulse verifier every 5 minutes for all configured tickers.
+
+    The verifier is CPU-cheap — it only does 1m-OHLC lookups and
+    arithmetic — so we gather across tickers without the
+    skip-on-overlap gymnastics the pulse scheduler needs.
+    """
+    from scripts.pulse_verifier import process_ticker
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+
+    logger.info("[Verifier] Loop started")
+    hl = None
+    while _pulse_state.get("enabled"):
+        try:
+            if hl is None:
+                try:
+                    hl = HyperliquidClient()
+                except Exception as e:
+                    logger.warning(f"[Verifier] HL client init failed: {e}")
+            tickers = _pulse_state.get("tickers", ["BTC-USD"])
+            loop = asyncio.get_event_loop()
+            for t in tickers:
+                try:
+                    outcomes = await loop.run_in_executor(
+                        None,
+                        lambda tkr=t: process_ticker(
+                            tkr, pulse_dir=PULSE_DIR, hl_client=hl,
+                        ),
+                    )
+                    if outcomes:
+                        logger.info(f"[Verifier] {t}: resolved {len(outcomes)} outcome(s)")
+                        # R.4 — refresh per-config metrics.json so the
+                        # UI + champion selector see fresh aggregates.
+                        try:
+                            from tradingagents.pulse.ensemble_metrics import refresh_all
+                            await loop.run_in_executor(
+                                None,
+                                lambda tkr=t: refresh_all(tkr, pulse_dir=PULSE_DIR),
+                            )
+                        except Exception as e:
+                            logger.warning(f"[Metrics] refresh failed for {t}: {e}")
+                except Exception as e:
+                    logger.warning(f"[Verifier] {t}: {e}")
+        except Exception as e:
+            logger.error(f"[Verifier] Loop error: {e}")
+        await asyncio.sleep(300)
 
 
 # ── Pulse API Endpoints ──────────────────────────────────────────────
@@ -4394,6 +4580,160 @@ async def get_pulse_explain(ticker: str, ts: str):
     }
 
 
+# ── R.5 Ensemble API endpoints ───────────────────────────────────────
+
+@app.get("/api/pulse/ensemble/{ticker}")
+async def get_ensemble_latest(ticker: str):
+    """Latest pulse from every variant stream, plus agreement score.
+
+    Agreement score = fraction of variants that agreed with the
+    champion's signal on the most recent shared ``ensemble_tick_id``.
+    If variants fired at different tick ids (shouldn't happen in
+    production but can on startup) we report the champion's id only.
+    """
+    ticker = ticker.upper()
+    from tradingagents.pulse.ensemble_metrics import list_configs
+    configs = list_configs(ticker, pulse_dir=PULSE_DIR) or ["baseline"]
+    latest: Dict[str, Optional[dict]] = {}
+    for cfg in configs:
+        p = PULSE_DIR / ticker / "configs" / cfg / "pulse.jsonl"
+        if not p.exists():
+            latest[cfg] = None
+            continue
+        try:
+            last = None
+            with p.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        last = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+            latest[cfg] = last
+        except Exception as e:
+            logger.warning(f"[Ensemble] read failed {ticker}/{cfg}: {e}")
+            latest[cfg] = None
+
+    champion = _read_champion_name(ticker)
+    champ_entry = latest.get(champion) or {}
+    champ_tick = champ_entry.get("ensemble_tick_id")
+    champ_signal = champ_entry.get("signal")
+    # Agreement: fraction of non-null variants whose most-recent entry
+    # both shares the champion's tick_id AND emitted the same signal.
+    agreeing = 0
+    compared = 0
+    for cfg, entry in latest.items():
+        if entry is None:
+            continue
+        compared += 1
+        if entry.get("ensemble_tick_id") == champ_tick and entry.get("signal") == champ_signal:
+            agreeing += 1
+    return {
+        "ticker": ticker,
+        "champion": champion,
+        "champion_tick_id": champ_tick,
+        "champion_signal": champ_signal,
+        "agreement_score": round(agreeing / compared, 4) if compared else None,
+        "n_variants": compared,
+        "variants": latest,
+    }
+
+
+@app.get("/api/pulse/ensemble/{ticker}/metrics")
+async def get_ensemble_metrics(ticker: str):
+    """Return the per-config rolling metrics.json for every variant."""
+    ticker = ticker.upper()
+    from tradingagents.pulse.ensemble_metrics import list_configs
+    out: Dict[str, Any] = {}
+    for cfg in list_configs(ticker, pulse_dir=PULSE_DIR):
+        mpath = PULSE_DIR / ticker / "configs" / cfg / "metrics.json"
+        if mpath.exists():
+            try:
+                out[cfg] = json.loads(mpath.read_text())
+            except Exception as e:
+                logger.warning(f"[Ensemble] metrics read failed {ticker}/{cfg}: {e}")
+                out[cfg] = None
+        else:
+            out[cfg] = None
+    return {"ticker": ticker, "champion": _read_champion_name(ticker), "metrics": out}
+
+
+@app.get("/api/pulse/ensemble/{ticker}/disagreements")
+async def get_ensemble_disagreements(ticker: str, limit: int = 50):
+    """Ticks where configs produced ≥2 distinct signals.
+
+    Reads the most recent pulse from every variant, groups by
+    ``ensemble_tick_id``, and returns those groups that have more
+    than one unique signal value. High-signal diagnostic for tuning.
+    """
+    ticker = ticker.upper()
+    from tradingagents.pulse.ensemble_metrics import list_configs
+    by_tick: Dict[str, Dict[str, dict]] = {}
+    for cfg in list_configs(ticker, pulse_dir=PULSE_DIR):
+        p = PULSE_DIR / ticker / "configs" / cfg / "pulse.jsonl"
+        if not p.exists():
+            continue
+        for line in p.read_text().splitlines()[-2000:]:  # cap work
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            tid = entry.get("ensemble_tick_id")
+            if not tid:
+                continue
+            by_tick.setdefault(tid, {})[cfg] = entry
+
+    disagreements: List[dict] = []
+    for tid, group in by_tick.items():
+        signals = {e.get("signal") for e in group.values()}
+        if len(signals) >= 2:
+            disagreements.append({
+                "ensemble_tick_id": tid,
+                "ts": next(iter(group.values())).get("ts"),
+                "signals": {cfg: e.get("signal") for cfg, e in group.items()},
+                "confidences": {cfg: e.get("confidence") for cfg, e in group.items()},
+            })
+    # Newest first.
+    disagreements.sort(key=lambda d: d.get("ts") or "", reverse=True)
+    return {
+        "ticker": ticker,
+        "count": len(disagreements),
+        "disagreements": disagreements[:limit],
+    }
+
+
+class _ChampionRequest(BaseModel):
+    config: str
+
+
+@app.post("/api/pulse/ensemble/{ticker}/champion")
+async def set_ensemble_champion(ticker: str, req: _ChampionRequest):
+    """Propose-only champion swap. Updates ``champion.json`` on disk —
+    this only swaps which variant's stream the live pulse API surfaces.
+    Actual order routing is still gated by ``EXECUTE_TRADES`` (Stage 2
+    Commit M.2)."""
+    ticker = ticker.upper()
+    from tradingagents.pulse.config import list_variant_names
+    valid = set(list_variant_names())
+    if req.config not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown variant {req.config!r}; valid: {sorted(valid)}",
+        )
+    doc = _write_champion_name(ticker, req.config)
+    return {"ticker": ticker, **doc}
+
+
+@app.get("/api/pulse/ensemble/{ticker}/champion")
+async def get_ensemble_champion(ticker: str):
+    ticker = ticker.upper()
+    return {"ticker": ticker, "config": _read_champion_name(ticker)}
+
+
 @app.post("/api/pulse/run/{ticker}")
 async def run_pulse(ticker: str):
     """Manually trigger a single pulse analysis."""
@@ -4421,7 +4761,7 @@ async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None)
             not. By default we include everything but break out the counts.
     """
     ticker = ticker.upper()
-    pulse_path = PULSE_DIR / ticker / "pulse.jsonl"
+    pulse_path = _champion_pulse_path(ticker)  # R.5 indirection
     if not pulse_path.exists():
         return {"ticker": ticker, "total": 0, "scored": 0, "hit_rates": {}}
 

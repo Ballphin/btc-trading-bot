@@ -390,3 +390,99 @@ def use_config_override(cfg: PulseConfig) -> Iterator[PulseConfig]:
 def get_active_override() -> Optional[PulseConfig]:
     """Return the currently-active override, or None. Exposed for tests."""
     return _active_config.get()
+
+
+# ── Ensemble variant overlays (R.1) ──────────────────────────────────
+#
+# The pulse ensemble (plan §3) runs the same data-prep through N parallel
+# configurations. Each variant lives as a YAML overlay under
+# ``config/pulse_variants/<name>.yaml`` and is deep-merged onto the base
+# ``pulse_scoring.yaml``. Overlays share the same schema and are validated
+# the same way regime profiles are.
+#
+# Keeping variants as YAML files (rather than Python constants) means the
+# operator can tweak gates without a redeploy and the diffs are reviewable.
+# The canonical five variants are baseline / sr_symmetric / sr_breakout_gate
+# / chart_patterns / strict — see the files in config/pulse_variants/.
+
+VARIANTS_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "config" / "pulse_variants"
+)
+
+
+def list_variant_names(variants_dir: Optional[Path] = None) -> list[str]:
+    """Enumerate available variants by filename stem, deterministically sorted."""
+    d = variants_dir or VARIANTS_DIR
+    if not d.exists():
+        return []
+    return sorted(p.stem for p in d.glob("*.yaml"))
+
+
+def load_variant_overlay(
+    name: str,
+    variants_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Read a variant YAML and return its raw overlay dict.
+
+    An empty / missing file is treated as the no-op overlay ``{}``, which
+    is the correct semantics for the ``baseline`` variant. Keys under a
+    top-level ``overlay:`` entry are unwrapped so variant files can also
+    carry meta (``description:``) alongside the overlay itself.
+    """
+    d = variants_dir or VARIANTS_DIR
+    path = d / f"{name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Pulse variant not found: {path}")
+    raw = yaml.safe_load(path.read_bytes()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Variant {path} did not parse to a mapping")
+    # Support both flat overlays and ``overlay:``-wrapped schemas.
+    if "overlay" in raw and isinstance(raw["overlay"], dict):
+        return raw["overlay"]
+    # Strip meta-only keys so the overlay is clean to deep_merge.
+    return {k: v for k, v in raw.items() if k != "description"}
+
+
+def get_variant_config(
+    name: str,
+    *,
+    base_config: Optional[PulseConfig] = None,
+    variants_dir: Optional[Path] = None,
+    active_regime: str = "base",
+    venue: str = "hyperliquid",
+    data_source: str = "hyperliquid",
+) -> PulseConfig:
+    """Return a PulseConfig with variant ``name`` deep-merged over base.
+
+    Validation mirrors :func:`get_effective_config`: any out-of-range merge
+    falls back to base with a warning rather than crashing the pulse loop
+    (we never want a bad variant to take the whole ensemble down).
+    """
+    base = base_config if base_config is not None else get_config()
+    if name == "baseline":
+        return base.with_overrides(
+            active_regime=active_regime, venue=venue, data_source=data_source,
+        )
+    try:
+        overlay = load_variant_overlay(name, variants_dir=variants_dir)
+    except FileNotFoundError:
+        logger.warning(f"[PulseConfig] Variant {name} not found — using baseline")
+        return base.with_overrides(
+            active_regime=active_regime, venue=venue, data_source=data_source,
+        )
+    merged = deep_merge(base.data, overlay)
+    try:
+        _validate(merged)
+    except ValueError as e:
+        logger.error(
+            f"[PulseConfig] Variant {name} overlay invalid: {e} — using baseline"
+        )
+        return base.with_overrides(
+            active_regime=active_regime, venue=venue, data_source=data_source,
+        )
+    return base.with_overrides(
+        data=merged,
+        active_regime=active_regime,
+        venue=venue,
+        data_source=data_source,
+    )

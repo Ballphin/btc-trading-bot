@@ -1,0 +1,16 @@
+# sr_symmetric — addresses the missed Double-Top + BUY-into-resistance
+# call by damping confluence that opposes the nearby level.
+#
+# Today's _score_sr_proximity ONLY amplifies agreement (bullish near
+# support / bearish near resistance). This overlay introduces
+# `counter_level_damping` so bullish near resistance is penalised by
+# -0.15 (and bearish near support by +0.15). Magnitude matches the
+# existing max_factor, yielding a fully symmetric S/R behaviour.
+description: >-
+  Symmetric S/R: penalise counter-level confluence by
+  ±counter_level_damping (same magnitude as the existing agreement
+  amplifier). Fires at the same proximity window as baseline.
+
+confluence:
+  sr_proximity:
+    counter_level_damping: 0.15   # new key consumed by engine R.2

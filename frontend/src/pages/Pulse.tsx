@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert, ChevronRight } from 'lucide-react';
+import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert, ChevronRight, Layers } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+import EnsembleTab from '../components/EnsembleTab';
 
 // Pulse Explain Chart gating: only BUY/SHORT at >= 75% confidence are clickable.
 const EXPLAIN_MIN_CONFIDENCE = 0.75;
@@ -340,7 +341,7 @@ export default function Pulse() {
   const [loading, setLoading] = useState(false);
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
-  const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest'>('signals');
+  const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble'>('signals');
   const [runningPulse, setRunningPulse] = useState(false);
 
   // Backtest form state
@@ -593,6 +594,7 @@ export default function Pulse() {
       <div className="flex items-center gap-1 border-b border-white/5 pb-px">
         {[
           { key: 'signals', label: 'Signal History', icon: Zap },
+          { key: 'ensemble', label: 'Ensemble', icon: Layers },
           { key: 'scorecard', label: 'Scorecard', icon: BarChart3 },
           { key: 'backtest', label: 'Backtest', icon: TrendingUp },
         ].map(tab => (
@@ -742,6 +744,10 @@ export default function Pulse() {
             );
           })}
         </div>
+      )}
+
+      {activeTab === 'ensemble' && (
+        <EnsembleTab ticker={ticker} />
       )}
 
       {activeTab === 'scorecard' && (

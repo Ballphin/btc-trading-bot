@@ -1,0 +1,4 @@
+# Baseline variant — empty overlay, equivalent to today's on-disk
+# pulse_scoring.yaml. Kept as a named file so the ensemble loop can
+# treat "baseline" uniformly with other variants (no special-casing).
+description: "Control group. Byte-identical behaviour to the current pulse engine."

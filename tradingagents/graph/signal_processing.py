@@ -1,9 +1,42 @@
 # TradingAgents/graph/signal_processing.py
 
 import json
+import logging
 import re
-from typing import Dict, Any, Union
+from typing import Dict, Any, Optional, Union
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
+
+# Deterministic extractor for the team's stop-signal convention
+# (see the four analyst system prompts under tradingagents/agents/analysts/*).
+# Every agent is instructed to prefix/suffix its final answer with
+# ``FINAL TRANSACTION PROPOSAL: **<RATING>**`` — this IS the authoritative
+# finale. Matching it with a regex is ~zero cost and eliminates the
+# failure mode where the fallback LLM latches onto earlier hedging prose
+# (the "HOLD vs SHORT" bug in the Apr-2026 NVDA screenshot).
+_RATINGS = ("BUY", "OVERWEIGHT", "HOLD", "UNDERWEIGHT", "SELL", "SHORT", "COVER")
+_PROPOSAL_RE = re.compile(
+    r"FINAL\s+TRANSACTION\s+PROPOSAL\s*:?[\s*]*"
+    r"(BUY|SELL|SHORT|COVER|HOLD|OVERWEIGHT|UNDERWEIGHT)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_from_proposal_line(text: str) -> Optional[str]:
+    """Return the LAST ``FINAL TRANSACTION PROPOSAL: X`` rating in ``text``,
+    or None if no such line exists.
+
+    "Last" matters: debate-style transcripts often contain intermediate
+    proposals (bull rebuttal → "PROPOSAL: BUY", bear rebuttal → "PROPOSAL:
+    SHORT"), and the judge's override appears last by construction.
+    """
+    if not text:
+        return None
+    matches = _PROPOSAL_RE.findall(text)
+    if not matches:
+        return None
+    return matches[-1].upper()
 
 
 class SignalProcessor:
@@ -29,6 +62,36 @@ class SignalProcessor:
         # Try to parse as JSON first
         structured_signal = self._try_parse_json(full_signal)
         if structured_signal:
+            # Cross-check: when the portfolio_manager LLM emits BOTH a
+            # JSON block AND a trailing FINAL TRANSACTION PROPOSAL line
+            # that disagrees, prefer the proposal line — that line is
+            # the team's contractually-authoritative stop signal and the
+            # JSON is often the hedged/templated prelude. Log the
+            # disagreement loudly so we can spot prompt regressions.
+            proposal = _extract_from_proposal_line(full_signal)
+            if proposal and proposal != structured_signal.get("signal"):
+                logger.warning(
+                    "[SignalProcessor] JSON/proposal disagreement: "
+                    "json=%s proposal=%s — preferring proposal line",
+                    structured_signal.get("signal"), proposal,
+                )
+                structured_signal["signal"] = proposal
+                # Stops from the JSON block are likely computed for the
+                # JSON's signal direction, not the override. Null them
+                # so downstream sizing falls back to regime defaults
+                # rather than using a long stop on a short trade.
+                if proposal in ("SHORT", "SELL", "COVER"):
+                    if (structured_signal.get("stop_loss_price") or 0) < (
+                        structured_signal.get("take_profit_price") or 0
+                    ):
+                        structured_signal["stop_loss_price"] = 0
+                        structured_signal["take_profit_price"] = 0
+                elif proposal in ("BUY", "OVERWEIGHT"):
+                    if (structured_signal.get("stop_loss_price") or 0) > (
+                        structured_signal.get("take_profit_price") or 0
+                    ):
+                        structured_signal["stop_loss_price"] = 0
+                        structured_signal["take_profit_price"] = 0
             return structured_signal
         
         # Fallback: extract signal word using LLM
@@ -142,14 +205,30 @@ class SignalProcessor:
     
     def _extract_signal_word(self, full_signal: str) -> str:
         """
-        Fallback method: extract just the signal word using LLM.
-        
+        Fallback method: extract just the signal word.
+
+        Resolution order (cheapest + most deterministic first):
+          1. Regex on the team's ``FINAL TRANSACTION PROPOSAL: X`` stop-signal
+             convention — authoritative per the analyst system prompts.
+          2. LLM extraction — only when the marker is absent (legacy logs,
+             degraded judge output).
+
+        The two-tier ordering closes the bug where an LLM extractor, faced
+        with judge prose that opens with hedging language ("high-risk,
+        low-reward") before the decisive turn, would latch onto the early
+        tone and return HOLD despite a trailing ``FINAL TRANSACTION
+        PROPOSAL: SHORT`` line.
+
         Args:
             full_signal: Complete trading signal text
 
         Returns:
             Extracted rating (BUY, OVERWEIGHT, HOLD, UNDERWEIGHT, SELL, SHORT, or COVER)
         """
+        proposal = _extract_from_proposal_line(full_signal)
+        if proposal:
+            return proposal
+
         messages = [
             (
                 "system",
@@ -160,4 +239,10 @@ class SignalProcessor:
             ("human", full_signal),
         ]
 
-        return self.quick_thinking_llm.invoke(messages).content.strip().upper()
+        extracted = self.quick_thinking_llm.invoke(messages).content.strip().upper()
+        # Defensive: if the LLM returns junk, collapse to HOLD rather than
+        # propagate an unknown rating through the pipeline.
+        for r in _RATINGS:
+            if r in extracted:
+                return r
+        return "HOLD"

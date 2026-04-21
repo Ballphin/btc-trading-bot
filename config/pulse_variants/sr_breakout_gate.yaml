@@ -1,0 +1,16 @@
+# sr_breakout_gate — like sr_symmetric, but waives the counter-level
+# penalty when price has CONFIRMED a breakout (last completed 1h close
+# above resistance for longs, or below support for shorts).
+#
+# Hypothesis: true breakouts deserve no friction, but pre-breakout
+# longs into resistance (the user's reported trade) are penalised.
+description: >-
+  Symmetric S/R damping with a last-close breakout waiver.
+  If confluence is bullish AND the most-recent completed 1h bar closed
+  ABOVE resistance, the counter-level penalty is waived (mirror for
+  bearish + support).
+
+confluence:
+  sr_proximity:
+    counter_level_damping: 0.15
+    breakout_waiver_enabled: true   # engine R.2 consults last_1h_close

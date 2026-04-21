@@ -361,12 +361,28 @@ def _score_sr_proximity(
     confluence_before_sr: float,
     cfg: PulseConfig,
 ) -> tuple:
-    """S/R proximity as a CONFLUENCE AMPLIFIER, not an independent trigger.
+    """S/R proximity as a CONFLUENCE AMPLIFIER and (opt-in) DAMPER.
 
-    Rule: only amplify signals that already agree with the nearby level.
+    Default (baseline) rule — unchanged:
       * price near support + confluence bullish   → +max_factor
       * price near resistance + confluence bearish → -max_factor
-      * anything else                              → 0.0
+      * anything else                              → 0.0 (no penalty)
+
+    **R.2 variant overlays** add two opt-in behaviours:
+
+    1. ``counter_level_damping`` (float, default 0.0)
+       When > 0, applies a symmetric penalty to confluence that
+       *opposes* the nearby level:
+         * bullish confluence + near resistance → −damping
+         * bearish confluence + near support    → +damping
+       Motivation: the missed Double-Top + BUY-into-resistance call
+       came from a zero-friction bullish-into-resistance setup.
+
+    2. ``breakout_waiver_enabled`` (bool, default False)
+       If True, the damping penalty in (1) is waived when price has
+       already cleared the level (spot > resistance for bullish, or
+       spot < support for bearish). This lets confirmed breakouts pass
+       without friction while keeping pre-breakout traps penalised.
 
     Returns (sr_factor, near_side: 'support'|'resistance'|None).
     """
@@ -380,12 +396,34 @@ def _score_sr_proximity(
 
     window_mul = float(cfg.get("confluence", "sr_proximity", "window_atr_mul", default=0.3))
     max_factor = float(cfg.get("confluence", "sr_proximity", "max_factor", default=0.15))
+    damping = float(cfg.get("confluence", "sr_proximity", "counter_level_damping", default=0.0))
+    waiver_enabled = bool(cfg.get("confluence", "sr_proximity", "breakout_waiver_enabled", default=False))
     window = window_mul * atr_1h
 
-    if support is not None and abs(spot - support) <= window and confluence_before_sr > 0:
+    near_support = support is not None and abs(spot - support) <= window
+    near_resistance = resistance is not None and abs(spot - resistance) <= window
+
+    # Agreement amplifier (existing behaviour, unchanged).
+    if near_support and confluence_before_sr > 0:
         return +max_factor, "support"
-    if resistance is not None and abs(spot - resistance) <= window and confluence_before_sr < 0:
+    if near_resistance and confluence_before_sr < 0:
         return -max_factor, "resistance"
+
+    # Counter-level damping (opt-in; baseline variant leaves damping=0
+    # which keeps the legacy zero-penalty behaviour).
+    if damping > 0.0:
+        if near_resistance and confluence_before_sr > 0:
+            # Waiver: already above resistance → treat as confirmed
+            # breakout, no penalty. Uses spot as a proxy for the last
+            # completed 1h close (within a few bps at pulse cadence).
+            if waiver_enabled and resistance is not None and spot > resistance:
+                return 0.0, "resistance"
+            return -damping, "resistance"
+        if near_support and confluence_before_sr < 0:
+            if waiver_enabled and support is not None and spot < support:
+                return 0.0, "support"
+            return +damping, "support"
+
     return 0.0, None
 
 

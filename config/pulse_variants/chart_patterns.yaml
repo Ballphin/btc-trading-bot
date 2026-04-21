@@ -1,0 +1,20 @@
+# chart_patterns — feeds the existing display-only chart-pattern
+# detectors (Double Top, H&S, Resistance Line, etc.) into the pulse
+# score as a bounded bias factor. Max |factor| = 0.10 per bearish /
+# bullish cluster so no single pattern can single-handedly flip a
+# direction — it amplifies or dampens confluence already present.
+description: >-
+  Chart-pattern bias integrated into scoring (currently display-only).
+  Bearish patterns at/near current price contribute negative bias;
+  bullish patterns contribute positive bias. Bounded at ±0.10.
+
+confluence:
+  chart_patterns:
+    enabled: true
+    max_factor: 0.10
+    # Only patterns that are "completed" or "confirmed" (per the
+    # detector's own `state`) count. "forming" patterns are ignored.
+    required_states: ["completed", "confirmed"]
+    # Minimum fit-score for a pattern to contribute. Matches the
+    # detector config's default "decent" threshold.
+    min_fit_score: 0.60

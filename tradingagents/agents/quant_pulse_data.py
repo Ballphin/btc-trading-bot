@@ -359,7 +359,14 @@ def compute_vwap(candles_1m: pd.DataFrame) -> Optional[float]:
     now_utc = datetime.now(timezone.utc)
     midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    today = candles_1m[candles_1m["timestamp"] >= pd.Timestamp(midnight.replace(tzinfo=None))].copy()
+    # tz-policy: the timestamp column may be tz-aware (``datetime64[us, UTC]``)
+    # or tz-naive depending on vendor. Newer pandas refuses mixed-tz
+    # comparisons, so normalise the anchor to match the column.
+    col = candles_1m["timestamp"]
+    anchor = pd.Timestamp(midnight)
+    if getattr(col.dtype, "tz", None) is None and anchor.tzinfo is not None:
+        anchor = anchor.tz_localize(None)
+    today = candles_1m[col >= anchor].copy()
     if today.empty or today["volume"].sum() < 1e-10:
         return None
 
@@ -373,10 +380,15 @@ def compute_vwap_from_slice(candles_1m: pd.DataFrame, ts: datetime) -> Optional[
     if candles_1m.empty:
         return None
     midnight = ts.replace(hour=0, minute=0, second=0, microsecond=0)
-    today = candles_1m[
-        (candles_1m["timestamp"] >= pd.Timestamp(midnight.replace(tzinfo=None)))
-        & (candles_1m["timestamp"] <= pd.Timestamp(ts.replace(tzinfo=None) if hasattr(ts, 'replace') else ts))
-    ]
+    col = candles_1m["timestamp"]
+    lo = pd.Timestamp(midnight)
+    hi = pd.Timestamp(ts)
+    if getattr(col.dtype, "tz", None) is None:
+        if lo.tzinfo is not None:
+            lo = lo.tz_localize(None)
+        if hi.tzinfo is not None:
+            hi = hi.tz_localize(None)
+    today = candles_1m[(col >= lo) & (col <= hi)]
     if today.empty or today["volume"].sum() < 1e-10:
         return None
     typical_price = (today["high"] + today["low"] + today["close"]) / 3
