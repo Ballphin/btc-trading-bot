@@ -98,6 +98,94 @@ class TestStartAutoTuneValidation:
         )
         assert r.status_code == 400
 
+    def test_inflight_returns_409_with_existing_job_id(self):
+        """Stage 2 F.2 — concurrent POST for same (ticker, regime) returns
+        409 with the already-running job_id instead of racing."""
+        key = ("BTC-USD", "bull")
+        try:
+            server_module._AUTOTUNE_INFLIGHT[key] = "existing123"
+            r = client.post(
+                "/api/pulse/autotune/BTC-USD",
+                json={
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-03-01",
+                    "active_regime": "bull",
+                },
+            )
+            assert r.status_code == 409
+            detail = r.json()["detail"]
+            assert detail["job_id"] == "existing123"
+            assert detail["active_regime"] == "bull"
+        finally:
+            server_module._AUTOTUNE_INFLIGHT.pop(key, None)
+
+    def test_auto_drift_cooldown_returns_429(self):
+        """Commit I — a second auto-drift POST within 48h is rejected 429."""
+        key = ("BTC-USD", "bull")
+        import time as _t
+        try:
+            server_module._AUTOTUNE_DRIFT_COOLDOWN[key] = _t.time()
+            r = client.post(
+                "/api/pulse/autotune/BTC-USD",
+                json={
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-03-01",
+                    "active_regime": "bull",
+                    "source": "auto-drift",
+                },
+            )
+            assert r.status_code == 429
+            assert r.json()["detail"]["error"] == "auto_drift_cooldown"
+        finally:
+            server_module._AUTOTUNE_DRIFT_COOLDOWN.pop(key, None)
+
+    def test_manual_source_bypasses_cooldown(self):
+        """Commit I — manual POSTs are never rate-limited by the cooldown."""
+        key = ("BTC-USD", "bull")
+        import time as _t
+        from unittest.mock import patch as _patch
+        try:
+            server_module._AUTOTUNE_DRIFT_COOLDOWN[key] = _t.time()
+            with _patch("tradingagents.backtesting.autotune.AutoTuner.run",
+                        side_effect=RuntimeError("stop")):
+                r = client.post(
+                    "/api/pulse/autotune/BTC-USD",
+                    json={
+                        "start_date": "2024-01-01",
+                        "end_date": "2024-03-01",
+                        "active_regime": "bull",
+                        # default source = "manual"
+                    },
+                )
+                assert r.status_code != 429
+        finally:
+            server_module._AUTOTUNE_DRIFT_COOLDOWN.pop(key, None)
+            server_module._AUTOTUNE_INFLIGHT.pop(key, None)
+
+    def test_inflight_key_is_per_regime(self):
+        """Different regime on same ticker is NOT blocked."""
+        key = ("BTC-USD", "bull")
+        try:
+            server_module._AUTOTUNE_INFLIGHT[key] = "existing123"
+            # active_regime=bear with a tuner patch so we don't actually run.
+            from unittest.mock import patch as _patch
+            with _patch("tradingagents.backtesting.autotune.AutoTuner.run",
+                        side_effect=RuntimeError("stop")):
+                r = client.post(
+                    "/api/pulse/autotune/BTC-USD",
+                    json={
+                        "start_date": "2024-01-01",
+                        "end_date": "2024-03-01",
+                        "active_regime": "bear",
+                    },
+                )
+                # The SSE stream opens (200); bear slot is independent of
+                # bull. We only assert the request wasn't rejected as 409.
+                assert r.status_code != 409
+        finally:
+            server_module._AUTOTUNE_INFLIGHT.pop(key, None)
+            server_module._AUTOTUNE_INFLIGHT.pop(("BTC-USD", "bear"), None)
+
 
 # ── GET /api/pulse/autotune/jobs/{job_id} ────────────────────────────
 

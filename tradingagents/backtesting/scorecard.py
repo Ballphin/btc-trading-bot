@@ -670,6 +670,34 @@ def get_scorecard(
         for regime, s in regime_stats.items()
     }
 
+    # ── Stage 2 Commit N — per-regime splits on both taxonomies ──────
+    # directional: bull/bear/range_bound/ambiguous (from the auto-tuner
+    # regime profile or the directional classifier). statistical:
+    # trend/chop/high_vol_trend/mixed (from regime.py). Cells with
+    # sample_size < 30 are marked thin_sample so the UI can grey them.
+    def _split_by(field_candidates: List[str]) -> Dict[str, Dict[str, Any]]:
+        buckets: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: {"correct": 0, "total": 0},
+        )
+        for d in scored:
+            tag = next((d.get(k) for k in field_candidates if d.get(k)), None) or "unknown"
+            wc = _was_correct(d)
+            if wc is not None:
+                buckets[tag]["total"] += 1
+                if wc:
+                    buckets[tag]["correct"] += 1
+        return {
+            name: {
+                "win_rate": round(s["correct"] / s["total"], 4) if s["total"] > 0 else 0,
+                "sample_size": s["total"],
+                "thin_sample": s["total"] < 30,
+            }
+            for name, s in buckets.items()
+        }
+
+    per_directional_regime = _split_by(["directional_regime", "active_regime"])
+    per_statistical_regime = _split_by(["statistical_regime", "regime_mode", "regime"])
+
     # Win rate by signal+regime combo
     combo_stats = defaultdict(lambda: {"correct": 0, "total": 0})
     for d in scored:
@@ -729,6 +757,8 @@ def get_scorecard(
         "avg_brier_score": round(avg_brier, 4) if avg_brier is not None else None,
         "win_by_signal": win_by_signal,
         "win_by_regime": win_by_regime,
+        "per_directional_regime": per_directional_regime,
+        "per_statistical_regime": per_statistical_regime,
         "win_by_combo": win_by_combo,
         "exit_type_breakdown": dict(exit_types),
         "ev_per_trade_10k": ev_per_trade,

@@ -30,6 +30,7 @@ import {
 import { clsx } from 'clsx';
 import {
   applyAutoTuneArtifact,
+  fetchCurrentRegime,
   getAutoTuneArtifact,
   listAutoTuneArtifacts,
   streamAutoTune,
@@ -41,6 +42,7 @@ import {
   type AutoTuneRegime,
   type AutoTuneResult,
   type AutoTuneVerdict,
+  type CurrentDirectionalRegime,
 } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 
@@ -48,7 +50,9 @@ import useDocumentTitle from '../hooks/useDocumentTitle';
 
 type TabKey = 'new' | 'proposals' | 'regime';
 
-const REGIMES: AutoTuneRegime[] = ['base', 'bull', 'bear', 'sideways', 'ambiguous'];
+// Stage 2 Commit G — 'range_bound' is the preferred name; 'sideways' is
+// kept in the list for back-compat with existing YAML profiles.
+const REGIMES: AutoTuneRegime[] = ['base', 'bull', 'bear', 'range_bound', 'sideways', 'ambiguous'];
 
 const VERDICT_STYLE: Record<AutoTuneVerdict, { bg: string; text: string; icon: React.ReactNode }> = {
   PROPOSE: {
@@ -863,6 +867,9 @@ function RegimeTab({ epoch }: { epoch: number }) {
 
       {!loading && !err && (
         <>
+          {/* Stage 2 Commit J — "currently detected regime" callout. */}
+          <CurrentRegimeCard ticker="BTC-USD" />
+
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {REGIMES.map((r) => {
               const arr = byRegime.get(r) ?? [];
@@ -883,6 +890,95 @@ function RegimeTab({ epoch }: { epoch: number }) {
     </div>
   );
 }
+
+/**
+ * Stage 2 Commit J — "currently detected regime" card.
+ *
+ * Polls `/api/pulse/regime/current/{ticker}` every 5 minutes. The card
+ * is informational only: clicking it doesn't switch the active profile.
+ * If the detected label differs from the user's active regime (inferred
+ * from the most recent artifact), a soft amber callout appears
+ * suggesting a manual switch.
+ */
+function CurrentRegimeCard({ ticker }: { ticker: string }) {
+  const [data, setData] = useState<CurrentDirectionalRegime | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    let abort = false;
+    const load = async () => {
+      try {
+        const r = await fetchCurrentRegime(ticker);
+        if (!abort) { setData(r); setErr(null); }
+      } catch (e) {
+        if (!abort) setErr((e as Error).message);
+      }
+    };
+    load();
+    const id = setInterval(load, 5 * 60 * 1000);
+    return () => { abort = true; clearInterval(id); };
+  }, [ticker]);
+
+  const labelStyle: Record<string, string> = {
+    bull: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+    bear: 'text-rose-400 bg-rose-500/10 border-rose-500/30',
+    range_bound: 'text-sky-400 bg-sky-500/10 border-sky-500/30',
+    ambiguous: 'text-slate-400 bg-slate-500/10 border-slate-500/30',
+  };
+
+  return (
+    <div className="glass-static p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs text-slate-500 uppercase tracking-wider mb-1">
+            Currently detected regime · {ticker}
+          </p>
+          {data ? (
+            <>
+              <div className="flex items-center gap-2">
+                <span className={clsx(
+                  'inline-block px-3 py-1 rounded-md border text-sm font-semibold capitalize',
+                  labelStyle[data.label] ?? labelStyle.ambiguous,
+                )}>
+                  {data.label.replace('_', ' ')}
+                </span>
+                {data.insufficient_history && (
+                  <span className="text-xs text-amber-400">insufficient history</span>
+                )}
+              </div>
+              <p className="text-xs text-slate-400 mt-2">{data.reason}</p>
+            </>
+          ) : err ? (
+            <p className="text-xs text-rose-400">{err}</p>
+          ) : (
+            <p className="text-xs text-slate-500">Loading…</p>
+          )}
+        </div>
+        {data && !data.insufficient_history && (
+          <div className="grid grid-cols-2 gap-2 text-right text-xs text-slate-400 min-w-[12rem]">
+            <span>90d return</span>
+            <span className="text-white font-mono">
+              {(data.return_90d * 100).toFixed(1)}%
+            </span>
+            <span>30d return</span>
+            <span className="text-white font-mono">
+              {(data.return_30d * 100).toFixed(1)}%
+            </span>
+            <span>% above SMA30</span>
+            <span className="text-white font-mono">
+              {(data.frac_above_sma30 * 100).toFixed(0)}%
+            </span>
+            <span>range/ATR</span>
+            <span className="text-white font-mono">
+              {data.range_atr_ratio.toFixed(2)}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function RegimeStatusCard({
   regime, latest, tuneCount,
@@ -936,6 +1032,15 @@ function CalibrationTrend({ artifacts }: { artifacts: AutoTuneArtifact[] }) {
   // realized = the point estimate from the same OOS fold pool. In an
   // honest walk-forward they should track closely; systematic bias
   // surfaces as the two series diverging.
+  //
+  // Stage 2 Commit Q — colour-code points by the UNBIASED delta
+  // `realized - point_estimate`. When we plumb the live-scorecard
+  // Sharpe through (future), the colour flips red/green on sign. For
+  // the current mono-source path (realized = point from same artifact)
+  // the delta is zero by construction so we colour by
+  // `(point - CI-lower)` magnitude as a liquidity-of-confidence proxy
+  // instead; note this is a v1 stopgap and the original v1 spec's
+  // `realized - CI_lower` was biased ≥0 → the plan rejected it.
   const rows = useMemo(() => {
     return artifacts
       .filter((a) => a.metrics.oos_sharpe_point !== undefined)
@@ -995,11 +1100,21 @@ function CalibrationTrend({ artifacts }: { artifacts: AutoTuneArtifact[] }) {
             cx={P + i * xStep}
             cy={yScale(r.realized)}
             r={3}
-            fill="rgb(20,184,166)"
+            // Stage 2 Commit Q colour: red when delta < -0.1 (point
+            // materially below CI-lower — broken bootstrap), amber for
+            // 0-0.1 (tight gap → high uncertainty), teal elsewhere.
+            // Swap to `realized_live - point` once scorecard is wired.
+            fill={(() => {
+              const delta = r.realized - r.predicted;
+              if (delta < -0.1) return 'rgb(239,68,68)';
+              if (delta < 0.1) return 'rgb(245,158,11)';
+              return 'rgb(20,184,166)';
+            })()}
           >
             <title>
               {r.label} · regime={r.regime}{'\n'}
               realized={r.realized.toFixed(2)} · predicted={r.predicted.toFixed(2)}
+              {'\n'}delta={(r.realized - r.predicted).toFixed(2)}
             </title>
           </circle>
         ))}

@@ -29,7 +29,7 @@ import uuid
 import requests
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import uvicorn
@@ -4282,6 +4282,21 @@ def _fetch_explain_candles(ticker: str, ts: str) -> Dict[str, Any]:
     return {"serial": candles_serial, "df": candles_df}
 
 
+def _pulse_attribution_for(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Stage 2 Commit O — thin wrapper around attribution module.
+
+    Kept as a module-level helper so the explain endpoint stays readable
+    and the attribution lookup can be patched in tests.
+    """
+    from tradingagents.backtesting.attribution import per_decision_attribution
+    try:
+        return per_decision_attribution(entry)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("attribution computation failed: %s", e)
+        return {"top_positive": [], "top_negative": [], "persistence_mul": None,
+                "total_abs_contribution": 0.0}
+
+
 @app.get("/api/pulse/explain/{ticker}/{ts}")
 async def get_pulse_explain(ticker: str, ts: str):
     """Return chart-ready explain payload for a single pulse signal.
@@ -4368,6 +4383,8 @@ async def get_pulse_explain(ticker: str, ts: str):
         "regime_mode": entry.get("regime_mode"),
         "breakdown_top3": [{"key": k, "weight": w} for k, w in top3],
         "breakdown": breakdown,
+        # Stage 2 Commit O — per-decision feature attribution.
+        "attribution": _pulse_attribution_for(entry),
         "candles": candles_serial,
         "chart_patterns": chart_patterns,
         "candlestick_patterns": candlestick_patterns,
@@ -4478,6 +4495,33 @@ async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None)
         "fill_summary": fill_summary,
         "engine_versions": sorted({p.get("engine_version") for p in all_pulses if p.get("engine_version")}),
     }
+
+
+@app.get("/api/pulse/regime/current/{ticker}")
+async def get_current_directional_regime(ticker: str):
+    """Return the latest directional regime classification (Stage 2 G).
+
+    Fetches ~120 days of daily OHLC via yfinance and runs the directional
+    classifier with the standard latency budget. Log-only — does NOT
+    switch the active regime profile; the UI uses this purely for the
+    "Currently detected regime" card and the mismatch callout.
+    """
+    from tradingagents.pulse.regime_directional import classify_directional
+
+    ticker = ticker.upper()
+    try:
+        df = yf.Ticker(ticker).history(period="180d", interval="1d")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"OHLC fetch failed: {e}")
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"No OHLC data for {ticker}")
+
+    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})
+    df = df[["open", "high", "low", "close"]].dropna()
+
+    result = classify_directional(df, ticker=ticker, log=True)
+    return {"ticker": ticker, **result.to_dict()}
 
 
 @app.get("/api/pulse/scheduler/status")
@@ -4806,6 +4850,10 @@ class PulseAutoTuneRequest(BaseModel):
     active_regime: str = "base"
     pulse_interval_minutes: int = 15
     seed: int = 42
+    # Stage 2 Commit I — provenance tag stamped onto the resulting
+    # artifact. "manual" is the Stage 1 default; "auto-drift" is set by
+    # the weekly drift monitor when it triggers a re-tune.
+    source: str = "manual"
 
 
 class PulseAutoTuneApplyRequest(BaseModel):
@@ -4822,6 +4870,16 @@ class PulseAutoTuneApplyRequest(BaseModel):
 #: result (TuneReport dict once done), error.
 _AUTOTUNE_JOBS: Dict[str, Dict[str, Any]] = {}
 _AUTOTUNE_JOB_LOCK = threading.Lock()
+# Stage 2 F.2 — inflight guard keyed on (ticker, active_regime). A second
+# POST for the same (ticker, regime) while a job is running returns 409
+# with the existing job_id, so the apply path never races two artifacts
+# for the same profile.
+_AUTOTUNE_INFLIGHT: Dict[Tuple[str, str], str] = {}
+# Stage 2 Commit I — 48h cooldown per (ticker, regime) for auto-drift
+# triggers only. Manual POSTs are never rate-limited. Value = epoch
+# seconds of the last auto-drift trigger accepted.
+_AUTOTUNE_DRIFT_COOLDOWN: Dict[Tuple[str, str], float] = {}
+_AUTOTUNE_DRIFT_COOLDOWN_SEC = 48 * 3600
 
 
 def _autotune_spec_from_request(ticker: str, req: PulseAutoTuneRequest):
@@ -4845,7 +4903,9 @@ def _autotune_spec_from_request(ticker: str, req: PulseAutoTuneRequest):
     if days > 730:
         raise HTTPException(status_code=400, detail="Window too large (max 730 days)")
 
-    valid_regimes = {"base", "bull", "bear", "sideways", "ambiguous"}
+    # Stage 2 Commit G — 'range_bound' is the crypto-specific replacement
+    # for 'sideways'; 'sideways' kept for back-compat with existing YAML.
+    valid_regimes = {"base", "bull", "bear", "sideways", "range_bound", "ambiguous"}
     if req.active_regime not in valid_regimes:
         raise HTTPException(
             status_code=400,
@@ -4904,7 +4964,45 @@ async def start_pulse_autotune(ticker: str, req: PulseAutoTuneRequest):
 
     spec = _autotune_spec_from_request(ticker, req)
 
-    job_id = str(uuid.uuid4())[:12]
+    # Commit I — 48h cooldown: drift-triggered re-tunes for the same
+    # (ticker, regime) are rate-limited so a flapping alert doesn't
+    # spawn back-to-back jobs. Manual POSTs bypass the cooldown.
+    cooldown_key = (ticker, req.active_regime)
+    if req.source == "auto-drift":
+        last = _AUTOTUNE_DRIFT_COOLDOWN.get(cooldown_key, 0.0)
+        remaining = _AUTOTUNE_DRIFT_COOLDOWN_SEC - (time.time() - last)
+        if remaining > 0:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "auto_drift_cooldown",
+                    "ticker": ticker,
+                    "active_regime": req.active_regime,
+                    "remaining_sec": int(remaining),
+                },
+            )
+
+    # F.2 — acquire the (ticker, regime) inflight slot BEFORE allocating
+    # a job_id. If another tune is running for the same pair, return 409
+    # with that job's id so the caller can just resume its SSE stream.
+    inflight_key = (ticker, req.active_regime)
+    with _AUTOTUNE_JOB_LOCK:
+        existing = _AUTOTUNE_INFLIGHT.get(inflight_key)
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "autotune_inflight",
+                    "job_id": existing,
+                    "ticker": ticker,
+                    "active_regime": req.active_regime,
+                },
+            )
+        job_id = str(uuid.uuid4())[:12]
+        _AUTOTUNE_INFLIGHT[inflight_key] = job_id
+        if req.source == "auto-drift":
+            _AUTOTUNE_DRIFT_COOLDOWN[cooldown_key] = time.time()
+
     queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
 
     with _AUTOTUNE_JOB_LOCK:
@@ -4940,6 +5038,16 @@ async def start_pulse_autotune(ticker: str, req: PulseAutoTuneRequest):
         try:
             tuner = AutoTuner(spec=spec, progress_cb=progress_cb, job_id=job_id)
             report = tuner.run()
+            # Commit I — stamp provenance (manual vs auto-drift) onto the
+            # persisted artifact so the Proposals UI can badge it.
+            try:
+                ap = Path(report.artifact_path)
+                if ap.exists():
+                    data = json.loads(ap.read_text())
+                    data["source"] = req.source
+                    ap.write_text(json.dumps(data, indent=2, default=str))
+            except Exception as e:
+                logger.warning("artifact source stamp failed: %s", e)
             payload = {
                 "job_id": job_id,
                 "verdict": report.verdict,
@@ -4952,6 +5060,7 @@ async def start_pulse_autotune(ticker: str, req: PulseAutoTuneRequest):
                 "per_fold": report.per_fold,
                 "artifact_path": report.artifact_path,
                 "ran_at": report.ran_at,
+                "source": req.source,
             }
             with _AUTOTUNE_JOB_LOCK:
                 _AUTOTUNE_JOBS[job_id]["status"] = "done"
@@ -4966,6 +5075,13 @@ async def start_pulse_autotune(ticker: str, req: PulseAutoTuneRequest):
                 _AUTOTUNE_JOBS[job_id]["status"] = "error"
                 _AUTOTUNE_JOBS[job_id]["error"] = str(e)
             loop.call_soon_threadsafe(queue.put_nowait, {"event": "error", "data": {"error": str(e)}})
+        finally:
+            # F.2 — release inflight slot on terminal state (done or error).
+            # The handler can't do this because it returns as soon as SSE
+            # opens; only the executor task sees the real end.
+            with _AUTOTUNE_JOB_LOCK:
+                if _AUTOTUNE_INFLIGHT.get(inflight_key) == job_id:
+                    _AUTOTUNE_INFLIGHT.pop(inflight_key, None)
 
     # Launch via copy_context().run so the ContextVar override system
     # the engine uses is properly propagated. We do NOT ``await`` the
@@ -5043,6 +5159,7 @@ async def list_pulse_autotune_artifacts(limit: int = 50):
             "ran_at": payload.get("ran_at"),
             "ticker": payload.get("spec", {}).get("ticker"),
             "active_regime": payload.get("spec", {}).get("active_regime"),
+            "source": payload.get("source", "manual"),
             "verdict": payload.get("verdict"),
             "current_config_hash": payload.get("current_config_hash"),
             "proposed_config_hash": payload.get("proposed_config_hash"),

@@ -90,6 +90,9 @@ MIN_TRADES_OOS_BY_REGIME: Dict[str, int] = {
     "bull":     400,
     "bear":     300,
     "sideways": 200,
+    # Stage 2 Commit G — 'range_bound' is the crypto-specific replacement
+    # for 'sideways'; keeping both so back-compat YAML doesn't explode.
+    "range_bound": 200,
     "ambiguous": 200,
 }
 

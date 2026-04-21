@@ -401,7 +401,7 @@ export async function fetchPulseExplain(
 // `tradingagents/backtesting/autotune.py` TuneReport shape.
 
 export type AutoTuneVerdict = 'PROPOSE' | 'PROVISIONAL' | 'REJECT';
-export type AutoTuneRegime = 'base' | 'bull' | 'bear' | 'sideways' | 'ambiguous';
+export type AutoTuneRegime = 'base' | 'bull' | 'bear' | 'range_bound' | 'sideways' | 'ambiguous';
 
 export interface AutoTuneRequest {
   start_date: string;           // YYYY-MM-DD
@@ -652,6 +652,37 @@ export async function getAutoTuneArtifact(name: string): Promise<AutoTuneArtifac
   }
   return res.json();
 }
+
+// ── Directional regime (Stage 2 Commit G / J) ────────────────────────
+
+export type DirectionalRegimeLabel = 'bull' | 'bear' | 'range_bound' | 'ambiguous';
+
+export interface CurrentDirectionalRegime {
+  ticker: string;
+  label: DirectionalRegimeLabel;
+  return_90d: number;
+  frac_above_sma30: number;
+  return_30d: number;
+  range_atr_ratio: number;
+  sample_size: number;
+  insufficient_history: boolean;
+  reason: string;
+  timestamp: string;
+}
+
+export async function fetchCurrentRegime(
+  ticker: string,
+): Promise<CurrentDirectionalRegime> {
+  const res = await fetch(
+    `${API_BASE_URL}/pulse/regime/current/${encodeURIComponent(ticker)}`,
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`${res.status}: ${body || res.statusText}`);
+  }
+  return res.json();
+}
+
 
 export async function applyAutoTuneArtifact(
   artifact_path: string,
