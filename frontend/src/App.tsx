@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -24,6 +24,13 @@ function PageLoader() {
 }
 
 export default function App() {
+  // Keep-alive ping to prevent Render free-tier from sleeping (5 minutes)
+  useEffect(() => {
+    const pingInterval = setInterval(() => {
+      fetch('/api/health').catch(() => {});
+    }, 300000);
+    return () => clearInterval(pingInterval);
+  }, []);
   return (
     <BrowserRouter>
       <div className="min-h-screen bg-navy-950">

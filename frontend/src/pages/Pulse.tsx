@@ -537,13 +537,28 @@ export default function Pulse() {
     setBtRunning(false);
   };
 
-  const latestPulse = pulses.length > 0 ? pulses[pulses.length - 1] : null;
+  // The most recent pulse (for general checks like price staleness)
+  const absoluteLatestPulse = pulses.length > 0 ? pulses[pulses.length - 1] : null;
+
+  // Find the most recent high-confidence pulse (>= 75%) for the Hero Card.
+  // Note: pulses array is chronological (newest at the end).
+  let latestPulse = null;
+  for (let i = pulses.length - 1; i >= 0; i--) {
+    if ((pulses[i].confidence ?? 0) >= 0.75) {
+      latestPulse = pulses[i];
+      break;
+    }
+  }
+  // Fallback to the absolute latest if no high-confidence pulse exists
+  if (!latestPulse && absoluteLatestPulse) {
+    latestPulse = absoluteLatestPulse;
+  }
   
-  // Price staleness check (BLOCKER: WCT fix)
+  // Price staleness check (evaluates the absolute live feed, not historical hero pulse)
   const priceStalenessMs = useMemo(() => {
-    if (!latestPulse?.ts) return 0;
-    return Date.now() - new Date(latestPulse.ts).getTime();
-  }, [latestPulse?.ts]);
+    if (!absoluteLatestPulse?.ts) return 0;
+    return Date.now() - new Date(absoluteLatestPulse.ts).getTime();
+  }, [absoluteLatestPulse?.ts]);
   const isPriceStale = priceStalenessMs > 30000; // 30 seconds
 
   return (

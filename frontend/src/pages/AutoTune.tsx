@@ -110,9 +110,7 @@ export default function AutoTune() {
           <h1 className="text-2xl font-semibold text-white">Pulse Auto-Tune</h1>
         </div>
         <p className="text-slate-400 text-sm">
-          Walk-forward Latin-Hypercube search over a 6-parameter space with
-          bootstrap UCB-lower selection. Proposals only — no config is applied
-          without your explicit click.
+          Automatically tests dozens of parameter samples sequentially across historical data to find the safest, most robust configuration. Runs in "proposal mode" — no settings are changed without your approval.
         </p>
       </header>
 
@@ -266,7 +264,7 @@ function NewTuneTab({ onCompleted }: { onCompleted: () => void }) {
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <FormRow label="Folds" hint="Walk-forward CV splits (2–10)">
+          <FormRow label="Sequential Test Windows" hint="Number of distinct, forward-walking historical periods to test against (2–10)">
             <input
               type="number"
               value={nFolds}
@@ -277,7 +275,7 @@ function NewTuneTab({ onCompleted }: { onCompleted: () => void }) {
               className="form-input"
             />
           </FormRow>
-          <FormRow label="Candidates" hint="LHS samples (4–100)">
+          <FormRow label="Parameter Samples" hint="Number of randomized parameter scenarios to evaluate (4–100)">
             <input
               type="number"
               value={nConfigs}
@@ -290,7 +288,7 @@ function NewTuneTab({ onCompleted }: { onCompleted: () => void }) {
           </FormRow>
         </div>
 
-        <FormRow label="Active regime" hint="Writes into regime_profiles.<r> when ≠ base">
+        <FormRow label="Market Condition (Regime)" hint="Which market environment to optimize for (bull, bear, etc.)">
           <select
             value={regime}
             onChange={(e) => setRegime(e.target.value as AutoTuneRegime)}
@@ -354,7 +352,7 @@ function NewTuneTab({ onCompleted }: { onCompleted: () => void }) {
               <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                 <Loader2 className="w-4 h-4 text-accent-teal animate-spin" />
                 {progress?.phase === 'selection'
-                  ? 'Selecting winner (bootstrap)…'
+                  ? 'Finding the most robust settings…'
                   : progress?.phase === 'done'
                     ? 'Finalising…'
                     : 'Running backtests…'}
@@ -541,17 +539,17 @@ function ResultCard({
 
 function MetricsGrid({ metrics }: { metrics: AutoTuneMetrics }) {
   const items = [
-    { label: 'OOS Sharpe', value: fmtNum(metrics.oos_sharpe_point, 2), sub:
+    { label: 'Out-of-Sample Sharpe', value: fmtNum(metrics.oos_sharpe_point, 2), sub:
       metrics.oos_sharpe_ci_lower !== undefined && metrics.oos_sharpe_ci_upper !== undefined
         ? `[${fmtNum(metrics.oos_sharpe_ci_lower, 2)}, ${fmtNum(metrics.oos_sharpe_ci_upper, 2)}]`
-        : null,
+        : 'Risk-adjusted performance on unseen data',
     },
-    { label: 'Deflated', value: fmtNum(metrics.deflated_oos_sharpe, 2),
-      sub: 'vs ≥0.30 gate' },
-    { label: 'PBO', value: fmtNum(metrics.pbo, 3),
-      sub: 'vs ≤0.50 gate' },
-    { label: 'OOS trades', value: metrics.oos_n_trades_total?.toString() ?? '—',
-      sub: metrics.n_folds_used ? `${metrics.n_folds_used} folds` : null },
+    { label: 'Robustness Score (Deflated Sharpe)', value: fmtNum(metrics.deflated_oos_sharpe, 2),
+      sub: 'Accounts for multiple testing bias' },
+    { label: 'Risk of Overfitting (PBO)', value: fmtNum(metrics.pbo, 3),
+      sub: 'Probability of Backtest Overfitting (lower is better)' },
+    { label: 'Total Trades (OOS)', value: metrics.oos_n_trades_total?.toString() ?? '—',
+      sub: metrics.n_folds_used ? `Trades made during test periods (${metrics.n_folds_used} folds)` : 'Trades made during test periods' },
   ];
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
