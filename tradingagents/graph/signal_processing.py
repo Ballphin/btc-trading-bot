@@ -183,15 +183,17 @@ class SignalProcessor:
         sl = data.get('stop_loss_price', 0) or 0
         tp = data.get('take_profit_price', 0) or 0
 
-        # Consistency check: a directional signal with both stops zeroed is
+        # Consistency check: entry signals with both stops zeroed are
         # self-contradictory — only HOLD legitimately has sl=0/tp=0 per the
         # portfolio_manager prompt. When the LLM emits e.g. signal=SHORT
         # with stops=0 (see NVDA 2026-04-19 case where prose said HOLD but
         # JSON said SHORT), reject so process_signal falls through to the
         # LLM-based signal extractor which reads the "FINAL TRANSACTION
         # PROPOSAL" line and returns the correct tag.
-        directional = {'BUY', 'SELL', 'SHORT', 'COVER', 'OVERWEIGHT', 'UNDERWEIGHT'}
-        if sig in directional and sl == 0 and tp == 0:
+        # Exit/reduction signals (COVER, UNDERWEIGHT, SELL) close or trim
+        # existing risk, so sl=0/tp=0 is semantically valid.
+        entry_directional = {'BUY', 'SHORT', 'OVERWEIGHT'}
+        if sig in entry_directional and sl == 0 and tp == 0:
             return False
 
         if sig in ('BUY', 'OVERWEIGHT') and sl > 0 and tp > 0:

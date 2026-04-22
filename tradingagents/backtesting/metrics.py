@@ -5,6 +5,11 @@ import math
 from datetime import datetime
 from typing import List, Dict, Any
 
+from tradingagents.backtesting.stats import (
+    compute_skewness_kurtosis,
+    sharpe_standard_error,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +116,9 @@ def compute_metrics(
         sharpe = (mean_return - daily_rf) / daily_vol * math.sqrt(trading_days_per_year)
     else:
         sharpe = 0.0
+
+    # Skewness and kurtosis for accurate Sharpe SE (Lo 2002)
+    skew, kurtosis = compute_skewness_kurtosis(returns) if len(returns) >= 4 else (0.0, 3.0)
 
     # Sortino Ratio (uses downside deviation only)
     downside_returns = [r for r in returns if r < daily_rf]
@@ -309,7 +317,7 @@ def compute_metrics(
         "end_date": dates[-1],
         "n_periods": n_periods,
         "sample_size_tier": sample_size_tier,
-        "sharpe_se": math.sqrt((1 + 0.5 * sharpe ** 2) / max(n_periods, 1)),
+        "sharpe_se": sharpe_standard_error(sharpe, n_periods, skew=skew, kurtosis=kurtosis),
         # Risk management
         "stops_hit": stops_hit,
         "takes_hit": takes_hit,

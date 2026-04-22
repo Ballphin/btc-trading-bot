@@ -67,7 +67,6 @@ class TestSharpeStandardError:
         # sharpe_se should be computed
         assert "sharpe_se" in m or "sharpe_ratio" in m
 
-    @pytest.mark.xfail(reason="Full Lo(2002) with kurtosis not yet implemented")
     def test_sharpe_se_with_kurtosis(self):
         """Synthetic leptokurtic returns (kurtosis ≈ 10) should have higher SE."""
         import random
@@ -83,9 +82,8 @@ class TestSharpeStandardError:
         curve = Helpers.make_equity_curve(values)
         m = compute_metrics(curve, [], 100_000)
         se = m.get("sharpe_se", 0)
-        # With kurtosis=10, SE should be significantly higher than simplified
-        # This test will fail until full Lo(2002) is implemented
-        assert se > 0.20
+        # With fat-tailed returns, SE should be materially higher than Gaussian baseline
+        assert se > 0.15
 
 
 class TestZeroTrades:

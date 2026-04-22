@@ -26,10 +26,12 @@ import re
 import threading
 import time
 import uuid
-import requests
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 import pandas as pd
 import uvicorn
@@ -51,8 +53,89 @@ load_dotenv()
 
 from tradingagents.graph.stream_progress import detect_step_from_chunk as _detect_step_from_chunk
 
+# ── Lifespan context manager (replaces deprecated @app.on_event("startup")) ──
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan: startup initialization and graceful shutdown."""
+    background_tasks: list[asyncio.Task] = []
+
+    # Startup: Gist sync pull (from original _start_pulse_scheduler)
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_enabled():
+            result = gist_sync.pull_all(PULSE_DIR)
+            logger.info(f"[GistSync] Startup pull: {result}")
+            shadow_result = gist_sync.pull_shadow_all(SHADOW_DIR)
+            logger.info(f"[GistSync] Shadow startup pull: {shadow_result}")
+        if gist_sync.is_history_enabled():
+            history_result = gist_sync.pull_history_all(EVAL_RESULTS_DIR)
+            logger.info(f"[GistSync] History startup pull: {history_result}")
+    except Exception as e:
+        logger.warning(f"[GistSync] Startup pull failed: {e}")
+
+    # Startup: Pulse scheduler and related loops (from original _start_pulse_scheduler)
+    if _pulse_state.get("enabled") and not _pulse_state.get("task"):
+        _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
+        logger.info("[Pulse] Auto-restored scheduler after restart")
+        if not _pulse_state.get("tsmom_task"):
+            _pulse_state["tsmom_task"] = asyncio.create_task(_tsmom_refresh_loop())
+            logger.info("[TSMOM] Refresh loop started (1h cadence)")
+        if not _pulse_state.get("verifier_task"):
+            _pulse_state["verifier_task"] = asyncio.create_task(_ensemble_verifier_loop())
+            logger.info("[Verifier] Ensemble verifier loop started (5min cadence)")
+
+    # Startup: Scoring loop (from original _start_pulse_scoring)
+    async def _scoring_loop():
+        while True:
+            try:
+                await _score_pending_pulses()
+            except Exception as e:
+                logger.error(f"[Pulse Scoring] Error: {e}")
+            await asyncio.sleep(900)  # every 15 min
+
+    scoring_task = asyncio.create_task(_scoring_loop())
+    background_tasks.append(scoring_task)
+    logger.info("[Pulse Scoring] Scoring loop started (15min cadence)")
+
+    # Startup: Background eviction task and auto-analysis scheduler (from _start_background_tasks)
+    eviction_task = asyncio.create_task(_evict_old_backtest_jobs())
+    background_tasks.append(eviction_task)
+    if _scheduler_state.get("enabled") and not _scheduler_state.get("task"):
+        _scheduler_state["task"] = asyncio.create_task(_auto_analysis_scheduler())
+        logger.info("[Scheduler] Auto-restored after server restart (was previously enabled)")
+
+    yield
+
+    # Shutdown: Cancel all background tasks gracefully
+    logger.info("[Lifespan] Shutdown initiated, cancelling background tasks...")
+
+    # Cancel pulse state tasks
+    for key in ["task", "tsmom_task", "verifier_task"]:
+        task = _pulse_state.get(key)
+        if task and not task.done():
+            task.cancel()
+            background_tasks.append(task)
+
+    # Cancel scheduler state task if present
+    scheduler_task = _scheduler_state.get("task")
+    if scheduler_task and not scheduler_task.done():
+        scheduler_task.cancel()
+        background_tasks.append(scheduler_task)
+
+    # Cancel scoring and any other background tasks
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+
+    # Wait for all tasks to complete cancellation
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+
+    logger.info("[Lifespan] Background tasks cancelled, shutdown complete")
+
+
 # ── App setup ─────────────────────────────────────────────────────────
-app = FastAPI(title="TradingAgents API", version="1.0.0")
+app = FastAPI(title="TradingAgents API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -420,15 +503,6 @@ async def _evict_old_backtest_jobs():
             backtest_jobs.pop(jid, None)
         if expired:
             logger.info(f"Evicted {len(expired)} stale backtest job(s)")
-
-@app.on_event("startup")
-async def _start_background_tasks():
-    asyncio.create_task(_evict_old_backtest_jobs())
-    # Auto-restore scheduler if it was enabled before a server reload
-    if _scheduler_state.get("enabled") and not _scheduler_state.get("task"):
-        _scheduler_state["task"] = asyncio.create_task(_auto_analysis_scheduler())
-        logger.info("[Scheduler] Auto-restored after server restart (was previously enabled)")
-
 
 # ── Scheduler API Endpoints ───────────────────────────────────────────
 
@@ -4285,40 +4359,6 @@ async def _tsmom_refresh_loop():
             await asyncio.sleep(120)
 
 
-@app.on_event("startup")
-async def _start_pulse_scheduler():
-    # Free-tier survival: if GitHub Gist persistence is configured, pull
-    # pulse.jsonl files back before anything else so the UI shows history
-    # immediately after a filesystem-wipe restart.
-    try:
-        from tradingagents.pulse import gist_sync
-        if gist_sync.is_enabled():
-            result = gist_sync.pull_all(PULSE_DIR)
-            logger.info(f"[GistSync] Startup pull: {result}")
-            shadow_result = gist_sync.pull_shadow_all(SHADOW_DIR)
-            logger.info(f"[GistSync] Shadow startup pull: {shadow_result}")
-        if gist_sync.is_history_enabled():
-            history_result = gist_sync.pull_history_all(EVAL_RESULTS_DIR)
-            logger.info(f"[GistSync] History startup pull: {history_result}")
-    except Exception as e:
-        logger.warning(f"[GistSync] Startup pull failed: {e}")
-
-    if _pulse_state.get("enabled") and not _pulse_state.get("task"):
-        _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
-        logger.info("[Pulse] Auto-restored scheduler after restart")
-        # Also kick off the TSMOM refresh loop — it shares _pulse_state["enabled"]
-        if not _pulse_state.get("tsmom_task"):
-            _pulse_state["tsmom_task"] = asyncio.create_task(_tsmom_refresh_loop())
-            logger.info("[TSMOM] Refresh loop started (1h cadence)")
-        # R.3 — ensemble verifier runs every 5 min resolving pending
-        # non-NEUTRAL pulses across all variant streams. Shares
-        # _pulse_state["enabled"] so toggling the scheduler pauses
-        # verification too.
-        if not _pulse_state.get("verifier_task"):
-            _pulse_state["verifier_task"] = asyncio.create_task(_ensemble_verifier_loop())
-            logger.info("[Verifier] Ensemble verifier loop started (5min cadence)")
-
-
 async def _ensemble_verifier_loop():
     """Run the pulse verifier every 5 minutes for all configured tickers.
 
@@ -5064,19 +5104,6 @@ async def _score_pending_pulses():
                     else:
                         f.write(json.dumps(entry, default=str) + "\n")
             os.replace(tmp_path, pulse_path)
-
-
-# Register scoring job on startup
-@app.on_event("startup")
-async def _start_pulse_scoring():
-    async def _scoring_loop():
-        while True:
-            try:
-                await _score_pending_pulses()
-            except Exception as e:
-                logger.error(f"[Pulse Scoring] Error: {e}")
-            await asyncio.sleep(900)  # every 15 min
-    asyncio.create_task(_scoring_loop())
 
 
 # ── Pulse Backtest API ────────────────────────────────────────────────

@@ -148,6 +148,11 @@ class TestValidateStructuredSignal:
         data = self._make_valid(signal="UNDERWEIGHT", stop_loss_price=0, take_profit_price=0)
         assert processor._validate_structured_signal(data) is True
 
+    def test_short_with_zero_stops_still_rejected(self, processor):
+        """SHORT with sl=0/tp=0 must be rejected (Apr-19 NVDA regression guard)."""
+        data = self._make_valid(signal="SHORT", stop_loss_price=0, take_profit_price=0)
+        assert processor._validate_structured_signal(data) is False
+
 
 # ── process_signal with LLM fallback ────────────────────────────────
 

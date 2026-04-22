@@ -28,6 +28,7 @@ from tradingagents.backtesting.scorecard import (
     _estimate_execution_costs,
     CALIBRATION_HORIZON_DAYS,
 )
+from tradingagents.backtesting.stats import sharpe_standard_error
 
 logger = logging.getLogger(__name__)
 
@@ -127,12 +128,8 @@ def compute_deflated_sharpe(
         se = math.sqrt(max(1, n_periods))
         return 0.5 + 0.5 * math.erf(sharpe * se / math.sqrt(2))
 
-    # Standard error of the Sharpe ratio (Lo, 2002)
-    excess_kurtosis = kurtosis - 3.0
-    se_sharpe = math.sqrt(
-        (1 + 0.5 * sharpe ** 2 - skew * sharpe + (excess_kurtosis / 4) * sharpe ** 2)
-        / n_periods
-    )
+    # Standard error of the Sharpe ratio (Lo, 2002) via unified helper
+    se_sharpe = sharpe_standard_error(sharpe, n_periods, skew=skew, kurtosis=kurtosis)
 
     if se_sharpe <= 0:
         return 0.0
@@ -415,16 +412,16 @@ class WalkForwardValidator:
             sharpe_net = mean_net / std_net if std_net > 0 else 0
             sharpe_gross = mean_gross / std_gross if std_gross > 0 else 0
 
-            # Sharpe standard error
-            sharpe_se = math.sqrt((1 + 0.5 * sharpe_net ** 2) / n) if n > 1 else float("inf")
-
-            # Skewness and kurtosis for DSR
+            # Skewness and kurtosis for DSR and Sharpe SE (Lo 2002)
             if len(net_returns) >= 4 and std_net > 0:
                 skew = sum((r - mean_net) ** 3 for r in net_returns) / (n * std_net ** 3)
                 kurtosis = sum((r - mean_net) ** 4 for r in net_returns) / (n * std_net ** 4)
             else:
-                skew = 0
-                kurtosis = 3
+                skew = 0.0
+                kurtosis = 3.0
+
+            # Sharpe standard error with skew/kurtosis correction
+            sharpe_se = sharpe_standard_error(sharpe_net, n, skew=skew, kurtosis=kurtosis)
 
             # DSR on net returns
             dsr = compute_deflated_sharpe(sharpe_net, n, n_strategies=1, skew=skew, kurtosis=kurtosis)

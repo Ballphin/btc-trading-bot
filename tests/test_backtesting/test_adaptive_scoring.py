@@ -217,22 +217,25 @@ class TestScanSlTpEdgeCases:
         assert result["exit_day"] == 3
         assert result["was_correct"] is True  # 103 > 100
 
-    @pytest.mark.xfail(reason="walk_forward.sharpe_se uses simplified sqrt((1+0.5*SR^2)/n); DSR uses full Lo(2002) with skew+kurtosis")
-    def test_sharpe_se_simplified_note(self):
-        """Document inconsistency: sharpe_se in validate() output uses simplified formula,
-        while the DSR internally uses the full Lo(2002) SE with skew+kurtosis correction.
+    def test_sharpe_se_consistency_note(self):
+        """Verify sharpe_se and DSR now both use full Lo(2002) with skew+kurtosis.
+
+        Previously there was inconsistency: sharpe_se used simplified Gaussian SE
+        while DSR used full Lo(2002). After unification, both use the same helper.
+
         For SR=1.5, n=50, skew=-1.5, kurtosis=8:
-          Simple SE  = sqrt((1 + 0.5*2.25) / 50) = sqrt(0.0425) = 0.206
+          Gaussian SE = sqrt((1 + 0.5*2.25) / 50) = 0.206
           Lo(2002) SE = sqrt((1 + 0.5*2.25 + 1.5*1.5 + (5/4)*2.25) / 50) = 0.379
-        These differ by ~84%."""
-        import math
-        sr, n, skew, kurt = 1.5, 50, -1.5, 8.0
-        simple_se = math.sqrt((1 + 0.5 * sr**2) / n)
-        excess_kurt = kurt - 3.0
-        lo_se = math.sqrt(
-            (1 + 0.5 * sr**2 - skew * sr + (excess_kurt / 4) * sr**2) / n
-        )
-        # They should be close if the simplified version were correct
-        assert abs(simple_se - lo_se) / lo_se < 0.10, (
-            f"simple_se={simple_se:.4f} vs lo_se={lo_se:.4f} — differ by {abs(simple_se-lo_se)/lo_se*100:.0f}%"
+        These differ by ~84%, showing why fat-tail correction matters.
+        """
+        from tradingagents.backtesting.stats import sharpe_standard_error
+
+        sr, n = 1.5, 50
+        gaussian_se = sharpe_standard_error(sr, n, skew=0.0, kurtosis=3.0)
+        fat_tail_se = sharpe_standard_error(sr, n, skew=-1.5, kurtosis=8.0)
+
+        # Gaussian and fat-tail SE should differ significantly
+        ratio_diff = abs(gaussian_se - fat_tail_se) / fat_tail_se
+        assert ratio_diff > 0.40, (
+            f"Expected 40%+ difference, gaussian={gaussian_se:.4f} vs fat_tail={fat_tail_se:.4f}"
         )

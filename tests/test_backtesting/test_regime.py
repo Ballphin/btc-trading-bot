@@ -121,8 +121,21 @@ class TestTagBacktestWithRegime:
         # Should sample ≤5 dates
         assert mock_detect.call_count <= 5
 
-    @pytest.mark.xfail(reason="Sub-daily regime transition not supported — uses daily yfinance")
-    def test_sub_daily_regime_transition(self):
-        """4H data: 6 candles trending_up then 2 candles with >10% crash → should be volatile."""
-        # This documents a known gap: regime detection uses daily data
-        assert False
+    def test_sub_daily_regime_crypto_fallback(self):
+        """Sub-daily regime detection for crypto returns context with interval field."""
+        # For crypto tickers, sub-daily detection is supported
+        ctx = detect_regime_context("BTC-USD", "2024-01-15", interval="4h")
+
+        # Should return valid structure
+        assert "regime" in ctx
+        assert "interval" in ctx
+        assert ctx["interval"] == "4h"
+
+    def test_sub_daily_regime_equity_fallback(self):
+        """Sub-daily regime detection for equities returns unknown (not supported)."""
+        # For non-crypto tickers, sub-daily should return fallback
+        ctx = detect_regime_context("AAPL", "2024-01-15", interval="4h")
+
+        # Should return fallback with unknown regime
+        assert ctx["regime"] == "unknown"
+        assert ctx["interval"] == "4h"
