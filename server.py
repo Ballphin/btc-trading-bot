@@ -4253,13 +4253,14 @@ def _append_pulse(ticker: str, entry: dict):
         pass
 
 
-def _read_pulses(ticker: str, limit: int = 50, offset: int = 0) -> List[dict]:
+def _read_pulses(ticker: str, limit: int = 50, offset: int = 0, timeframe: Optional[str] = None) -> List[dict]:
     """Read pulses from JSONL with pagination support.
     
     Args:
         ticker: Ticker symbol
         limit: Maximum number of pulses to return
         offset: Number of most recent pulses to skip (for pagination)
+        timeframe: Optional timeframe filter (e.g., '1h', '4h')
     
     Returns:
         List of pulse entries, newest first (after offset)
@@ -4276,7 +4277,10 @@ def _read_pulses(ticker: str, limit: int = 50, offset: int = 0) -> List[dict]:
             line = line.strip()
             if line:
                 try:
-                    entries.append(json.loads(line))
+                    entry = json.loads(line)
+                    if timeframe and entry.get("timeframe_bias") != timeframe:
+                        continue
+                    entries.append(entry)
                 except json.JSONDecodeError:
                     continue
     
@@ -4293,7 +4297,7 @@ def _read_pulses(ticker: str, limit: int = 50, offset: int = 0) -> List[dict]:
     return entries[start_idx:end_idx][::-1]
 
 
-def _count_pulses(ticker: str) -> int:
+def _count_pulses(ticker: str, timeframe: Optional[str] = None) -> int:
     """Count total number of pulses in the JSONL file."""
     pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
@@ -4304,7 +4308,9 @@ def _count_pulses(ticker: str) -> int:
             line = line.strip()
             if line:
                 try:
-                    json.loads(line)  # Validate it's valid JSON
+                    entry = json.loads(line)  # Validate it's valid JSON
+                    if timeframe and entry.get("timeframe_bias") != timeframe:
+                        continue
                     count += 1
                 except json.JSONDecodeError:
                     continue
@@ -4524,13 +4530,14 @@ async def _ensemble_verifier_loop():
 # ── Pulse API Endpoints ──────────────────────────────────────────────
 
 @app.get("/api/pulse/{ticker}")
-async def get_pulses(ticker: str, limit: int = 50, offset: int = 0):
+async def get_pulses(ticker: str, limit: int = 50, offset: int = 0, timeframe: Optional[str] = None):
     """Return pulse signals for a ticker with pagination support.
     
     Args:
         limit: Maximum number of pulses to return (default: 50)
         offset: Number of most recent pulses to skip (default: 0)
               Use offset to paginate through history (e.g., offset=50 for page 2)
+        timeframe: Optional timeframe filter (e.g., '1h', '4h')
     
     Returns:
         {
@@ -4543,8 +4550,8 @@ async def get_pulses(ticker: str, limit: int = 50, offset: int = 0):
         }
     """
     ticker_upper = ticker.upper()
-    pulses = _read_pulses(ticker_upper, limit, offset)
-    total = _count_pulses(ticker_upper)
+    pulses = _read_pulses(ticker_upper, limit, offset, timeframe)
+    total = _count_pulses(ticker_upper, timeframe)
     has_more = (offset + len(pulses)) < total
     
     return {

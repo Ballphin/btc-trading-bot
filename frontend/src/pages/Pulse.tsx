@@ -345,6 +345,7 @@ export default function Pulse() {
   const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble'>('signals');
   const [runningPulse, setRunningPulse] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [selectedTF, setSelectedTF] = useState<string | null>(null);
   
   // Pagination state
   const [pulseOffset, setPulseOffset] = useState(0);
@@ -395,8 +396,12 @@ export default function Pulse() {
     
     try {
       const offset = loadMore ? pulseOffsetRef.current + PAGE_SIZE : 0;
+      let url = `${API_BASE_URL}/pulse/${ticker}?limit=${PAGE_SIZE}&offset=${offset}`;
+      if (selectedTF) {
+        url += `&timeframe=${selectedTF}`;
+      }
       const res = await fetch(
-        `${API_BASE_URL}/pulse/${ticker}?limit=${PAGE_SIZE}&offset=${offset}`,
+        url,
         { signal: abortControllerRef.current.signal }
       );
       
@@ -425,7 +430,7 @@ export default function Pulse() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [ticker]); // Only depend on ticker, not pulseOffset
+  }, [ticker, selectedTF]); // Depend on ticker and selectedTF, not pulseOffset
 
   // Keep offset ref in sync
   useEffect(() => {
@@ -722,9 +727,30 @@ export default function Pulse() {
 
       {/* Tab Content */}
       {activeTab === 'signals' && (
-        <div className="space-y-2">
+        <div className="space-y-4">
+          {/* Timeframe Sub-tabs */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
+            {['All', '4h', '1h', '15m', '5m'].map((tf) => {
+              const isActive = tf === 'All' ? selectedTF === null : selectedTF === tf;
+              return (
+                <button
+                  key={tf}
+                  onClick={() => setSelectedTF(tf === 'All' ? null : tf)}
+                  className={clsx(
+                    'px-3 py-1 text-xs rounded-full border transition-colors whitespace-nowrap',
+                    isActive
+                      ? 'bg-accent-teal/20 border-accent-teal/50 text-accent-teal font-medium'
+                      : 'bg-navy-900/50 border-white/10 text-slate-400 hover:text-slate-200 hover:border-white/20'
+                  )}
+                >
+                  {tf === 'All' ? 'All Timeframes' : tf}
+                </button>
+              );
+            })}
+          </div>
+
           {/* Filter bar */}
-          <div className="flex items-center justify-between gap-3 pb-1">
+          <div className="flex items-center justify-between gap-3 pb-1 -mt-2">
             <button
               onClick={() => setHighConfOnly((v) => !v)}
               aria-pressed={highConfOnly}
