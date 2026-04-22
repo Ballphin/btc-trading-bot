@@ -68,6 +68,38 @@ async def lifespan(app: FastAPI):
             logger.info(f"[GistSync] Startup pull: {result}")
             shadow_result = gist_sync.pull_shadow_all(SHADOW_DIR)
             logger.info(f"[GistSync] Shadow startup pull: {shadow_result}")
+
+            # Seed variant config dirs from the restored root pulse.jsonl.
+            # _champion_pulse_path prefers configs/<variant>/pulse.jsonl over
+            # the root file. Without this, a Render deploy wipes the variant
+            # dir, gist restores only the root file, and the champion path
+            # reads an empty variant dir → user sees 0 historical pulses.
+            for ticker_dir in PULSE_DIR.iterdir():
+                if not ticker_dir.is_dir():
+                    continue
+                root_jsonl = ticker_dir / "pulse.jsonl"
+                if not root_jsonl.exists():
+                    continue
+                ticker_name = ticker_dir.name
+                champ = "baseline"
+                champ_file = ticker_dir / "champion.json"
+                if champ_file.exists():
+                    try:
+                        champ = json.loads(champ_file.read_text()).get("config", "baseline") or "baseline"
+                    except Exception:
+                        pass
+                variant_jsonl = ticker_dir / "configs" / champ / "pulse.jsonl"
+                variant_jsonl.parent.mkdir(parents=True, exist_ok=True)
+                # Only seed if variant file is missing or has fewer lines
+                root_lines = sum(1 for ln in root_jsonl.read_text().splitlines() if ln.strip())
+                variant_lines = 0
+                if variant_jsonl.exists():
+                    variant_lines = sum(1 for ln in variant_jsonl.read_text().splitlines() if ln.strip())
+                if root_lines > variant_lines:
+                    import shutil
+                    shutil.copy2(root_jsonl, variant_jsonl)
+                    logger.info(f"[GistSync] Seeded {ticker_name}/configs/{champ}/pulse.jsonl ({root_lines} lines, was {variant_lines})")
+
         if gist_sync.is_history_enabled():
             history_result = gist_sync.pull_history_all(EVAL_RESULTS_DIR)
             logger.info(f"[GistSync] History startup pull: {history_result}")
