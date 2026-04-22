@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert, ChevronRight, Layers } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -339,10 +339,24 @@ export default function Pulse() {
     try { localStorage.setItem('pulse.highConfOnly', highConfOnly ? '1' : '0'); } catch { /* ignore */ }
   }, [highConfOnly]);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble'>('signals');
   const [runningPulse, setRunningPulse] = useState(false);
+  
+  // Pagination state
+  const [pulseOffset, setPulseOffset] = useState(0);
+  const [pulseTotal, setPulseTotal] = useState(0);
+  const [hasMorePulses, setHasMorePulses] = useState(true);
+  const PAGE_SIZE = 50;
+  
+  // Refs for race condition prevention (BLOCKER fixes)
+  const isFetchingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const pulseOffsetRef = useRef(0);
+  const fetchPulsesRef = useRef<(loadMore?: boolean) => Promise<void>>(async () => {});
+  const fetchScorecardRef = useRef<() => Promise<void>>(async () => {});
 
   // Backtest form state
   const [btStartDate, setBtStartDate] = useState('');
@@ -360,16 +374,62 @@ export default function Pulse() {
     setBtEndDate(end.toISOString().split('T')[0]);
   }, []);
 
-  // Fetch data
-  const fetchPulses = useCallback(async () => {
-    setLoading(true);
+  // Fetch data with race condition guards (BLOCKER: SSE fix)
+  const fetchPulses = useCallback(async (loadMore = false) => {
+    // Prevent concurrent fetches
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    
+    if (loadMore) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      setPulseOffset(0);
+      pulseOffsetRef.current = 0;
+    }
+    
+    // Abort any in-flight request
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = new AbortController();
+    
     try {
-      const res = await fetch(`${API_BASE_URL}/pulse/${ticker}?limit=50`);
+      const offset = loadMore ? pulseOffsetRef.current + PAGE_SIZE : 0;
+      const res = await fetch(
+        `${API_BASE_URL}/pulse/${ticker}?limit=${PAGE_SIZE}&offset=${offset}`,
+        { signal: abortControllerRef.current.signal }
+      );
+      
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      
       const data = await res.json();
-      setPulses(data.pulses || []);
-    } catch { setPulses([]); }
-    setLoading(false);
-  }, [ticker]);
+      
+      if (loadMore) {
+        setPulses(prev => [...prev, ...(data.pulses || [])]);
+        setPulseOffset(offset);
+        pulseOffsetRef.current = offset;
+      } else {
+        setPulses(data.pulses || []);
+        setPulseOffset(0);
+        pulseOffsetRef.current = 0;
+      }
+      
+      setPulseTotal(data.total || 0);
+      setHasMorePulses(data.has_more || false);
+    } catch (err) {
+      // Ignore abort errors (expected when ticker changes)
+      if (err instanceof Error && err.name === 'AbortError') return;
+      if (!loadMore) setPulses([]);
+    } finally {
+      isFetchingRef.current = false;
+      setLoading(false);
+      setLoadingMore(false);
+    }
+  }, [ticker]); // Only depend on ticker, not pulseOffset
+
+  // Keep offset ref in sync
+  useEffect(() => {
+    pulseOffsetRef.current = pulseOffset;
+  }, [pulseOffset]);
 
   const fetchScheduler = useCallback(async () => {
     try {
@@ -380,18 +440,31 @@ export default function Pulse() {
 
   const fetchScorecard = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/pulse/scorecard/${ticker}`);
+      const res = await fetch(`${API_BASE_URL}/pulse/scorecard/${ticker}`, {
+        signal: abortControllerRef.current?.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setScorecard(await res.json());
-    } catch {}
+    } catch (err) {
+      // Ignore abort errors
+      if (err instanceof Error && err.name === 'AbortError') return;
+    }
   }, [ticker]);
+
+  // Keep refs updated with latest functions (HIGH: SSE fix for interval)
+  fetchPulsesRef.current = fetchPulses;
+  fetchScorecardRef.current = fetchScorecard;
 
   useEffect(() => { fetchPulses(); fetchScheduler(); fetchScorecard(); }, [fetchPulses, fetchScheduler, fetchScorecard]);
 
-  // Auto-refresh every 60s
+  // Auto-refresh every 60s using refs (HIGH: prevents stale closures)
   useEffect(() => {
-    const iv = setInterval(() => { fetchPulses(); fetchScorecard(); }, 60000);
+    const iv = setInterval(() => { 
+      fetchPulsesRef.current();
+      fetchScorecardRef.current();
+    }, 60000);
     return () => clearInterval(iv);
-  }, [fetchPulses, fetchScorecard]);
+  }, []); // Empty deps - uses refs instead
 
   // Actions
   const toggleScheduler = async () => {
@@ -459,6 +532,13 @@ export default function Pulse() {
   };
 
   const latestPulse = pulses.length > 0 ? pulses[pulses.length - 1] : null;
+  
+  // Price staleness check (BLOCKER: WCT fix)
+  const priceStalenessMs = useMemo(() => {
+    if (!latestPulse?.ts) return 0;
+    return Date.now() - new Date(latestPulse.ts).getTime();
+  }, [latestPulse?.ts]);
+  const isPriceStale = priceStalenessMs > 30000; // 30 seconds
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
@@ -545,6 +625,11 @@ export default function Pulse() {
                   version={latestPulse.engine_version}
                   hash={latestPulse.config_hash}
                 />
+                {isPriceStale && (
+                  <span className="flex items-center gap-1 text-xs text-red-400 animate-pulse font-semibold">
+                    <AlertTriangle className="w-3 h-3" /> PRICE STALE ({Math.round(priceStalenessMs / 1000)}s)
+                  </span>
+                )}
               </div>
               <div className="text-sm text-slate-400 max-w-xl">{latestPulse.reasoning}</div>
               <div className="flex items-center gap-4 text-xs text-slate-500 flex-wrap">
@@ -646,11 +731,11 @@ export default function Pulse() {
               High-confidence only (≥ 75%)
             </button>
             {(() => {
-              const total = pulses.length;
-              const shown = highConfOnly ? pulses.filter((p) => (p.confidence ?? 0) >= 0.75).length : total;
+              const filteredCount = pulses.filter((p) => !highConfOnly || (p.confidence ?? 0) >= 0.75).length;
               return (
                 <span className="text-[11px] text-slate-500">
-                  {highConfOnly ? `${shown} of ${total}` : `${total}`} signal{total === 1 ? '' : 's'}
+                  Showing {filteredCount} of {pulseTotal} total signal{pulseTotal === 1 ? '' : 's'}
+                  {hasMorePulses && <span className="text-slate-600 ml-1">(more available)</span>}
                 </span>
               );
             })()}
@@ -667,7 +752,6 @@ export default function Pulse() {
           )}
           {[...pulses]
             .filter((p) => !highConfOnly || (p.confidence ?? 0) >= 0.75)
-            .reverse()
             .map((p, i) => {
             const eligible = explainEligible(p);
             const rowClass = clsx(
@@ -743,6 +827,44 @@ export default function Pulse() {
               <div key={i} className={rowClass}>{inner}</div>
             );
           })}
+          
+          {/* Load More Button */}
+          {!loading && hasMorePulses && (
+            <div className="pt-4 pb-2 text-center">
+              <button
+                onClick={() => fetchPulses(true)}
+                disabled={loadingMore}
+                className={clsx(
+                  'inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors',
+                  loadingMore
+                    ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                    : 'bg-accent-teal/10 text-accent-teal hover:bg-accent-teal/20 border border-accent-teal/30'
+                )}
+              >
+                {loadingMore ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  <>
+                    <ChevronRight className="w-4 h-4 rotate-90" />
+                    Load More
+                    <span className="text-xs text-slate-500 ml-1">
+                      ({pulseTotal - pulses.length} remaining)
+                    </span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+          
+          {/* End of History Message */}
+          {!loading && !hasMorePulses && pulses.length > 0 && (
+            <div className="pt-4 pb-2 text-center text-xs text-slate-600">
+              End of signal history ({pulseTotal} total signals)
+            </div>
+          )}
         </div>
       )}
 

@@ -4220,10 +4220,20 @@ def _append_pulse(ticker: str, entry: dict):
         pass
 
 
-def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
-    """Read the last N pulses from JSONL. Routes through the champion
-    indirection so promoting a variant immediately swaps what the UI +
-    ``/api/pulse/latest`` surface (R.5)."""
+def _read_pulses(ticker: str, limit: int = 50, offset: int = 0) -> List[dict]:
+    """Read pulses from JSONL with pagination support.
+    
+    Args:
+        ticker: Ticker symbol
+        limit: Maximum number of pulses to return
+        offset: Number of most recent pulses to skip (for pagination)
+    
+    Returns:
+        List of pulse entries, newest first (after offset)
+        
+    Routes through the champion indirection so promoting a variant
+    immediately swaps what the UI + ``/api/pulse/latest`` surface (R.5).
+    """
     pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
         return []
@@ -4236,7 +4246,36 @@ def _read_pulses(ticker: str, limit: int = 50) -> List[dict]:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-    return entries[-limit:]
+    
+    # Calculate slice based on offset (from the end, since we want newest first)
+    total = len(entries)
+    if offset >= total:
+        return []
+    
+    # Get the slice: start from (total - offset - limit) to (total - offset)
+    start_idx = max(0, total - offset - limit)
+    end_idx = total - offset
+    
+    # Reverse to return newest first (matching the documented behavior)
+    return entries[start_idx:end_idx][::-1]
+
+
+def _count_pulses(ticker: str) -> int:
+    """Count total number of pulses in the JSONL file."""
+    pulse_path = _champion_pulse_path(ticker)
+    if not pulse_path.exists():
+        return 0
+    count = 0
+    with open(pulse_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    json.loads(line)  # Validate it's valid JSON
+                    count += 1
+                except json.JSONDecodeError:
+                    continue
+    return count
 
 
 def _read_pulse_at(ticker: str, ts: str) -> Optional[dict]:
@@ -4452,10 +4491,37 @@ async def _ensemble_verifier_loop():
 # ── Pulse API Endpoints ──────────────────────────────────────────────
 
 @app.get("/api/pulse/{ticker}")
-async def get_pulses(ticker: str, limit: int = 50):
-    """Return the last N pulse signals for a ticker."""
-    pulses = _read_pulses(ticker.upper(), limit)
-    return {"ticker": ticker.upper(), "pulses": pulses, "count": len(pulses)}
+async def get_pulses(ticker: str, limit: int = 50, offset: int = 0):
+    """Return pulse signals for a ticker with pagination support.
+    
+    Args:
+        limit: Maximum number of pulses to return (default: 50)
+        offset: Number of most recent pulses to skip (default: 0)
+              Use offset to paginate through history (e.g., offset=50 for page 2)
+    
+    Returns:
+        {
+            "ticker": str,
+            "pulses": List[dict],
+            "count": int,          # Number of pulses in this response
+            "total": int,          # Total pulses available
+            "has_more": bool,      # True if more pulses available
+            "offset": int          # Current offset
+        }
+    """
+    ticker_upper = ticker.upper()
+    pulses = _read_pulses(ticker_upper, limit, offset)
+    total = _count_pulses(ticker_upper)
+    has_more = (offset + len(pulses)) < total
+    
+    return {
+        "ticker": ticker_upper,
+        "pulses": pulses,
+        "count": len(pulses),
+        "total": total,
+        "has_more": has_more,
+        "offset": offset
+    }
 
 
 @app.get("/api/pulse/latest/{ticker}")
