@@ -775,6 +775,40 @@ export async function fetchEnsembleDisagreements(
   return res.json();
 }
 
+// ── Ensemble Ticks (all variant results per tick) ────────────────────
+
+export interface EnsembleTickVariant {
+  signal: string;
+  confidence: number;
+  normalized_score?: number;
+  price?: number;
+  reasoning?: string;
+}
+
+export interface EnsembleTick {
+  ensemble_tick_id: string;
+  ts: string;
+  price?: number;
+  variants: Record<string, EnsembleTickVariant | null>;
+}
+
+export interface EnsembleTicksResponse {
+  ticker: string;
+  count: number;
+  ticks: EnsembleTick[];
+}
+
+export async function fetchEnsembleTicks(
+  ticker: string,
+  limit = 25,
+): Promise<EnsembleTicksResponse> {
+  const res = await fetch(
+    `${API_BASE_URL}/pulse/ensemble/${encodeURIComponent(ticker)}/ticks?limit=${limit}`,
+  );
+  if (!res.ok) throw new Error(`${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
 export async function setEnsembleChampion(
   ticker: string,
   config: string,

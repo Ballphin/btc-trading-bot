@@ -95,6 +95,28 @@ TradingAgents is a **multi-agent LLM framework** that simulates the organization
 - **Risk Management**: Independent risk team evaluates position sizing, stop-losses, and portfolio exposure
 - **Audit Trail**: Every decision includes full debate history for post-hoc analysis
 
+### ⚡ How It Works
+
+1. **You enter a ticker** — any stock (`NVDA`, `AAPL`) or crypto (`BTC-USD`, `ETH-USD`)
+2. **4 AI analysts research it in parallel** — Market (technicals), Sentiment (social), News, and Fundamentals
+3. **Bull & Bear researchers debate** — arguing for and against the trade, surfacing hidden risks
+4. **A Trader agent creates a structured signal** — entry, exit, and position sizing
+5. **3 Risk Managers debate sizing** — aggressive, neutral, and conservative perspectives
+6. **Portfolio Manager makes the final call** → you get: **BUY/SELL/HOLD** with confidence %, stop-loss, take-profit, and position size
+
+### 📊 Understanding the Output
+
+Every analysis produces a structured signal:
+
+| Field | What It Means |
+|-------|--------------|
+| **Signal** | `BUY` (open long), `SELL` (close long), `SHORT` (open short), `COVER` (close short), `HOLD` (no action) |
+| **Confidence** | 0–100% — how strongly the agents agree. 80%+ = high conviction, below 60% = low conviction |
+| **Stop-Loss** | Price where you should exit to limit losses |
+| **Take-Profit** | Price target for taking gains |
+| **Position Size** | Suggested % of capital to allocate |
+| **R:R Ratio** | Reward-to-risk ratio (higher = better) |
+
 **Key Differentiators:**
 | Feature | Description |
 |---------|-------------|
@@ -388,6 +410,17 @@ TradingAgents/
 | **Backtest** | `/backtest` | Configure and run backtests (replay/simulation/hybrid) |
 | **Backtest Results** | `/backtest/results/:id` | Equity curve, trade history, metrics, lessons learned |
 | **Scorecard** | `/scorecard` | Shadow trading forward-test scoring and calibration |
+| **Pulse** | `/pulse` | Automated 4H analysis signals and ensemble agreement |
+| **Auto-Tune** | `/autotune` | AI model/parameter optimization |
+
+**What each page does (for new users):**
+- **Home** → Type a ticker and click Analyze. That's your starting point.
+- **Analyze** → Watch the AI work in real-time: 4 analysts research → bull/bear debate → risk review → final signal.
+- **History** → Browse all your past analyses. Click any entry to see the full decision breakdown.
+- **Backtest** → Test how past AI decisions would have performed as real trades.
+- **Scorecard** → "Practice mode" — track AI accuracy over time without risking real money.
+- **Pulse** → Automated signals every 4 hours. Enable the scheduler and check back for results.
+- **Auto-Tune** → Find the best AI model/settings for your target ticker.
 
 ### Backtesting System
 

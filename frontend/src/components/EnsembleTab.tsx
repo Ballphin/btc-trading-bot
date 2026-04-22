@@ -8,36 +8,34 @@
 //   2. Variant grid — one card per config with the latest signal, DSR,
 //      n-signals, and a "Promote" action.
 //   3. Per-config metrics table — overall / weekend / OOS split.
-//   4. Disagreements log — rolling list of ticks where ≥2 distinct
-//      signals fired, so the user can drill into where configs diverge.
+//   4. Recent Ensemble Results — rolling list of ALL ticks with every
+//      variant's signal, confidence, and expandable reasoning.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { clsx } from 'clsx';
-import { Crown, Loader2, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, Crown, Loader2, RefreshCw } from 'lucide-react';
 
 import SignalBadge from './SignalBadge';
 import type {
-  EnsembleDisagreementsResponse,
   EnsembleLatest,
   EnsembleMetricsResponse,
+  EnsembleTicksResponse,
 } from '../lib/api';
 import {
-  fetchEnsembleDisagreements,
   fetchEnsembleLatest,
   fetchEnsembleMetrics,
+  fetchEnsembleTicks,
   setEnsembleChampion,
 } from '../lib/api';
 
 interface EnsembleTabProps {
   ticker: string;
+  refreshTrigger?: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
 function agreementTone(score: number | null): string {
-  // Keep the threshold mapping local so the SignalBadge colour system
-  // isn't coupled to ensemble semantics. 0.8+ = emerald, 0.6+ = amber,
-  // < 0.6 = red (configs actively fighting each other).
   if (score === null) return 'text-slate-500';
   if (score >= 0.8) return 'text-emerald-400';
   if (score >= 0.6) return 'text-amber-400';
@@ -56,30 +54,28 @@ function fmtNum(v: number | null | undefined, digits = 3): string {
 
 // ── Main component ──────────────────────────────────────────────────
 
-export default function EnsembleTab({ ticker }: EnsembleTabProps) {
+export default function EnsembleTab({ ticker, refreshTrigger }: EnsembleTabProps) {
   const [latest, setLatest] = useState<EnsembleLatest | null>(null);
   const [metrics, setMetrics] = useState<EnsembleMetricsResponse | null>(null);
-  const [disagreements, setDisagreements] = useState<EnsembleDisagreementsResponse | null>(null);
+  const [ticks, setTicks] = useState<EnsembleTicksResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+  const [expandedTicks, setExpandedTicks] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // Parallelise — the three endpoints are independent and the
-      // combined latency is dominated by the slowest (metrics, which
-      // reads K json files).
-      const [l, m, d] = await Promise.all([
+      const [l, m, t] = await Promise.all([
         fetchEnsembleLatest(ticker),
         fetchEnsembleMetrics(ticker),
-        fetchEnsembleDisagreements(ticker, 25),
+        fetchEnsembleTicks(ticker, 25),
       ]);
       setLatest(l);
       setMetrics(m);
-      setDisagreements(d);
+      setTicks(t);
       setLastRefreshed(new Date());
     } catch (e) {
       setError((e as Error).message);
@@ -91,6 +87,14 @@ export default function EnsembleTab({ ticker }: EnsembleTabProps) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Re-load when parent triggers a refresh (60s poll, manual run, scheduler toggle)
+  useEffect(() => {
+    if (refreshTrigger !== undefined && refreshTrigger > 0) {
+      load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshTrigger]);
 
   const handlePromote = useCallback(
     async (cfg: string) => {
@@ -118,6 +122,15 @@ export default function EnsembleTab({ ticker }: EnsembleTabProps) {
     if (!latest) return [];
     return Object.keys(latest.variants);
   }, [latest]);
+
+  const toggleExpand = useCallback((tickId: string) => {
+    setExpandedTicks(prev => {
+      const next = new Set(prev);
+      if (next.has(tickId)) next.delete(tickId);
+      else next.add(tickId);
+      return next;
+    });
+  }, []);
 
   if (loading && !latest) {
     return (
@@ -284,51 +297,155 @@ export default function EnsembleTab({ ticker }: EnsembleTabProps) {
         </div>
       </div>
 
-      {/* Disagreements log */}
+      {/* Recent Ensemble Results (replaces Disagreements) */}
       <div>
         <h3 className="text-sm font-semibold text-slate-300 mb-2">
-          Recent Disagreements{' '}
+          Recent Ensemble Results{' '}
           <span className="text-xs font-normal text-slate-500">
-            ({disagreements?.count ?? 0} total)
+            ({ticks?.count ?? 0} ticks)
           </span>
         </h3>
-        {disagreements && disagreements.disagreements.length > 0 ? (
+        {ticks && ticks.ticks.length > 0 ? (
           <div className="rounded-xl bg-navy-900/40 border border-white/5 overflow-hidden">
             <table className="w-full text-xs">
               <thead className="bg-white/5 text-slate-400">
                 <tr>
+                  <th className="text-left px-3 py-2 font-medium w-8"></th>
                   <th className="text-left px-3 py-2 font-medium">Time</th>
+                  <th className="text-right px-3 py-2 font-medium">Price</th>
                   {variantNames.map(cfg => (
-                    <th key={cfg} className="text-left px-3 py-2 font-medium">{cfg}</th>
+                    <th key={cfg} className="text-center px-3 py-2 font-medium">{cfg}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {disagreements.disagreements.slice(0, 10).map(d => (
-                  <tr key={d.ensemble_tick_id} className="border-t border-white/5">
-                    <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
-                      {d.ts ? new Date(d.ts).toLocaleTimeString() : '—'}
-                    </td>
-                    {variantNames.map(cfg => (
-                      <td key={cfg} className="px-3 py-2">
-                        {d.signals[cfg] ? (
-                          <SignalBadge signal={d.signals[cfg]} size="sm" />
-                        ) : (
-                          <span className="text-slate-600">—</span>
-                        )}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
+                {ticks.ticks.map((tick, idx) => {
+                  const isExpanded = expandedTicks.has(tick.ensemble_tick_id);
+                  return (
+                    <TickRow
+                      key={tick.ensemble_tick_id}
+                      tick={tick}
+                      variantNames={variantNames}
+                      isExpanded={isExpanded}
+                      isFirst={idx === 0}
+                      onToggle={() => toggleExpand(tick.ensemble_tick_id)}
+                    />
+                  );
+                })}
               </tbody>
             </table>
           </div>
         ) : (
           <div className="rounded-xl bg-navy-900/40 border border-white/5 p-6 text-center text-sm text-slate-500">
-            No variant disagreements in the recent window.
+            No ensemble tick data available yet. Run a pulse to generate variant results.
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+// ── Tick Row (with expandable reasoning) ────────────────────────────
+
+interface TickRowProps {
+  tick: {
+    ensemble_tick_id: string;
+    ts: string;
+    price?: number;
+    variants: Record<string, { signal: string; confidence: number; normalized_score?: number; price?: number; reasoning?: string } | null>;
+  };
+  variantNames: string[];
+  isExpanded: boolean;
+  isFirst: boolean;
+  onToggle: () => void;
+}
+
+function TickRow({ tick, variantNames, isExpanded, isFirst, onToggle }: TickRowProps) {
+  return (
+    <>
+      <tr
+        className={clsx(
+          'border-t border-white/5 cursor-pointer hover:bg-white/[0.02] transition-colors',
+          isFirst && 'bg-accent-teal/[0.03]',
+        )}
+        onClick={onToggle}
+      >
+        <td className="px-3 py-2 text-slate-500">
+          {isExpanded
+            ? <ChevronDown className="w-3 h-3" />
+            : <ChevronRight className="w-3 h-3" />}
+        </td>
+        <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+          {tick.ts ? new Date(tick.ts).toLocaleString() : '—'}
+        </td>
+        <td className="px-3 py-2 text-slate-300 text-right tabular-nums whitespace-nowrap">
+          {tick.price != null
+            ? `$${tick.price.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+            : '—'}
+        </td>
+        {variantNames.map(cfg => {
+          const v = tick.variants[cfg];
+          return (
+            <td key={cfg} className="px-3 py-2 text-center">
+              {v ? (
+                <div className="flex flex-col items-center gap-0.5">
+                  <SignalBadge signal={v.signal} size="sm" />
+                  <span className="text-[10px] text-slate-500 tabular-nums">
+                    {Math.round((v.confidence ?? 0) * 100)}%
+                  </span>
+                </div>
+              ) : (
+                <span className="text-slate-600">—</span>
+              )}
+            </td>
+          );
+        })}
+      </tr>
+      {isExpanded && (
+        <tr className="border-t border-white/5">
+          <td colSpan={3 + variantNames.length} className="p-0">
+            <div className="grid gap-2 p-3 bg-navy-950/50" style={{ gridTemplateColumns: `repeat(${variantNames.length}, 1fr)` }}>
+              {variantNames.map(cfg => {
+                const v = tick.variants[cfg];
+                return (
+                  <div
+                    key={cfg}
+                    className="rounded-lg bg-navy-900/60 border border-white/5 p-3 text-xs space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-slate-300">{cfg}</span>
+                      {v ? <SignalBadge signal={v.signal} size="sm" /> : <span className="text-slate-600">—</span>}
+                    </div>
+                    {v && (
+                      <>
+                        <div className="flex gap-3 text-[10px] text-slate-500">
+                          <span>Conf: {Math.round((v.confidence ?? 0) * 100)}%</span>
+                          {v.normalized_score != null && (
+                            <span className={v.normalized_score >= 0 ? 'text-emerald-500/70' : 'text-red-500/70'}>
+                              Score: {v.normalized_score >= 0 ? '+' : ''}{v.normalized_score.toFixed(3)}
+                            </span>
+                          )}
+                          {v.price != null && (
+                            <span>${v.price.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                          )}
+                        </div>
+                        {v.reasoning && (
+                          <p className="text-[11px] text-slate-400 leading-relaxed max-h-24 overflow-y-auto">
+                            {v.reasoning}
+                          </p>
+                        )}
+                      </>
+                    )}
+                    {!v && (
+                      <p className="text-[11px] text-slate-600 italic">No data for this tick</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }

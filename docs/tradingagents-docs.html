@@ -397,6 +397,7 @@ details > div {
     <div class="nav-section">
       <div class="nav-section-title">Guides</div>
       <a href="#user-guide" class="nav-link">User Guide</a>
+      <a href="#features-guide" class="nav-link">Features Guide</a>
       <a href="#developer" class="nav-link">Developer Guide</a>
     </div>
     
@@ -404,6 +405,7 @@ details > div {
       <div class="nav-section-title">Reference</div>
       <a href="#api" class="nav-link">API Reference</a>
       <a href="#quant" class="nav-link">Quant Reference</a>
+      <a href="#glossary" class="nav-link">Glossary</a>
     </div>
   </nav>
   
@@ -415,17 +417,39 @@ details > div {
         <p>A production-grade, multi-agent LLM framework for quantitative trading research. Deploy specialized AI agents that debate to reach consensus on trading decisions.</p>
         
         <div class="quick-links">
-          <a href="#architecture" class="btn btn-primary">Architecture</a>
+          <a href="#features-guide" class="btn btn-primary">Features Guide</a>
           <a href="#user-guide" class="btn btn-secondary">Quick Start</a>
+          <a href="#glossary" class="btn btn-secondary">Glossary</a>
           <a href="#api" class="btn btn-secondary">API Reference</a>
         </div>
       </div>
       
+      <h3>⚡ How It Works in 60 Seconds</h3>
+      <div class="card-grid">
+        <div class="card">
+          <h4>① You Enter a Ticker</h4>
+          <p>Type any stock (<code>NVDA</code>, <code>AAPL</code>) or crypto (<code>BTC-USD</code>, <code>ETH-USD</code>) symbol into the search bar and click Analyze.</p>
+        </div>
+        <div class="card">
+          <h4>② AI Agents Research</h4>
+          <p>4 specialized AI analysts — Market, Sentiment, News, and Fundamentals — independently research the asset in parallel.</p>
+        </div>
+        <div class="card">
+          <h4>③ They Debate</h4>
+          <p>A Bull Researcher argues FOR the trade. A Bear Researcher argues AGAINST. This surfaces risks a single AI might miss.</p>
+        </div>
+        <div class="card">
+          <h4>④ You Get a Signal</h4>
+          <p>After risk review, you receive a structured signal: <strong>BUY/SELL/HOLD</strong> with confidence %, stop-loss, take-profit, and position size.</p>
+        </div>
+      </div>
+      
+      <h3>Who Is This For?</h3>
       <div class="card-grid">
         <div class="card">
           <h4>🎯 For Traders</h4>
           <p>Run comprehensive AI analysis on any ticker. Get structured trading signals with confidence scores, stop-losses, and take-profit levels.</p>
-          <code>python main.py --ticker BTC-USD</code>
+          <a href="#features-guide" style="color: var(--accent);">See Features Guide →</a>
         </div>
         
         <div class="card">
@@ -461,7 +485,7 @@ details > div {
         </tr>
         <tr>
           <td><strong>Shadow Trading</strong></td>
-          <td>Paper-trade mode for forward-testing with Brier score calibration</td>
+          <td>Paper-trade mode for forward-testing with Brier score calibration (<a href="#glossary" style="color: var(--accent);">what's this?</a>)</td>
         </tr>
         <tr>
           <td><strong>4H Scheduler</strong></td>
@@ -731,6 +755,107 @@ POST /api/shadow/record
 
 # Score all decisions for a ticker
 GET /api/shadow/score/BTC-USD</code></pre>
+    </section>
+
+    
+    <section id="features-guide">
+      <h2>Features Guide</h2>
+      <p>A page-by-page walkthrough of every feature in the dashboard. Each section explains <strong>what the feature does</strong>, <strong>how to use it</strong>, and <strong>what the output means</strong> — in plain language.</p>
+      
+      <h3>🏠 Home Page</h3>
+      <p><strong>What it does:</strong> Your starting point. Search for any stock or crypto ticker to begin an AI analysis.</p>
+      <div class="card-grid">
+        <div class="card">
+          <h4>How to Use</h4>
+          <p>1. Type a ticker symbol (e.g., <code>BTC-USD</code>, <code>NVDA</code>) into the search bar<br>
+          2. Click <strong>Analyze</strong> or press Enter<br>
+          3. Or click any quick-access ticker button</p>
+        </div>
+        <div class="card">
+          <h4>What You'll See</h4>
+          <p>• <strong>Model Selector</strong> — choose which AI model to use<br>
+          • <strong>Quick Tickers</strong> — one-click buttons for popular assets<br>
+          • <strong>Recent Analyses</strong> — cards showing past analyses</p>
+        </div>
+      </div>
+      
+      <h3>📊 Live Analysis</h3>
+      <p><strong>What it does:</strong> Shows the AI analysis in real-time as multiple agents research, debate, and reach consensus.</p>
+      <table>
+        <tr><th>Step</th><th>What Happens</th><th>What You See</th></tr>
+        <tr><td>1. Data Gathering</td><td>4 analysts run in parallel — Market, Sentiment, News, Fundamentals</td><td>Progress updates per analyst</td></tr>
+        <tr><td>2. Debate</td><td>Bull Researcher argues FOR; Bear argues AGAINST</td><td>Full debate transcript</td></tr>
+        <tr><td>3. Trade Planning</td><td>Trader Agent composes a structured signal</td><td>Preliminary signal</td></tr>
+        <tr><td>4. Risk Review</td><td>Three risk managers debate position sizing</td><td>Risk assessment</td></tr>
+        <tr><td>5. Final Decision</td><td>Portfolio Manager synthesizes the final signal</td><td><strong>Final Decision Card</strong></td></tr>
+      </table>
+      
+      <h4>Understanding the Final Decision Card</h4>
+      <div class="card-grid">
+        <div class="card">
+          <h4>🎯 Signal</h4>
+          <p><strong>BUY</strong> = Open long · <strong>SELL</strong> = Close long<br>
+          <strong>SHORT</strong> = Open short · <strong>COVER</strong> = Close short<br>
+          <strong>HOLD</strong> = No action needed</p>
+        </div>
+        <div class="card">
+          <h4>📊 Confidence</h4>
+          <p><strong>80%+</strong> = High conviction<br>
+          <strong>60–80%</strong> = Moderate<br>
+          <strong>Below 60%</strong> = Low, proceed with caution</p>
+        </div>
+        <div class="card">
+          <h4>🛡️ Risk Parameters</h4>
+          <p><strong>Stop-Loss</strong> = Exit price to limit losses<br>
+          <strong>Take-Profit</strong> = Target price for gains<br>
+          <strong>Position Size</strong> = Suggested % of capital<br>
+          <strong>R:R Ratio</strong> = Reward-to-risk (higher = better)</p>
+        </div>
+      </div>
+      
+      <h3>📜 History</h3>
+      <p><strong>What it does:</strong> Browse all past analyses. Every analysis is auto-saved for later review.</p>
+      <p>Navigate to <strong>History</strong> → click a ticker → click a date → see the full decision breakdown with agent reports and debate transcripts.</p>
+      
+      <h3>📈 Backtesting</h3>
+      <p><strong>What it does:</strong> Test how the AI's decisions would have performed on historical data.</p>
+      <details>
+        <summary>🔄 Replay — "Re-watch past decisions" (fastest, no AI cost)</summary>
+        <div><p>Uses your saved analysis results. Best for quickly verifying historical performance.</p></div>
+      </details>
+      <details>
+        <summary>🔬 Simulation — "What would the AI say about the past?" (costs tokens)</summary>
+        <div><p>Runs fresh AI analysis on historical dates. Best for testing new models or prompt changes.</p></div>
+      </details>
+      <details>
+        <summary>🔀 Hybrid — "Best of both worlds"</summary>
+        <div><p>Uses saved results where available, simulates missing dates. Best for filling gaps in your history.</p></div>
+      </details>
+      
+      <h3>🎯 Scorecard (Shadow Trading)</h3>
+      <p><strong>What it does:</strong> Forward-test predictions without risking real money — a "practice mode" that tracks accuracy.</p>
+      <div class="card-grid">
+        <div class="card">
+          <h4>How It Works</h4>
+          <p>1. AI makes a prediction with a confidence level<br>
+          2. Prediction is recorded with timestamp<br>
+          3. Score it against what actually happened<br>
+          4. Build a track record over time</p>
+        </div>
+        <div class="card">
+          <h4>Key Metrics</h4>
+          <p><strong>Win Rate</strong> — % of correct predictions<br>
+          <strong>Brier Score</strong> — calibration (0=perfect, 0.25=poor)<br>
+          <strong>Calibration</strong> — over/underconfident?</p>
+        </div>
+      </div>
+      
+      <h3>⚡ Pulse (4H Auto-Scheduler)</h3>
+      <p><strong>What it does:</strong> Runs automated AI analysis every 4 hours, synced to UTC candle closes. Enable it on the Scorecard page, then check Pulse for results.</p>
+      <p>Runs at 00:05, 04:05, 08:05, 12:05, 16:05, 20:05 UTC. The 5-min offset ensures the 4H candle has fully closed. <strong>Ensemble agreement</strong> shows when multiple model configurations agree (stronger signal).</p>
+      
+      <h3>🔧 Auto-Tune</h3>
+      <p><strong>What it does:</strong> Automatically tests different AI model and parameter configurations to find the best-performing setup for your target ticker. Select a ticker, choose parameters to optimize, and run — it tests against historical data and shows the winning config.</p>
     </section>
 
     
@@ -1468,6 +1593,35 @@ flowchart LR
       </ul>
       
       <p>Implementation: <code>tradingagents/backtesting/scorecard.py::run_calibration_study()</code></p>
+    </section>
+
+    
+    <section id="glossary">
+      <h2>Glossary</h2>
+      <p>Plain-language definitions of technical terms used throughout TradingAgents.</p>
+      
+      <table>
+        <tr><th>Term</th><th>What It Means</th></tr>
+        <tr><td><strong>Brier Score</strong></td><td>A measure of prediction accuracy. Ranges from 0 (perfect) to 1 (worst). Below 0.15 is excellent; above 0.25 means the AI is poorly calibrated. Calculated as the average squared difference between predicted confidence and actual outcome.</td></tr>
+        <tr><td><strong>Calmar Ratio</strong></td><td>Annual return divided by maximum drawdown. Higher means better risk-adjusted returns relative to worst-case losses. A Calmar above 1.0 is generally good.</td></tr>
+        <tr><td><strong>Confidence</strong></td><td>How strongly the AI agents agree on a signal, expressed as 0–100%. Higher confidence means stronger consensus among the agents.</td></tr>
+        <tr><td><strong>DSR (Deflated Sharpe Ratio)</strong></td><td>An adjusted Sharpe ratio that accounts for the fact that testing many strategies inflates apparent performance. It corrects for "data snooping" — the tendency to find patterns that are just noise.</td></tr>
+        <tr><td><strong>Ensemble</strong></td><td>Running the same analysis with multiple AI model configurations simultaneously. When different models agree, the signal is considered more reliable.</td></tr>
+        <tr><td><strong>Funding Rate</strong></td><td>A periodic payment between long and short traders on crypto perpetual contracts. Positive = longs pay shorts; negative = shorts pay longs. Affects profitability in backtests.</td></tr>
+        <tr><td><strong>Kelly Criterion</strong></td><td>A mathematical formula for optimal bet sizing based on win rate and average win/loss size. Maximizes long-term growth. Requires ≥30 historical trades before activating (falls back to fixed 15% otherwise).</td></tr>
+        <tr><td><strong>Omega Ratio</strong></td><td>The probability-weighted ratio of gains to losses. Unlike Sharpe, it considers the entire return distribution. Above 1.0 means gains outweigh losses.</td></tr>
+        <tr><td><strong>Position Size</strong></td><td>What percentage of your total capital to allocate to a single trade. Smaller sizes = less risk per trade.</td></tr>
+        <tr><td><strong>Pulse</strong></td><td>The automated 4-hour analysis scheduler. Runs AI analysis on a fixed schedule without manual intervention.</td></tr>
+        <tr><td><strong>R:R Ratio</strong></td><td>Reward-to-Risk ratio. The potential profit divided by the potential loss. A 2:1 R:R means you could gain $2 for every $1 risked.</td></tr>
+        <tr><td><strong>Regime</strong></td><td>The current market state — trending up (bullish), trending down (bearish), ranging (sideways), or volatile (high uncertainty). Different regimes may warrant different strategies.</td></tr>
+        <tr><td><strong>Shadow Trading</strong></td><td>Paper trading where AI decisions are recorded but no real money is used. Lets you evaluate AI accuracy before committing capital.</td></tr>
+        <tr><td><strong>Sharpe Ratio</strong></td><td>Return per unit of risk (volatility). Above 1.0 is good; above 2.0 is excellent. Measures how much return you get for the risk taken.</td></tr>
+        <tr><td><strong>Sortino Ratio</strong></td><td>Like Sharpe, but only penalizes downside volatility. Better than Sharpe for strategies that have occasional large gains but controlled losses.</td></tr>
+        <tr><td><strong>SSE (Server-Sent Events)</strong></td><td>A technology that lets the server push updates to your browser in real-time. Used to show live progress during analysis.</td></tr>
+        <tr><td><strong>Stop-Loss</strong></td><td>A price level where you exit a trade to prevent further losses. Set automatically by the AI based on market analysis.</td></tr>
+        <tr><td><strong>Take-Profit</strong></td><td>A price level where you exit a trade to lock in gains. Set automatically by the AI based on market analysis.</td></tr>
+        <tr><td><strong>Walk-Forward Validation</strong></td><td>A testing method that prevents "cheating" by always testing on data the AI hasn't seen. Divides history into training and testing periods, rolls forward, and aggregates results.</td></tr>
+      </table>
     </section>
 
   </main>

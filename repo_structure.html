@@ -226,9 +226,28 @@
         <h1>🏦 TradingAgents Framework</h1>
         <p class="subtitle">Multi-Agent LLM Financial Trading System &mdash; Complete Architecture Overview</p>
 
+        <!-- ======================== WHAT DOES THIS DO? ======================== -->
+        <div class="flow-section" style="text-align:center;">
+            <h2>🤔 What Does This System Do?</h2>
+            <p style="max-width:700px;margin:0 auto 20px;color:#ccc;font-size:1.1rem;line-height:1.8;">
+                TradingAgents is an <strong style="color:#00d2ff;">AI-powered trading research assistant</strong>. You give it a stock or crypto ticker, and it deploys multiple specialized AI agents that independently research the asset, debate their findings, and produce a structured trading signal — just like a team of analysts at a professional trading firm.
+            </p>
+            <div class="info-box" style="text-align:left;">
+                <strong>🗺️ Your Analysis Journey:</strong><br><br>
+                <strong>1.</strong> You type a ticker (e.g., <code>BTC-USD</code> or <code>NVDA</code>) into the dashboard<br>
+                <strong>2.</strong> Four AI analysts independently research it — technicals, sentiment, news, and fundamentals<br>
+                <strong>3.</strong> A Bull researcher argues FOR the trade; a Bear researcher argues AGAINST<br>
+                <strong>4.</strong> A Research Manager judges the debate and forms an investment thesis<br>
+                <strong>5.</strong> A Trader agent creates a detailed trade plan with entry/exit strategy<br>
+                <strong>6.</strong> Three Risk Managers (aggressive, neutral, conservative) debate position sizing<br>
+                <strong>7.</strong> A Portfolio Manager makes the final call → you get: <strong style="color:#00e676;">BUY</strong> / <strong style="color:#ef5350;">SELL</strong> / <strong style="color:#fdd835;">HOLD</strong> with confidence %, stop-loss, and take-profit
+            </div>
+        </div>
+
         <!-- ======================== AGENT PIPELINE FLOW ======================== -->
         <div class="flow-section">
             <h2>🔄 Agent Pipeline Flow</h2>
+            <p style="text-align:center;color:#aaa;margin-bottom:20px;">This diagram shows what happens behind the scenes when you run an analysis</p>
             <div class="legend">
                 <div class="legend-item"><div class="legend-dot" style="border-color:#00e676;background:rgba(0,230,118,0.3)"></div> Start</div>
                 <div class="legend-item"><div class="legend-dot" style="border-color:#42a5f5;background:rgba(66,165,245,0.3)"></div> Analysts</div>
@@ -254,6 +273,7 @@
 
                 <!-- Phase 2: Data Gathering Analysts -->
                 <div class="phase-label">📊 Phase 2 &mdash; Data Gathering (Parallel-Ready Analysts)</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">Four AI analysts independently research the asset from different angles</p>
                 <div class="flow-row">
                     <div class="flow-node node-analyst">
                         <span class="emoji">📈</span>
@@ -281,6 +301,7 @@
 
                 <!-- Phase 3: Investment Debate -->
                 <div class="phase-label">⚔️ Phase 3 &mdash; Investment Debate</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">Two AI researchers argue for and against the trade — surfacing risks a single AI might miss</p>
                 <div class="flow-row">
                     <div class="flow-node node-researcher">
                         <span class="emoji">🐂</span>
@@ -302,6 +323,7 @@
 
                 <!-- Phase 4: Research Manager -->
                 <div class="phase-label">🧑‍⚖️ Phase 4 &mdash; Judgment</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">A Research Manager evaluates both sides and decides the overall direction</p>
                 <div class="flow-row">
                     <div class="flow-node node-manager">
                         <span class="emoji">👨‍💼</span>
@@ -314,6 +336,7 @@
 
                 <!-- Phase 5: Trader -->
                 <div class="phase-label">💰 Phase 5 &mdash; Trade Planning</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">The Trader creates an actionable plan — entry price, exit strategy, and sizing</p>
                 <div class="flow-row">
                     <div class="flow-node node-trader">
                         <span class="emoji">🤖</span>
@@ -326,6 +349,7 @@
 
                 <!-- Phase 6: Risk Debate -->
                 <div class="phase-label">🛡️ Phase 6 &mdash; Risk Analysis Debate</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">Three risk managers with different risk appetites debate how much capital to commit</p>
                 <div class="flow-row">
                     <div class="flow-node node-risk">
                         <span class="emoji">🔥</span>
@@ -356,6 +380,7 @@
 
                 <!-- Phase 7: Final Decision -->
                 <div class="phase-label">🏁 Phase 7 &mdash; Final Decision</div>
+                <p style="text-align:center;color:#888;font-size:0.85rem;margin-bottom:8px;">The Portfolio Manager synthesizes everything into your final trading signal</p>
                 <div class="flow-row">
                     <div class="flow-node node-final">
                         <span class="emoji">👔</span>

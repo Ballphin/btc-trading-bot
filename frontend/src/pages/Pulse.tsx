@@ -344,6 +344,7 @@ export default function Pulse() {
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
   const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble'>('signals');
   const [runningPulse, setRunningPulse] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   
   // Pagination state
   const [pulseOffset, setPulseOffset] = useState(0);
@@ -462,6 +463,7 @@ export default function Pulse() {
     const iv = setInterval(() => { 
       fetchPulsesRef.current();
       fetchScorecardRef.current();
+      setRefreshTrigger(n => n + 1);
     }, 60000);
     return () => clearInterval(iv);
   }, []); // Empty deps - uses refs instead
@@ -470,6 +472,9 @@ export default function Pulse() {
   const toggleScheduler = async () => {
     await fetch(`${API_BASE_URL}/pulse/scheduler/toggle`, { method: 'POST' });
     fetchScheduler();
+    fetchPulses();
+    fetchScorecard();
+    setRefreshTrigger(n => n + 1);
   };
 
   const runManual = async () => {
@@ -478,6 +483,7 @@ export default function Pulse() {
       await fetch(`${API_BASE_URL}/pulse/run/${ticker}`, { method: 'POST' });
       fetchPulses();
       fetchScorecard();
+      setRefreshTrigger(n => n + 1);
     } catch {}
     setRunningPulse(false);
   };
@@ -869,7 +875,7 @@ export default function Pulse() {
       )}
 
       {activeTab === 'ensemble' && (
-        <EnsembleTab ticker={ticker} />
+        <EnsembleTab ticker={ticker} refreshTrigger={refreshTrigger} />
       )}
 
       {activeTab === 'scorecard' && (

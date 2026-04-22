@@ -27,6 +27,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -4852,6 +4853,78 @@ async def get_ensemble_disagreements(ticker: str, limit: int = 50):
         "count": len(disagreements),
         "disagreements": disagreements[:limit],
     }
+
+
+@app.get("/api/pulse/ensemble/{ticker}/ticks")
+async def get_ensemble_ticks(ticker: str, limit: int = 25):
+    """All variant results per ensemble tick, newest first.
+
+    Groups entries by ``ensemble_tick_id`` across every variant's
+    ``pulse.jsonl``. Uses ``deque(maxlen=1000)`` to efficiently tail
+    each file without loading everything into memory.
+
+    Returns per-tick: timestamp, price, and for each variant:
+    signal, confidence, normalized_score, price, reasoning.
+    """
+    ticker = ticker.upper()
+    from tradingagents.pulse.ensemble_metrics import list_configs
+    configs = list_configs(ticker, pulse_dir=PULSE_DIR) or ["baseline"]
+
+    # Tail-read each variant's JSONL (last 1000 lines)
+    by_tick: Dict[str, Dict[str, dict]] = {}
+    for cfg in configs:
+        p = PULSE_DIR / ticker / "configs" / cfg / "pulse.jsonl"
+        if not p.exists():
+            continue
+        try:
+            with p.open() as f:
+                tail = deque(f, maxlen=1000)
+            for raw in tail:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                tid = entry.get("ensemble_tick_id")
+                if not tid:
+                    continue
+                by_tick.setdefault(tid, {})[cfg] = entry
+        except Exception as e:
+            logger.warning(f"[Ensemble ticks] read failed {ticker}/{cfg}: {e}")
+
+    # Build output sorted newest-first
+    ticks = []
+    for tid, group in sorted(
+        by_tick.items(),
+        key=lambda kv: next(iter(kv[1].values())).get("ts") or "",
+        reverse=True,
+    ):
+        first = next(iter(group.values()))
+        variants: Dict[str, Optional[dict]] = {}
+        for cfg in configs:
+            e = group.get(cfg)
+            if e:
+                variants[cfg] = {
+                    "signal": e.get("signal"),
+                    "confidence": e.get("confidence"),
+                    "normalized_score": e.get("normalized_score"),
+                    "price": e.get("price"),
+                    "reasoning": e.get("reasoning"),
+                }
+            else:
+                variants[cfg] = None
+        ticks.append({
+            "ensemble_tick_id": tid,
+            "ts": first.get("ts"),
+            "price": first.get("price"),
+            "variants": variants,
+        })
+        if len(ticks) >= limit:
+            break
+
+    return {"ticker": ticker, "count": len(ticks), "ticks": ticks}
 
 
 class _ChampionRequest(BaseModel):
