@@ -73,6 +73,41 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[GistSync] Startup pull failed: {e}")
 
+    # Log persistence status so user knows if data will survive restarts
+    def _log_persistence_status():
+        """Log whether data will persist across restarts."""
+        try:
+            from tradingagents.pulse import gist_sync
+            
+            is_external_dir = str(EVAL_RESULTS_DIR.absolute()) != str(Path("eval_results").absolute())
+            has_github_token = bool(os.environ.get("GITHUB_TOKEN"))
+            has_pulse_gist = bool(os.environ.get("PULSE_GIST_ID"))
+            has_history_gist = bool(os.environ.get("HISTORY_GIST_ID"))
+            pulse_enabled = gist_sync.is_enabled()
+            history_enabled = gist_sync.is_history_enabled()
+            
+            logger.info("=" * 50)
+            logger.info("📦 PERSISTENCE STATUS")
+            logger.info("=" * 50)
+            logger.info(f"{'✓' if is_external_dir else '✗'} External eval_results dir: {is_external_dir} ({EVAL_RESULTS_DIR})")
+            logger.info(f"{'✓' if has_github_token else '✗'} GitHub Token set: {has_github_token}")
+            logger.info(f"{'✓' if has_pulse_gist else '✗'} Pulse Gist ID set: {has_pulse_gist}")
+            logger.info(f"{'✓' if has_history_gist else '✗'} History Gist ID set: {has_history_gist}")
+            logger.info(f"{'✓' if pulse_enabled else '✗'} Pulse sync enabled: {pulse_enabled}")
+            logger.info(f"{'✓' if history_enabled else '✗'} History sync enabled: {history_enabled}")
+            
+            if not is_external_dir and not history_enabled:
+                logger.warning("⚠️  WARNING: Signal history will NOT persist across restarts!")
+                logger.warning("   Set EVAL_RESULTS_DIR outside repo OR configure GitHub Gist sync")
+                logger.warning("   Run: python scripts/setup_persistence.py")
+            elif is_external_dir or history_enabled:
+                logger.info("✅ Data will persist across restarts")
+            logger.info("=" * 50)
+        except Exception as e:
+            logger.warning(f"[Persistence] Status check failed: {e}")
+    
+    _log_persistence_status()
+
     # Startup: Pulse scheduler and related loops (from original _start_pulse_scheduler)
     if _pulse_state.get("enabled") and not _pulse_state.get("task"):
         _pulse_state["task"] = asyncio.create_task(_pulse_scheduler())
@@ -145,7 +180,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-EVAL_RESULTS_DIR = Path("eval_results")
+# Allow external data directories via environment variables
+# This enables data persistence outside the git repo (e.g., Render Disk or local external dir)
+EVAL_RESULTS_DIR = Path(os.environ.get("EVAL_RESULTS_DIR", "eval_results"))
+EVAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ensure subdirectories exist
+(EVAL_RESULTS_DIR / "pulse").mkdir(parents=True, exist_ok=True)
+(EVAL_RESULTS_DIR / "shadow").mkdir(parents=True, exist_ok=True)
 
 # ── In-memory job store ───────────────────────────────────────────────
 jobs: Dict[str, Dict[str, Any]] = {}
