@@ -127,6 +127,9 @@ interface BacktestResult {
   total_signals: number;
   signal_breakdown: { BUY: number; SHORT: number; NEUTRAL: number };
   hit_rates: HitRates;
+  sl_tp_win_rate: number;
+  outcomes: { tp_hit: number; sl_hit: number; timeout: number; missing_sltp: number };
+  sample_size_warning: boolean;
   sharpe_ratio: number;
   max_drawdown_pct: number;
   profitability_curve: number[];
