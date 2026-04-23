@@ -5333,6 +5333,7 @@ class PulseBacktestRequest(BaseModel):
     end_date: str
     interval_minutes: int = 15
     threshold: float = 0.25
+    use_live_history: bool = True
 
 
 @app.post("/api/pulse/backtest/{ticker}")
@@ -5363,6 +5364,13 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
     async def run_backtest():
         try:
             from tradingagents.backtesting.pulse_backtest import PulseBacktestEngine
+
+            live_signals = None
+            if req.use_live_history:
+                # Load all pulses for the ticker
+                all_pulses = _read_pulses(ticker, limit=100000)
+                live_signals = all_pulses
+
             engine = PulseBacktestEngine(
                 ticker=ticker,
                 start_date=req.start_date,
@@ -5370,6 +5378,7 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
                 pulse_interval_minutes=req.interval_minutes,
                 signal_threshold=req.threshold,
                 results_dir=str(EVAL_RESULTS_DIR),
+                live_signals=live_signals,
             )
 
             yield {

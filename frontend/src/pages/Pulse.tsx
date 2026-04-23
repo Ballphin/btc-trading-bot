@@ -543,17 +543,12 @@ export default function Pulse() {
   };
 
   // The most recent pulse (for general checks like price staleness)
-  const absoluteLatestPulse = pulses.length > 0 ? pulses[pulses.length - 1] : null;
+  const absoluteLatestPulse = pulses.length > 0 ? pulses[0] : null;
 
   // Find the most recent high-confidence pulse (>= 75%) for the Hero Card.
-  // Note: pulses array is chronological (newest at the end).
-  let latestPulse = null;
-  for (let i = pulses.length - 1; i >= 0; i--) {
-    if ((pulses[i].confidence ?? 0) >= 0.75) {
-      latestPulse = pulses[i];
-      break;
-    }
-  }
+  // Note: pulses array is newest-first.
+  let latestPulse = pulses.find(p => (p.confidence ?? 0) >= 0.75) || null;
+
   // Fallback to the absolute latest if no high-confidence pulse exists
   if (!latestPulse && absoluteLatestPulse) {
     latestPulse = absoluteLatestPulse;
@@ -1052,10 +1047,56 @@ export default function Pulse() {
           {/* Backtest Results */}
           {btResult && (
             <div className="space-y-4">
+              {/* Sample Size Warning */}
+              {btResult.sample_size_warning && (
+                <div className="rounded-xl bg-amber-500/10 border border-amber-500/20 p-4 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h3 className="text-sm font-semibold text-amber-500">Insufficient Sample Size</h3>
+                    <p className="text-xs text-amber-500/80 mt-1">
+                      Fewer than 50 trades resolved with a Take Profit or Stop Loss hit. Win rate metrics may not be statistically significant.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Primary Win Rate Card */}
+              <div className="rounded-xl bg-navy-900/80 border border-white/10 p-5 flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-400 mb-1">Live History SL/TP Win Rate</h3>
+                  <div className="flex items-baseline gap-3">
+                    <span className={clsx('text-3xl font-bold', btResult.sl_tp_win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>
+                      {(btResult.sl_tp_win_rate * 100).toFixed(1)}%
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      from {btResult.outcomes.tp_hit + btResult.outcomes.sl_hit} resolved trades
+                    </span>
+                  </div>
+                </div>
+                <div className="flex gap-4 text-sm">
+                  <div className="text-center">
+                    <div className="text-emerald-400 font-semibold">{btResult.outcomes.tp_hit}</div>
+                    <div className="text-xs text-slate-500 mt-1">TP Hit</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-red-400 font-semibold">{btResult.outcomes.sl_hit}</div>
+                    <div className="text-xs text-slate-500 mt-1">SL Hit</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-slate-300 font-semibold">{btResult.outcomes.timeout}</div>
+                    <div className="text-xs text-slate-500 mt-1">Timeout</div>
+                  </div>
+                  <div className="text-center opacity-50">
+                    <div className="text-slate-300 font-semibold">{btResult.outcomes.missing_sltp}</div>
+                    <div className="text-xs text-slate-500 mt-1">No SL/TP</div>
+                  </div>
+                </div>
+              </div>
+
               {/* Summary cards */}
               <div className="grid grid-cols-4 gap-4">
                 <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
-                  <div className="text-xs text-slate-500 mb-1">Signals</div>
+                  <div className="text-xs text-slate-500 mb-1">Signals Processed</div>
                   <div className="text-xl font-bold text-white">{btResult.total_signals}</div>
                   <div className="flex gap-2 mt-1 text-xs">
                     <span className="text-emerald-400">{btResult.signal_breakdown.BUY} BUY</span>
@@ -1073,7 +1114,7 @@ export default function Pulse() {
                   <div className="text-xl font-bold text-red-400">{btResult.max_drawdown_pct.toFixed(1)}%</div>
                 </div>
                 <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
-                  <div className="text-xs text-slate-500 mb-1">Trades</div>
+                  <div className="text-xs text-slate-500 mb-1">Trades (Resolved)</div>
                   <div className="text-xl font-bold text-white">{btResult.n_trades}</div>
                   <div className="text-xs text-slate-500 mt-1">{btResult.gap_count} gaps, {btResult.n_excluded_warmup} warmup excluded</div>
                 </div>

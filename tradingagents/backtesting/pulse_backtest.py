@@ -114,6 +114,7 @@ class PulseBacktestEngine:
 
         self._config_override = config_override
         self._active_regime = active_regime
+        self.live_signals = live_signals
         # Provenance — stamped by :meth:`_prefetch` based on router routing
         # decision. Auto-tune surfaces these on every Apply proposal.
         self._data_source: str = "unknown"
@@ -142,11 +143,27 @@ class PulseBacktestEngine:
             f"regime={self._active_regime}"
         )
 
-        # Phase 1: Pre-fetch
-        candles, funding_df = self._prefetch()
-
-        # Phase 2: Replay
-        signals = self._replay(candles, funding_df)
+        if self.live_signals is not None:
+            # Phase 1: Pre-fetch 1m only
+            candles, funding_df = self._prefetch_1m_only()
+            # Phase 2: Live signals filter and sort
+            signals = []
+            for s in self.live_signals:
+                try:
+                    ts = datetime.fromisoformat(s["ts"])
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if self.start_dt <= ts <= self.end_dt:
+                        signals.append(s)
+                except (ValueError, KeyError):
+                    continue
+            signals.sort(key=lambda x: x["ts"])
+            self._total_intervals = len(signals) # Mock for metrics
+        else:
+            # Phase 1: Pre-fetch
+            candles, funding_df = self._prefetch()
+            # Phase 2: Replay
+            signals = self._replay(candles, funding_df)
 
         # Phase 3: Score forward returns
         scored = self._score_signals(signals, candles, funding_df)
@@ -225,6 +242,32 @@ class PulseBacktestEngine:
             f"funding_source={self._funding_source} "
             f"funding_entries={len(funding_df)}"
         )
+        return candles, funding_df
+
+    def _prefetch_1m_only(self) -> tuple:
+        """Bulk-fetch ONLY 1m OHLCV + funding for live-history mode."""
+        fetch_start = (self.start_dt - timedelta(days=2)).strftime("%Y-%m-%d")
+        fetch_end = (self.end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        logger.info(f"[PulseBacktest] Fetching 1m candles via router (live history)...")
+        try:
+            result = fetch_ohlcv_historical(self.ticker, "1m", fetch_start, fetch_end)
+            candles = {"1m": result.df}
+            self._data_source = result.source
+            self._stitch_report = result.overlap_report
+        except Exception as e:
+            logger.warning(f"[PulseBacktest] Failed to fetch 1m: {e}")
+            candles = {"1m": pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])}
+            self._data_source = "unknown"
+
+        try:
+            funding_df, funding_source = fetch_funding_historical(self.ticker, fetch_start, fetch_end)
+            self._funding_source = funding_source
+        except Exception as e:
+            logger.warning(f"[PulseBacktest] Funding history failed: {e}")
+            funding_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
+            self._funding_source = "failed"
+
         return candles, funding_df
 
     # ── Phase 2: Replay ───────────────────────────────────────────────
@@ -619,7 +662,16 @@ class PulseBacktestEngine:
             entry["exit_return"] = None
 
             if not hold_candles.empty and sl is not None and tp is not None:
-                exit_ts = None
+                # Gap detection logic: check if duration span is > 1.5 * hold_min
+                first_ts_pd = hold_candles.iloc[0]["timestamp"]
+                last_ts_pd = hold_candles.iloc[-1]["timestamp"]
+                gap_span_sec = (last_ts_pd - first_ts_pd).total_seconds()
+                
+                if gap_span_sec > hold_min * 90:
+                    entry["exit_type"] = "gap_uncertain"
+                    exit_ts = None
+                else:
+                    exit_ts = None
                 for _, c in hold_candles.iterrows():
                     c_ts = pd.Timestamp(c["timestamp"]).to_pydatetime()
                     if c_ts.tzinfo is None:
@@ -812,28 +864,53 @@ class PulseBacktestEngine:
         current_direction = None
         entry_price = None
 
+        n_tp = 0
+        n_sl = 0
+        n_timeout = 0
+        n_missing_sltp = 0
+
         for s in signals:
             price = s.get("price")
             if price is None or price <= 0:
                 continue
 
             sig = s["signal"]
+            
+            # Outcome counting
+            exit_type = s.get("exit_type")
+            if exit_type == "tp_hit":
+                n_tp += 1
+            elif exit_type == "sl_hit":
+                n_sl += 1
+            elif exit_type == "timeout":
+                if "stop_loss" not in s or s.get("stop_loss") is None:
+                    n_missing_sltp += 1
+                else:
+                    n_timeout += 1
 
-            # Close existing position if direction changes (stop-and-reverse)
-            if current_direction is not None and sig != current_direction and entry_price is not None:
-                dir_sign = 1 if current_direction == "BUY" else -1
-                close_pnl = (price - entry_price) / entry_price * dir_sign
-                net_pnl = close_pnl - exec_cost
-                equity *= (1 + net_pnl * _POSITION_SIZE)
-                trade_returns.append(net_pnl)
+            if self.live_signals is not None:
+                # Live mode equity curve: use explicit exit returns
+                er = s.get("exit_return")
+                if er is not None:
+                    equity *= (1 + er * _POSITION_SIZE)
+                    trade_returns.append(er)
+                equity_curve.append(equity)
+            else:
+                # Simulation mode equity curve: stop-and-reverse
+                if current_direction is not None and sig != current_direction and entry_price is not None:
+                    dir_sign = 1 if current_direction == "BUY" else -1
+                    close_pnl = (price - entry_price) / entry_price * dir_sign
+                    net_pnl = close_pnl - exec_cost
+                    equity *= (1 + net_pnl * _POSITION_SIZE)
+                    trade_returns.append(net_pnl)
 
-            # Open new position
-            entry_price = price
-            current_direction = sig
-            equity_curve.append(equity)
+                # Open new position
+                entry_price = price
+                current_direction = sig
+                equity_curve.append(equity)
 
-        # Close final position at last available price
-        if current_direction is not None and entry_price is not None:
+        # Close final position at last available price (only for simulation)
+        if self.live_signals is None and current_direction is not None and entry_price is not None:
             last_price = None
             if not candles["1m"].empty:
                 last_price = float(candles["1m"].iloc[-1]["close"])
@@ -911,6 +988,11 @@ class PulseBacktestEngine:
             "stitch_report": self._stitch_report,
         }
 
+        # Win rate logic
+        sl_tp_win_rate = 0.0
+        if (n_tp + n_sl) > 0:
+            sl_tp_win_rate = round(n_tp / (n_tp + n_sl), 4)
+
         return {
             "ticker": self.ticker,
             "period": f"{self.start_date} to {self.end_date}",
@@ -919,10 +1001,19 @@ class PulseBacktestEngine:
             "signal_breakdown": {
                 "BUY": len(buy_signals),
                 "SHORT": len(short_signals),
-                "NEUTRAL": total_intervals - n_signals,
+                "NEUTRAL": total_intervals - n_signals if self.live_signals is None else 0,
             },
             "signal_frequency_pct": signal_freq,
             "hit_rates": hit_rates,
+            "sl_tp_win_rate": sl_tp_win_rate,
+            "outcomes": {
+                "tp_hit": n_tp,
+                "sl_hit": n_sl,
+                "timeout": n_timeout,
+                "missing_sltp": n_missing_sltp,
+            },
+            "sample_size_warning": (n_tp + n_sl) < 50,
+            "sltp_basis": "absolute_prices_at_signal_time",
             "by_confidence_bucket": by_confidence,
             "by_regime": by_regime,
             "sharpe_ratio": round(sharpe_ratio, 4),
