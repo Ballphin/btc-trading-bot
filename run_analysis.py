@@ -13,8 +13,8 @@ today = date.today().strftime("%Y-%m-%d")
 # Create a custom config
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "deepseek"
-config["deep_think_llm"] = "deepseek-reasoner"
-config["quick_think_llm"] = "deepseek-chat"
+config["deep_think_llm"] = "deepseek-v4-flash"
+config["quick_think_llm"] = "deepseek-v4-flash"
 config["max_debate_rounds"] = 1
 
 config["data_vendors"] = {

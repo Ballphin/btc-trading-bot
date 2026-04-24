@@ -18,8 +18,8 @@ def main():
     # Create a custom config
     config = DEFAULT_CONFIG.copy()
     config["llm_provider"] = "deepseek"  # Use DeepSeek provider
-    config["deep_think_llm"] = "deepseek-reasoner"  # DeepSeek reasoning model
-    config["quick_think_llm"] = "deepseek-chat"  # DeepSeek chat model
+    config["deep_think_llm"] = "deepseek-v4-flash"  # DeepSeek V4 reasoning model
+    config["quick_think_llm"] = "deepseek-v4-flash"  # DeepSeek V4 fast model
     config["max_debate_rounds"] = 1  # Debate rounds
 
     # Configure data vendors (default uses yfinance, no extra API keys needed)

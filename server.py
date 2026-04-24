@@ -316,8 +316,8 @@ def _load_model_config_into_default() -> None:
                 DEFAULT_CONFIG.get("llm_provider"),
             )
             DEFAULT_CONFIG["llm_provider"] = "deepseek"
-            DEFAULT_CONFIG["deep_think_llm"] = "deepseek-chat"
-            DEFAULT_CONFIG["quick_think_llm"] = "deepseek-chat"
+            DEFAULT_CONFIG["deep_think_llm"] = "deepseek-v4-flash"
+            DEFAULT_CONFIG["quick_think_llm"] = "deepseek-v4-flash"
             DEFAULT_CONFIG["enable_ensemble"] = False
 
         logger.info(
@@ -681,7 +681,7 @@ class ModelConfigRequest(BaseModel):
 # DeepSeek hard-lock: production deployments only allow these providers.
 # Environment escape hatch for local dev: set DEEPSEEK_LOCK_OVERRIDE=1.
 _ALLOWED_PROVIDERS = {"deepseek"}
-_ALLOWED_MODELS = {"deepseek-chat", "deepseek-coder"}
+_ALLOWED_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
 
 
 def _provider_lock_enforced() -> bool:
@@ -695,18 +695,18 @@ async def get_model_config():
     from tradingagents.default_config import DEFAULT_CONFIG
 
     provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
-    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-chat")
+    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-v4-flash")
 
     # Legacy coercion: any stale non-deepseek state (from pre-lock deployment
     # or from gist hydration) gets flipped back to the locked default.
     if _provider_lock_enforced() and provider not in _ALLOWED_PROVIDERS:
         logger.info(f"[ModelLock] Coercing legacy provider '{provider}' to 'deepseek'")
         DEFAULT_CONFIG["llm_provider"] = "deepseek"
-        DEFAULT_CONFIG["deep_think_llm"] = "deepseek-chat"
-        DEFAULT_CONFIG["quick_think_llm"] = "deepseek-chat"
+        DEFAULT_CONFIG["deep_think_llm"] = "deepseek-v4-flash"
+        DEFAULT_CONFIG["quick_think_llm"] = "deepseek-v4-flash"
         DEFAULT_CONFIG["enable_ensemble"] = False
         _save_model_config()
-        provider, model = "deepseek", "deepseek-chat"
+        provider, model = "deepseek", "deepseek-v4-flash"
 
     return {
         "provider": provider,
@@ -801,7 +801,7 @@ async def model_sanity_check(ticker: str = "BTC-USD"):
     """
     from tradingagents.default_config import DEFAULT_CONFIG
     provider = DEFAULT_CONFIG.get("llm_provider", "deepseek")
-    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-chat")
+    model = DEFAULT_CONFIG.get("deep_think_llm", "deepseek-v4-flash")
     try:
         # Use the lightweight quant pulse pipeline as a proxy: it's fast,
         # deterministic, and exercises the LLM path without spawning a full
@@ -843,7 +843,7 @@ async def get_available_providers():
             {
                 "id": "deepseek",
                 "name": "DeepSeek",
-                "models": ["deepseek-chat", "deepseek-coder"],
+                "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
                 "ensemble_supported": False,
             },
             {
@@ -1263,8 +1263,8 @@ def _run_analysis(job_id: str, ticker: str, trade_date: str, force_refresh: bool
         # Only set defaults if not already configured (respect user's model selection)
         if not config.get("llm_provider") or config["llm_provider"] == "openai":
             config["llm_provider"] = "deepseek"
-            config["deep_think_llm"] = "deepseek-reasoner"
-            config["quick_think_llm"] = "deepseek-chat"
+            config["deep_think_llm"] = "deepseek-v4-flash"
+            config["quick_think_llm"] = "deepseek-v4-flash"
         config["max_debate_rounds"] = 1
         config["data_vendors"] = {
             "core_stock_apis": "yfinance",

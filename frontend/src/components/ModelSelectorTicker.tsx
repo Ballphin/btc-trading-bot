@@ -19,7 +19,7 @@ interface ModelSelectorTickerProps {
 
 const PROVIDER_MODELS: Record<string, string[]> = {
   openrouter: ['google/gemma-4-26b-a4b-it', 'google/gemma-4-26b-a4b-it:free', 'google/gemma-4-31b-it', 'google/gemma-4-31b-it:free', 'qwen/qwen3.6-plus', 'anthropic/claude-3.5-sonnet', 'openai/gpt-4o'],
-  deepseek: ['deepseek-chat', 'deepseek-coder'],
+  deepseek: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   openai: ['gpt-5.2', 'gpt-5-mini'],
   anthropic: ['claude-3-5-sonnet-20241022'],
 };
@@ -37,7 +37,7 @@ const ENSEMBLE_DISABLED_PROVIDERS = ['deepseek'];
 export default function ModelSelectorTicker({ currentTicker, onConfigChange }: ModelSelectorTickerProps) {
   const [config, setConfig] = useState<ModelConfig>({
     provider: 'deepseek',
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     parallelMode: false,
   });
   const [savedConfig, setSavedConfig] = useState<ModelConfig>(config);
@@ -79,7 +79,7 @@ export default function ModelSelectorTicker({ currentTicker, onConfigChange }: M
         const data = await res.json();
         const newConfig: ModelConfig = {
           provider: data.provider || 'deepseek',
-          model: data.model || 'deepseek-chat',
+          model: data.model || 'deepseek-v4-flash',
           parallelMode: data.ensemble_enabled ?? false,
         };
         setConfig(newConfig);

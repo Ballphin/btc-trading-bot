@@ -104,7 +104,7 @@ class TestValidateModel:
 class TestOpenAIClient:
     def test_deepseek_base_url(self):
         from tradingagents.llm_clients.openai_client import OpenAIClient
-        client = OpenAIClient("deepseek-chat", provider="deepseek")
+        client = OpenAIClient("deepseek-v4-flash", provider="deepseek")
         llm = client.get_llm()
         assert "deepseek" in str(llm.openai_api_base or "").lower() or hasattr(llm, "model_name")
 

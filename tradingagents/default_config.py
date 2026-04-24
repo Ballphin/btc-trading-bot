@@ -12,8 +12,8 @@ DEFAULT_CONFIG = {
     # developers can flip locally by editing DEFAULT_CONFIG, but production
     # deployments enforce DeepSeek via `/api/model/config` validation.
     "llm_provider": "deepseek",
-    "deep_think_llm": "deepseek-chat",
-    "quick_think_llm": "deepseek-chat",
+    "deep_think_llm": "deepseek-v4-flash",
+    "quick_think_llm": "deepseek-v4-flash",
     "backend_url": "https://api.deepseek.com",
     # Provider-specific thinking configuration
     "google_thinking_level": None,      # "high", "minimal", etc.
