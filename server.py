@@ -1972,7 +1972,7 @@ async def list_analyses(ticker: str):
             # Try multiple key formats: new format, candle_time, analysis_date
             date_data = data.get(candle_time) or data.get(analysis_date) or {}
             decision_text = date_data.get("final_trade_decision", "")
-            signal = _extract_signal(decision_text)
+            signal = date_data.get("decision") or _extract_signal(decision_text)
             confidence = date_data.get("confidence")
         except Exception:
             signal = "UNKNOWN"
@@ -1992,7 +1992,12 @@ async def list_analyses(ticker: str):
 
 
 def _extract_signal(text: str) -> str:
-    """Extract trading signal from decision text."""
+    """Extract trading signal — prefer the authoritative PROPOSAL line."""
+    from tradingagents.graph.signal_processing import _extract_from_proposal_line
+    proposal = _extract_from_proposal_line(text)
+    if proposal:
+        return proposal
+    # Fallback: first keyword match (legacy signals without PROPOSAL line)
     text_upper = text.upper()
     for signal in ["SHORT", "COVER", "OVERWEIGHT", "UNDERWEIGHT", "BUY", "SELL", "HOLD"]:
         if signal in text_upper:

@@ -52,6 +52,8 @@ export interface AnalysisData {
   trader_investment_decision: string;
   investment_plan: string;
   final_trade_decision: string;
+  // Processed signal (authoritative — extracted by SignalProcessor on the backend)
+  decision?: string;
   // Structured signal fields (optional, for new JSON-based signals)
   signal?: string;
   stop_loss_price?: number;

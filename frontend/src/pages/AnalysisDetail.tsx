@@ -93,7 +93,7 @@ export default function AnalysisDetail() {
   // SSE FIX: Format date with error boundary - use API formatted date or fallback
   const displayDate = analysis.date_formatted || date;
 
-  const signal = extractSignal(analysis.final_trade_decision);
+  const signal = analysis.decision || extractSignal(analysis.final_trade_decision);
 
   // Try to extract entry price from trader investment decision or final decision
   const priceFromText = extractEntryPrice(analysis.trader_investment_decision || '') 
