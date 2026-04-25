@@ -82,6 +82,14 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        # DeepSeek V4 models default to thinking mode, which requires
+        # reasoning_content passback on tool-call turns. LangChain doesn't
+        # handle this, so we disable thinking mode for all DeepSeek calls.
+        if self.provider == "deepseek":
+            llm_kwargs["model_kwargs"] = {
+                "extra_body": {"thinking": {"type": "disabled"}}
+            }
+
         # Native OpenAI: use Responses API for consistent behavior across
         # all model families. Third-party providers use Chat Completions.
         if self.provider == "openai":
