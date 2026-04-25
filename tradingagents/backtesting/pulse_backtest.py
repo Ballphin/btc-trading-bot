@@ -667,6 +667,31 @@ class PulseBacktestEngine:
 
             for horizon, (minutes, min_move) in thresholds.items():
                 target_ts = pulse_ts + timedelta(minutes=minutes)
+                mask_window = (candles_1m["timestamp"] > pulse_ts) & (candles_1m["timestamp"] <= target_ts)
+                window_candles = candles_1m[mask_window]
+                if not window_candles.empty:
+                    high_in_window = float(window_candles["high"].max())
+                    low_in_window = float(window_candles["low"].min())
+                    entry[f"high_in_window_{horizon}"] = round(high_in_window, 2)
+                    entry[f"low_in_window_{horizon}"] = round(low_in_window, 2)
+
+                    sl = entry.get("stop_loss")
+                    tp = entry.get("take_profit")
+                    sl_hit_in_window = False
+                    tp_hit_in_window = False
+                    if sl is not None:
+                        if direction == 1:
+                            sl_hit_in_window = low_in_window <= sl
+                        else:
+                            sl_hit_in_window = high_in_window >= sl
+                    if tp is not None:
+                        if direction == 1:
+                            tp_hit_in_window = high_in_window >= tp
+                        else:
+                            tp_hit_in_window = low_in_window <= tp
+                    entry[f"sl_hit_in_window_{horizon}"] = sl_hit_in_window
+                    entry[f"tp_hit_in_window_{horizon}"] = tp_hit_in_window
+
                 mask = candles_1m["timestamp"] >= target_ts
                 if mask.any():
                     target_candle = candles_1m[mask].iloc[0]

@@ -5102,6 +5102,66 @@ async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None)
     }
 
 
+@app.get("/api/pulse/scorecard/{ticker}/details")
+async def get_pulse_scorecard_details(ticker: str, horizon: str = "+5m"):
+    """Return individual scored pulse details for a specific horizon.
+
+    Each entry includes: ts, signal, price, stop_loss, take_profit,
+    hit status, net return, and high/low reached during the horizon window.
+    """
+    ticker = ticker.upper()
+    if horizon not in ("+5m", "+15m", "+1h"):
+        raise HTTPException(status_code=400, detail="horizon must be +5m, +15m, or +1h")
+
+    pulse_path = _champion_pulse_path(ticker)
+    if not pulse_path.exists():
+        return {"ticker": ticker, "horizon": horizon, "trades": []}
+
+    all_pulses = _read_pulses(ticker, limit=10000)
+    hit_key = f"hit_{horizon}"
+    scored = [p for p in all_pulses if hit_key in p and p.get("signal") in ("BUY", "SHORT")]
+
+    trades = []
+    for p in scored:
+        entry_price = p.get("price", 0)
+        sl = p.get("stop_loss")
+        tp = p.get("take_profit")
+        high_w = p.get(f"high_in_window_{horizon}")
+        low_w = p.get(f"low_in_window_{horizon}")
+
+        # Determine if SL/TP would have been hit within this horizon window
+        signal = p["signal"]
+        sl_hit_in_window = False
+        tp_hit_in_window = False
+        if sl is not None and high_w is not None and low_w is not None:
+            if signal == "BUY":
+                sl_hit_in_window = low_w <= sl
+                tp_hit_in_window = (tp is not None and high_w >= tp)
+            else:  # SHORT
+                sl_hit_in_window = high_w >= sl
+                tp_hit_in_window = (tp is not None and low_w <= tp)
+
+        trades.append({
+            "ts": p.get("ts"),
+            "signal": signal,
+            "confidence": p.get("confidence"),
+            "price": entry_price,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "hit": p.get(hit_key, False),
+            "net_return": p.get(f"return_{horizon}"),
+            "raw_return": p.get(f"return_raw_{horizon}"),
+            "high_in_window": high_w,
+            "low_in_window": low_w,
+            "sl_hit_in_window": sl_hit_in_window,
+            "tp_hit_in_window": tp_hit_in_window,
+            "hold_minutes": p.get("hold_minutes"),
+            "exit_type": p.get("exit_type"),
+        })
+
+    return {"ticker": ticker, "horizon": horizon, "trades": trades}
+
+
 @app.get("/api/pulse/regime/current/{ticker}")
 async def get_current_directional_regime(ticker: str):
     """Return the latest directional regime classification (Stage 2 G).
@@ -5278,6 +5338,16 @@ async def _score_pending_pulses():
                 entry[f"return_{horizon}"] = round(float(net_return), 6)
                 entry[f"return_raw_{horizon}"] = round(float(raw_return), 6)
                 entry[f"threshold_{horizon}"] = round(float(thr), 6)
+
+                # Track high/low within this horizon window
+                window_mask = (
+                    (candles["timestamp"] > pd.Timestamp(pulse_ts.replace(tzinfo=None)))
+                    & (candles["timestamp"] <= pd.Timestamp(target_ts.replace(tzinfo=None)))
+                )
+                window_candles = candles[window_mask]
+                if not window_candles.empty:
+                    entry[f"high_in_window_{horizon}"] = round(float(window_candles["high"].max()), 2)
+                    entry[f"low_in_window_{horizon}"] = round(float(window_candles["low"].min()), 2)
 
                 # 4 fill models — compute once per horizon.
                 try:

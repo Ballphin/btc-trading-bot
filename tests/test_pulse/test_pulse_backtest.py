@@ -181,6 +181,38 @@ class TestPulseBacktestEngine:
             if key in scored[0]:
                 assert isinstance(scored[0][key], float)
 
+    def test_score_signals_adds_horizon_window_details(self):
+        """Each scored signal should carry horizon high/low and SL/TP touch flags."""
+        engine = self._make_engine()
+        start_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        candles = {"1m": _make_candles(120, 1, start_dt, 50000)}
+
+        signals = [{
+            "ts": (start_dt + timedelta(minutes=10)).isoformat(),
+            "signal": "BUY",
+            "confidence": 0.7,
+            "normalized_score": 0.35,
+            "price": 50000,
+            "stop_loss": 49500,
+            "take_profit": 51000,
+            "hold_minutes": 45,
+            "timeframe_bias": "15m",
+            "breakdown": {},
+        }]
+
+        scored = engine._score_signals(signals, candles)
+        row = scored[0]
+        for horizon in ["+5m", "+15m", "+1h"]:
+            assert f"high_in_window_{horizon}" in row
+            assert f"low_in_window_{horizon}" in row
+            assert isinstance(row[f"high_in_window_{horizon}"], float)
+            assert isinstance(row[f"low_in_window_{horizon}"], float)
+            assert row[f"high_in_window_{horizon}"] >= row[f"low_in_window_{horizon}"]
+            assert f"sl_hit_in_window_{horizon}" in row
+            assert f"tp_hit_in_window_{horizon}" in row
+            assert isinstance(row[f"sl_hit_in_window_{horizon}"], bool)
+            assert isinstance(row[f"tp_hit_in_window_{horizon}"], bool)
+
     def test_score_signals_exit_type(self):
         """Each signal should have exit_type after scoring."""
         engine = self._make_engine()

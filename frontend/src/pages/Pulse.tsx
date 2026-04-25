@@ -139,11 +139,45 @@ interface BacktestResult {
   gap_count: number;
   n_excluded_warmup: number;
   return_autocorr_lag1: number;
+  signals?: BacktestSignal[];
   live_history_filter?: {
     confidence_100_only: boolean;
     total_pulses_before_filter: number | null;
     pulses_after_filter: number | null;
   };
+}
+
+type BacktestHorizon = '+5m' | '+15m' | '+1h';
+
+interface BacktestSignal {
+  ts: string;
+  signal: 'BUY' | 'SHORT';
+  confidence?: number;
+  price: number | null;
+  stop_loss: number | null;
+  take_profit: number | null;
+  hold_minutes?: number;
+  exit_type?: string;
+  [key: string]: unknown;
+}
+
+function getSignalNumber(signal: BacktestSignal, key: string): number | null {
+  const value = signal[key];
+  return typeof value === 'number' ? value : null;
+}
+
+function getSignalBoolean(signal: BacktestSignal, key: string): boolean {
+  return signal[key] === true;
+}
+
+function formatBacktestPrice(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) return '—';
+  return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function formatBacktestPct(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) return '—';
+  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`;
 }
 
 // ── Signal Badge ─────────────────────────────────────────────────────
@@ -375,6 +409,7 @@ export default function Pulse() {
   const [btRunning, setBtRunning] = useState(false);
   const [btResult, setBtResult] = useState<BacktestResult | null>(null);
   const [btError, setBtError] = useState<string | null>(null);
+  const [selectedBtHorizon, setSelectedBtHorizon] = useState<BacktestHorizon | null>(null);
 
   // Set default backtest dates (last 30 days)
   useEffect(() => {
@@ -384,6 +419,14 @@ export default function Pulse() {
     setBtStartDate(start.toISOString().split('T')[0]);
     setBtEndDate(end.toISOString().split('T')[0]);
   }, []);
+
+  useEffect(() => {
+    if (!btResult) {
+      setSelectedBtHorizon(null);
+      return;
+    }
+    setSelectedBtHorizon(prev => (prev && btResult.hit_rates?.[prev] ? prev : '+5m'));
+  }, [btResult]);
 
   // Fetch data with race condition guards (BLOCKER: SSE fix)
   const fetchPulses = useCallback(async (loadMore = false) => {
@@ -506,6 +549,7 @@ export default function Pulse() {
     setBtRunning(true);
     setBtError(null);
     setBtResult(null);
+    setSelectedBtHorizon(null);
     try {
       const res = await fetch(`${API_BASE_URL}/pulse/backtest/${ticker}`, {
         method: 'POST',
@@ -555,6 +599,17 @@ export default function Pulse() {
 
   // The most recent pulse (for general checks like price staleness)
   const absoluteLatestPulse = pulses.length > 0 ? pulses[0] : null;
+
+  const selectedBtRows = useMemo(() => {
+    if (!btResult?.signals || !selectedBtHorizon) return [];
+    return [...btResult.signals]
+      .filter((signal) => {
+        const high = getSignalNumber(signal, `high_in_window_${selectedBtHorizon}`);
+        const low = getSignalNumber(signal, `low_in_window_${selectedBtHorizon}`);
+        return high != null || low != null;
+      })
+      .reverse();
+  }, [btResult, selectedBtHorizon]);
 
   // Find the most recent high-confidence pulse (>= 75%) for the Hero Card.
   // Note: pulses array is newest-first.
@@ -1178,17 +1233,107 @@ export default function Pulse() {
                 <h3 className="text-sm font-semibold text-white mb-3">Forward Return Hit Rates</h3>
                 <div className="grid grid-cols-3 gap-4">
                   {Object.entries(btResult.hit_rates).map(([horizon, rates]) => (
-                    <div key={horizon} className="text-center">
+                    <button
+                      key={horizon}
+                      type="button"
+                      onClick={() => setSelectedBtHorizon(horizon as BacktestHorizon)}
+                      className={clsx(
+                        'rounded-xl border p-4 text-center transition-colors',
+                        selectedBtHorizon === horizon
+                          ? 'border-accent-teal/50 bg-accent-teal/10'
+                          : 'border-white/5 bg-navy-950/30 hover:border-white/15 hover:bg-navy-900/60',
+                      )}
+                    >
                       <div className="text-xs text-slate-500 mb-1">{horizon}</div>
                       <div className="text-lg font-bold text-white">{(rates.overall * 100).toFixed(1)}%</div>
                       <div className="flex justify-center gap-3 mt-1 text-xs">
                         <span className="text-emerald-400">BUY {((rates.BUY ?? 0) * 100).toFixed(1)}%</span>
                         <span className="text-red-400">SHORT {((rates.SHORT ?? 0) * 100).toFixed(1)}%</span>
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               </div>
+
+              {selectedBtHorizon && (
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">Signal Details {selectedBtHorizon}</h3>
+                      <div className="text-xs text-slate-500 mt-1">
+                        Original pulse SL/TP with forward-target hit, TP/SL touch, and the highest/lowest price reached inside this horizon.
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      Showing {selectedBtRows.length} recent signal{selectedBtRows.length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+
+                  {selectedBtRows.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-slate-500 border-b border-white/5">
+                            <th className="py-2 pr-3 font-medium">Time</th>
+                            <th className="py-2 px-3 font-medium">Signal</th>
+                            <th className="py-2 px-3 font-medium text-right">Entry</th>
+                            <th className="py-2 px-3 font-medium text-right">Stop</th>
+                            <th className="py-2 px-3 font-medium text-right">Target</th>
+                            <th className="py-2 px-3 font-medium text-center">Forward Hit</th>
+                            <th className="py-2 px-3 font-medium text-center">TP Touched</th>
+                            <th className="py-2 px-3 font-medium text-center">SL Touched</th>
+                            <th className="py-2 px-3 font-medium text-right">Window High</th>
+                            <th className="py-2 px-3 font-medium text-right">Window Low</th>
+                            <th className="py-2 pl-3 font-medium text-right">Net Return</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedBtRows.map((signal) => {
+                            const hit = getSignalBoolean(signal, `hit_${selectedBtHorizon}`);
+                            const tpTouched = getSignalBoolean(signal, `tp_hit_in_window_${selectedBtHorizon}`);
+                            const slTouched = getSignalBoolean(signal, `sl_hit_in_window_${selectedBtHorizon}`);
+                            const high = getSignalNumber(signal, `high_in_window_${selectedBtHorizon}`);
+                            const low = getSignalNumber(signal, `low_in_window_${selectedBtHorizon}`);
+                            const netReturn = getSignalNumber(signal, `return_${selectedBtHorizon}`);
+
+                            return (
+                              <tr key={`${signal.ts}-${signal.signal}`} className="border-b border-white/5 last:border-b-0">
+                                <td className="py-2 pr-3 text-slate-400 whitespace-nowrap">
+                                  {new Date(signal.ts).toLocaleString()}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <SignalBadge signal={signal.signal} />
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(signal.price)}</td>
+                                <td className="py-2 px-3 text-right text-red-400">{formatBacktestPrice(signal.stop_loss)}</td>
+                                <td className="py-2 px-3 text-right text-emerald-400">{formatBacktestPrice(signal.take_profit)}</td>
+                                <td className={clsx('py-2 px-3 text-center font-semibold', hit ? 'text-emerald-400' : 'text-red-400')}>
+                                  {hit ? 'Hit' : 'Miss'}
+                                </td>
+                                <td className={clsx('py-2 px-3 text-center', tpTouched ? 'text-emerald-400' : 'text-slate-500')}>
+                                  {tpTouched ? 'Yes' : 'No'}
+                                </td>
+                                <td className={clsx('py-2 px-3 text-center', slTouched ? 'text-red-400' : 'text-slate-500')}>
+                                  {slTouched ? 'Yes' : 'No'}
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(high)}</td>
+                                <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(low)}</td>
+                                <td className={clsx('py-2 pl-3 text-right font-mono', (netReturn ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                                  {formatBacktestPct(netReturn)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-500 py-6 text-center">
+                      No horizon detail rows are available for this selection yet.
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Confidence Buckets */}
               {btResult.by_confidence_bucket && Object.keys(btResult.by_confidence_bucket).length > 0 && (
