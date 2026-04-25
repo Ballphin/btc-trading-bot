@@ -150,6 +150,9 @@ class PulseBacktestEngine:
             signals = []
             for s in self.live_signals:
                 try:
+                    # Skip NEUTRAL signals — they have no SL/TP and can't be evaluated
+                    if s.get("signal") not in ("BUY", "SHORT"):
+                        continue
                     ts = datetime.fromisoformat(s["ts"])
                     if ts.tzinfo is None:
                         ts = ts.replace(tzinfo=timezone.utc)
