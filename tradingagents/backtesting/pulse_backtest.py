@@ -80,6 +80,7 @@ class PulseBacktestEngine:
         *,
         config_override: Optional[PulseConfig] = None,
         active_regime: str = "base",
+        live_signals: Optional[List[Dict[str, Any]]] = None,
     ):
         """Initialize a backtest run.
 
@@ -114,7 +115,7 @@ class PulseBacktestEngine:
 
         self._config_override = config_override
         self._active_regime = active_regime
-        self.live_signals = live_signals
+        self.live_signals: Optional[List[Dict[str, Any]]] = live_signals
         # Provenance — stamped by :meth:`_prefetch` based on router routing
         # decision. Auto-tune surfaces these on every Apply proposal.
         self._data_source: str = "unknown"

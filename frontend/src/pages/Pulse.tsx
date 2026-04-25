@@ -139,6 +139,11 @@ interface BacktestResult {
   gap_count: number;
   n_excluded_warmup: number;
   return_autocorr_lag1: number;
+  live_history_filter?: {
+    confidence_100_only: boolean;
+    total_pulses_before_filter: number | null;
+    pulses_after_filter: number | null;
+  };
 }
 
 // ── Signal Badge ─────────────────────────────────────────────────────
@@ -366,6 +371,7 @@ export default function Pulse() {
   // Backtest form state
   const [btStartDate, setBtStartDate] = useState('');
   const [btEndDate, setBtEndDate] = useState('');
+  const [bt100Only, setBt100Only] = useState(false);
   const [btRunning, setBtRunning] = useState(false);
   const [btResult, setBtResult] = useState<BacktestResult | null>(null);
   const [btError, setBtError] = useState<string | null>(null);
@@ -509,6 +515,8 @@ export default function Pulse() {
           end_date: btEndDate,
           interval_minutes: 15,
           threshold: 0.25,
+          use_live_history: true,
+          confidence_100_only: bt100Only,
         }),
       });
 
@@ -1044,6 +1052,35 @@ export default function Pulse() {
                 )}
               </button>
             </div>
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setBt100Only((v) => !v)}
+                aria-pressed={bt100Only}
+                className={clsx(
+                  'inline-flex items-center gap-2 px-2.5 py-1.5 text-[11px] rounded border transition-colors',
+                  bt100Only
+                    ? 'border-accent-teal/50 bg-accent-teal/10 text-accent-teal'
+                    : 'border-white/10 bg-navy-900/40 text-slate-400 hover:text-slate-200 hover:border-white/20',
+                )}
+                title="Include only pulses shown as 100% in Signal History (rounded, same as the confidence bar)"
+              >
+                <span
+                  className={clsx(
+                    'w-3 h-3 rounded-[3px] border flex items-center justify-center',
+                    bt100Only ? 'border-transparent bg-accent-teal' : 'border-slate-500/40',
+                  )}
+                  aria-hidden
+                >
+                  {bt100Only && (
+                    <svg viewBox="0 0 10 10" className="w-2 h-2" fill="none" stroke="#0B1220" strokeWidth="2">
+                      <path d="M2 5 L4.2 7 L8 3" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </span>
+                Use only 100% confidence pulses
+              </button>
+            </div>
             {btError && <div className="mt-3 text-sm text-red-400">{btError}</div>}
           </div>
 
@@ -1067,6 +1104,19 @@ export default function Pulse() {
               <div className="rounded-xl bg-navy-900/80 border border-white/10 p-5 flex items-center justify-between">
                 <div>
                   <h3 className="text-sm font-semibold text-slate-400 mb-1">Live History SL/TP Win Rate</h3>
+                  {btResult.live_history_filter && (
+                    <p className="text-[11px] text-slate-500 mb-2">
+                      {btResult.live_history_filter.confidence_100_only ? (
+                        <>
+                          Filter: 100% confidence only —{' '}
+                          {btResult.live_history_filter.pulses_after_filter ?? 0} of{' '}
+                          {btResult.live_history_filter.total_pulses_before_filter ?? 0} pulses in range
+                        </>
+                      ) : (
+                        <>All live-history pulses in date range</>
+                      )}
+                    </p>
+                  )}
                   <div className="flex items-baseline gap-3">
                     <span className={clsx('text-3xl font-bold', btResult.sl_tp_win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>
                       {(btResult.sl_tp_win_rate * 100).toFixed(1)}%

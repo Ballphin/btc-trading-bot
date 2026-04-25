@@ -8,6 +8,7 @@
   - GET /api/pulse/scheduler/status
   - POST /api/pulse/scheduler/toggle
   - POST /api/pulse/backtest/{ticker} — validation
+  - _pulse_confidence_ui_100 (100% as shown in UI)
 """
 
 import json
@@ -527,3 +528,40 @@ class TestPulseBacktestValidation:
             "end_date": "2026-02-01",
         })
         assert resp.status_code == 400
+
+
+class TestPulseConfidenceUI100:
+    """Matches Pulse.tsx ConfBar: Math.round(value * 100) === 100."""
+
+    def test_0994_not_included(self):
+        import server as srv
+        assert srv._pulse_confidence_ui_100({"confidence": 0.994}) is False
+
+    def test_0995_included(self):
+        import server as srv
+        assert srv._pulse_confidence_ui_100({"confidence": 0.995}) is True
+
+    def test_exact_1_included(self):
+        import server as srv
+        assert srv._pulse_confidence_ui_100({"confidence": 1.0}) is True
+
+    def test_missing_or_invalid_excluded(self):
+        import server as srv
+        assert srv._pulse_confidence_ui_100({}) is False
+        assert srv._pulse_confidence_ui_100({"confidence": None}) is False
+        assert srv._pulse_confidence_ui_100({"confidence": "high"}) is False
+
+
+def test_pulse_backtest_request_accepts_confidence_100_only():
+    from server import PulseBacktestRequest
+    d = PulseBacktestRequest(
+        start_date="2026-01-01",
+        end_date="2026-02-01",
+    )
+    assert d.confidence_100_only is False
+    d2 = PulseBacktestRequest(
+        start_date="2026-01-01",
+        end_date="2026-02-01",
+        confidence_100_only=True,
+    )
+    assert d2.confidence_100_only is True

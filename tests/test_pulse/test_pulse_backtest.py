@@ -101,6 +101,24 @@ class TestPulseBacktestEngine:
             signal_threshold=0.25,
         )
 
+    def test_constructor_stores_live_signals(self):
+        """Server passes live_history pulses here; must not raise NameError."""
+        ls = [{
+            "ts": "2026-01-15T12:00:00+00:00",
+            "signal": "BUY",
+            "confidence": 1.0,
+            "price": 50000.0,
+            "stop_loss": 49000.0,
+            "take_profit": 52000.0,
+            "hold_minutes": 45,
+        }]
+        e = PulseBacktestEngine(
+            "BTC-USD", "2026-01-01", "2026-01-31", live_signals=ls,
+        )
+        assert e.live_signals == ls
+        e2 = PulseBacktestEngine("BTC-USD", "2026-01-01", "2026-01-31")
+        assert e2.live_signals is None
+
     def test_build_historical_report_shape(self):
         """Report should have all expected keys."""
         engine = self._make_engine()

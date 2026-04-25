@@ -5333,12 +5333,24 @@ async def _score_pending_pulses():
 
 # ── Pulse Backtest API ────────────────────────────────────────────────
 
+def _pulse_confidence_ui_100(pulse: dict) -> bool:
+    """True when confidence matches the Pulse UI '100%' label (rounded percent)."""
+    c = pulse.get("confidence")
+    if c is None or not isinstance(c, (int, float)):
+        return False
+    try:
+        return round(float(c) * 100) == 100
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 class PulseBacktestRequest(BaseModel):
     start_date: str
     end_date: str
     interval_minutes: int = 15
     threshold: float = 0.25
     use_live_history: bool = True
+    confidence_100_only: bool = False
 
 
 @app.post("/api/pulse/backtest/{ticker}")
@@ -5371,10 +5383,18 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
             from tradingagents.backtesting.pulse_backtest import PulseBacktestEngine
 
             live_signals = None
+            n_before: Optional[int] = None
+            n_after: Optional[int] = None
             if req.use_live_history:
                 # Load all pulses for the ticker
                 all_pulses = _read_pulses(ticker, limit=100000)
-                live_signals = all_pulses
+                n_before = len(all_pulses)
+                if req.confidence_100_only:
+                    live_signals = [p for p in all_pulses if _pulse_confidence_ui_100(p)]
+                else:
+                    live_signals = all_pulses
+                n_after = len(live_signals) if live_signals is not None else None
+            # confidence_100_only is ignored when not using live history
 
             engine = PulseBacktestEngine(
                 ticker=ticker,
@@ -5397,6 +5417,16 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
             # Run in executor to avoid blocking
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, engine.run)
+
+            if req.use_live_history:
+                result = {
+                    **result,
+                    "live_history_filter": {
+                        "confidence_100_only": req.confidence_100_only,
+                        "total_pulses_before_filter": n_before,
+                        "pulses_after_filter": n_after,
+                    },
+                }
 
             yield {
                 "event": "result",
