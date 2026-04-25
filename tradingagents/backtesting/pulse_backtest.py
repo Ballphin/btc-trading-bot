@@ -66,6 +66,32 @@ _MIN_COVERAGE = 0.60  # exclude pulses with <60% indicator coverage
 _MAX_CURVE_POINTS = 500  # downsample profitability curve for API
 
 
+def _to_utc_timestamp(ts: Any) -> pd.Timestamp:
+    """Normalize a scalar datetime-like value to UTC-aware Timestamp."""
+    out = pd.Timestamp(ts)
+    if out.tz is None:
+        return out.tz_localize("UTC")
+    return out.tz_convert("UTC")
+
+
+def _normalize_timestamp_column(df: pd.DataFrame, column: str = "timestamp") -> pd.DataFrame:
+    """Return a frame with ``column`` normalized to UTC-aware pandas datetimes."""
+    if df is None or df.empty or column not in df.columns:
+        return df
+    out = df.copy()
+    n_before = len(out)
+    out[column] = pd.to_datetime(out[column], utc=True, errors="coerce")
+    out = out.dropna(subset=[column]).sort_values(column).reset_index(drop=True)
+    n_dropped = n_before - len(out)
+    if n_dropped > 0:
+        logger.warning(
+            "[PulseBacktest] Dropped %d row(s) with invalid %s values during UTC normalization",
+            n_dropped,
+            column,
+        )
+    return out
+
+
 class PulseBacktestEngine:
     """Replay the pulse scoring engine on historical candle data."""
 
@@ -200,7 +226,7 @@ class PulseBacktestEngine:
                 result = fetch_ohlcv_historical(
                     self.ticker, tf, fetch_start, fetch_end,
                 )
-                candles[tf] = result.df
+                candles[tf] = _normalize_timestamp_column(result.df)
                 data_sources.add(result.source)
                 if result.overlap_report and tf == PULSE_TIMEFRAMES[0]:
                     # Keep the first overlap report as the canonical one
@@ -234,6 +260,7 @@ class PulseBacktestEngine:
             funding_df, funding_source = fetch_funding_historical(
                 self.ticker, fetch_start, fetch_end,
             )
+            funding_df = _normalize_timestamp_column(funding_df)
             self._funding_source = funding_source
         except Exception as e:
             logger.warning(f"[PulseBacktest] Funding history failed: {e}")
@@ -256,7 +283,7 @@ class PulseBacktestEngine:
         logger.info(f"[PulseBacktest] Fetching 1m candles via router (live history)...")
         try:
             result = fetch_ohlcv_historical(self.ticker, "1m", fetch_start, fetch_end)
-            candles = {"1m": result.df}
+            candles = {"1m": _normalize_timestamp_column(result.df)}
             self._data_source = result.source
             self._stitch_report = result.overlap_report
         except Exception as e:
@@ -266,6 +293,7 @@ class PulseBacktestEngine:
 
         try:
             funding_df, funding_source = fetch_funding_historical(self.ticker, fetch_start, fetch_end)
+            funding_df = _normalize_timestamp_column(funding_df)
             self._funding_source = funding_source
         except Exception as e:
             logger.warning(f"[PulseBacktest] Funding history failed: {e}")
@@ -617,7 +645,8 @@ class PulseBacktestEngine:
         if not signals or candles["1m"].empty:
             return signals
 
-        candles_1m = candles["1m"]
+        candles_1m = _normalize_timestamp_column(candles["1m"])
+        funding_df = _normalize_timestamp_column(funding_df) if funding_df is not None else funding_df
         exec_cost = self._exec_cost_for_run()
 
         thresholds = {"+5m": (5, 0.0005), "+15m": (15, 0.0010), "+1h": (60, 0.0015)}
@@ -787,12 +816,9 @@ class PulseBacktestEngine:
         """
         if funding_df is None or funding_df.empty:
             return 0.0
-        # Normalize to tz-naive pandas Timestamps for comparison — the
-        # router returns tz-naive UTC and pulses are tz-aware UTC.
-        entry_np = pd.Timestamp(entry_ts).tz_localize(None) \
-            if pd.Timestamp(entry_ts).tz is not None else pd.Timestamp(entry_ts)
-        exit_np = pd.Timestamp(exit_ts).tz_localize(None) \
-            if pd.Timestamp(exit_ts).tz is not None else pd.Timestamp(exit_ts)
+        funding_df = _normalize_timestamp_column(funding_df)
+        entry_np = _to_utc_timestamp(entry_ts)
+        exit_np = _to_utc_timestamp(exit_ts)
         if exit_np <= entry_np:
             return 0.0
         mask = (funding_df["timestamp"] > entry_np) & (funding_df["timestamp"] <= exit_np)

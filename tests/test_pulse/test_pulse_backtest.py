@@ -419,3 +419,53 @@ class TestPulseBacktestEngine:
         candles = {"1m": _make_candles(100, 1), "1h": _make_candles(24, 60)}
         result = engine._compute_metrics(signals, candles)
         assert len(result["profitability_curve"]) <= 500
+
+    def test_score_signals_with_naive_candle_timestamps(self):
+        """Naive router candles should be normalized to UTC without crashing."""
+        engine = self._make_engine()
+        start_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        candles_1m = _make_candles(180, 1, start_dt, 50000)
+        candles_1m["timestamp"] = pd.to_datetime(candles_1m["timestamp"]).dt.tz_localize(None)
+        candles = {"1m": candles_1m}
+        funding = pd.DataFrame({
+            "timestamp": [
+                datetime(2026, 1, 1, 8, 0, 0),
+                datetime(2026, 1, 1, 16, 0, 0),
+            ],
+            "funding_rate": [0.0001, 0.0001],
+        })
+
+        signals = [{
+            "ts": (start_dt + timedelta(minutes=10)).isoformat(),
+            "signal": "BUY",
+            "confidence": 1.0,
+            "normalized_score": 0.4,
+            "price": 50000,
+            "stop_loss": 49500,
+            "take_profit": 51000,
+            "hold_minutes": 60,
+            "timeframe_bias": "15m",
+            "breakdown": {},
+        }]
+
+        scored = engine._score_signals(signals, candles, funding)
+        assert len(scored) == 1
+        assert "exit_type" in scored[0]
+        assert ("return_+5m" in scored[0]) or ("return_+15m" in scored[0]) or ("return_+1h" in scored[0])
+
+    def test_integrate_funding_with_naive_funding_timestamps(self):
+        """Funding masks should tolerate naive timestamps when entries are aware."""
+        engine = self._make_engine()
+        funding = pd.DataFrame({
+            "timestamp": [
+                datetime(2026, 1, 1, 0, 0, 0),
+                datetime(2026, 1, 1, 8, 0, 0),
+                datetime(2026, 1, 1, 16, 0, 0),
+            ],
+            "funding_rate": [0.0002, 0.0003, 0.0004],
+        })
+        entry = datetime(2026, 1, 1, 7, 30, tzinfo=timezone.utc)
+        exit_ = datetime(2026, 1, 1, 16, 30, tzinfo=timezone.utc)
+        out = engine._integrate_funding(funding, entry, exit_, direction=1)
+        assert isinstance(out, float)
+        assert out == pytest.approx(0.0007)
