@@ -666,6 +666,11 @@ class PulseBacktestEngine:
             direction = 1 if entry["signal"] == "BUY" else -1
 
             for horizon, (minutes, min_move) in thresholds.items():
+                entry.setdefault(f"high_in_window_{horizon}", None)
+                entry.setdefault(f"low_in_window_{horizon}", None)
+                entry.setdefault(f"sl_hit_in_window_{horizon}", None)
+                entry.setdefault(f"tp_hit_in_window_{horizon}", None)
+
                 target_ts = pulse_ts + timedelta(minutes=minutes)
                 mask_window = (candles_1m["timestamp"] > pulse_ts) & (candles_1m["timestamp"] <= target_ts)
                 window_candles = candles_1m[mask_window]

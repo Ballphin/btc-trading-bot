@@ -158,16 +158,34 @@ interface BacktestSignal {
   take_profit: number | null;
   hold_minutes?: number;
   exit_type?: string;
-  [key: string]: unknown;
+  'hit_+5m'?: boolean;
+  'hit_+15m'?: boolean;
+  'hit_+1h'?: boolean;
+  'return_+5m'?: number;
+  'return_+15m'?: number;
+  'return_+1h'?: number;
+  'high_in_window_+5m'?: number;
+  'high_in_window_+15m'?: number;
+  'high_in_window_+1h'?: number;
+  'low_in_window_+5m'?: number;
+  'low_in_window_+15m'?: number;
+  'low_in_window_+1h'?: number;
+  'tp_hit_in_window_+5m'?: boolean;
+  'tp_hit_in_window_+15m'?: boolean;
+  'tp_hit_in_window_+1h'?: boolean;
+  'sl_hit_in_window_+5m'?: boolean;
+  'sl_hit_in_window_+15m'?: boolean;
+  'sl_hit_in_window_+1h'?: boolean;
 }
 
 function getSignalNumber(signal: BacktestSignal, key: string): number | null {
-  const value = signal[key];
+  const value = signal[key as keyof BacktestSignal];
   return typeof value === 'number' ? value : null;
 }
 
-function getSignalBoolean(signal: BacktestSignal, key: string): boolean {
-  return signal[key] === true;
+function getSignalBoolean(signal: BacktestSignal, key: string): boolean | null {
+  const value = signal[key as keyof BacktestSignal];
+  return typeof value === 'boolean' ? value : null;
 }
 
 function formatBacktestPrice(value: number | null | undefined) {
@@ -569,6 +587,7 @@ export default function Pulse() {
       let buffer = '';
 
       if (reader) {
+        let sawFinalResult = false;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -577,16 +596,22 @@ export default function Pulse() {
           buffer = lines.pop() || '';
 
           for (const line of lines) {
+            if (line.startsWith('event: result')) {
+              sawFinalResult = true;
+              continue;
+            }
             if (line.startsWith('data: ')) {
               try {
                 const payload = JSON.parse(line.slice(6));
                 if (payload.ticker || payload.hit_rates) {
-                  setBtResult(payload);
+                  setBtResult((prev) => {
+                    const next = sawFinalResult && prev
+                      ? { ...prev, ...payload }
+                      : payload;
+                    return next;
+                  });
                 }
               } catch {}
-            }
-            if (line.startsWith('event: result')) {
-              // next data line has the result
             }
           }
         }
@@ -602,13 +627,7 @@ export default function Pulse() {
 
   const selectedBtRows = useMemo(() => {
     if (!btResult?.signals || !selectedBtHorizon) return [];
-    return [...btResult.signals]
-      .filter((signal) => {
-        const high = getSignalNumber(signal, `high_in_window_${selectedBtHorizon}`);
-        const low = getSignalNumber(signal, `low_in_window_${selectedBtHorizon}`);
-        return high != null || low != null;
-      })
-      .reverse();
+    return [...btResult.signals].reverse();
   }, [btResult, selectedBtHorizon]);
 
   // Find the most recent high-confidence pulse (>= 75%) for the Hero Card.
@@ -1237,8 +1256,9 @@ export default function Pulse() {
                       key={horizon}
                       type="button"
                       onClick={() => setSelectedBtHorizon(horizon as BacktestHorizon)}
+                      aria-pressed={selectedBtHorizon === horizon}
                       className={clsx(
-                        'rounded-xl border p-4 text-center transition-colors',
+                        'rounded-xl border p-4 text-center transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent-teal/40',
                         selectedBtHorizon === horizon
                           ? 'border-accent-teal/50 bg-accent-teal/10'
                           : 'border-white/5 bg-navy-950/30 hover:border-white/15 hover:bg-navy-900/60',
@@ -1307,14 +1327,23 @@ export default function Pulse() {
                                 <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(signal.price)}</td>
                                 <td className="py-2 px-3 text-right text-red-400">{formatBacktestPrice(signal.stop_loss)}</td>
                                 <td className="py-2 px-3 text-right text-emerald-400">{formatBacktestPrice(signal.take_profit)}</td>
-                                <td className={clsx('py-2 px-3 text-center font-semibold', hit ? 'text-emerald-400' : 'text-red-400')}>
-                                  {hit ? 'Hit' : 'Miss'}
+                                <td className={clsx(
+                                  'py-2 px-3 text-center font-semibold',
+                                  hit === true ? 'text-emerald-400' : hit === false ? 'text-red-400' : 'text-slate-500',
+                                )}>
+                                  {hit == null ? '—' : hit ? 'Hit' : 'Miss'}
                                 </td>
-                                <td className={clsx('py-2 px-3 text-center', tpTouched ? 'text-emerald-400' : 'text-slate-500')}>
-                                  {tpTouched ? 'Yes' : 'No'}
+                                <td className={clsx(
+                                  'py-2 px-3 text-center',
+                                  tpTouched === true ? 'text-emerald-400' : tpTouched === false ? 'text-slate-500' : 'text-slate-600',
+                                )}>
+                                  {tpTouched == null ? '—' : tpTouched ? 'Yes' : 'No'}
                                 </td>
-                                <td className={clsx('py-2 px-3 text-center', slTouched ? 'text-red-400' : 'text-slate-500')}>
-                                  {slTouched ? 'Yes' : 'No'}
+                                <td className={clsx(
+                                  'py-2 px-3 text-center',
+                                  slTouched === true ? 'text-red-400' : slTouched === false ? 'text-slate-500' : 'text-slate-600',
+                                )}>
+                                  {slTouched == null ? '—' : slTouched ? 'Yes' : 'No'}
                                 </td>
                                 <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(high)}</td>
                                 <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(low)}</td>

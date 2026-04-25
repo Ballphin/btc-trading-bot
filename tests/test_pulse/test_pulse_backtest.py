@@ -213,6 +213,54 @@ class TestPulseBacktestEngine:
             assert isinstance(row[f"sl_hit_in_window_{horizon}"], bool)
             assert isinstance(row[f"tp_hit_in_window_{horizon}"], bool)
 
+    def test_score_signals_short_uses_correct_window_tp_sl_semantics(self):
+        """SHORT signals should treat window highs as SL checks and lows as TP checks."""
+        engine = self._make_engine()
+        start_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        candles = {"1m": pd.DataFrame([
+            {
+                "timestamp": start_dt + timedelta(minutes=0),
+                "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0, "volume": 10.0,
+            },
+            {
+                "timestamp": start_dt + timedelta(minutes=1),
+                "open": 99.8, "high": 101.5, "low": 97.5, "close": 99.2, "volume": 10.0,
+            },
+            {
+                "timestamp": start_dt + timedelta(minutes=5),
+                "open": 99.0, "high": 100.2, "low": 98.8, "close": 99.1, "volume": 10.0,
+            },
+            {
+                "timestamp": start_dt + timedelta(minutes=15),
+                "open": 98.7, "high": 99.3, "low": 98.4, "close": 98.8, "volume": 10.0,
+            },
+            {
+                "timestamp": start_dt + timedelta(minutes=60),
+                "open": 98.0, "high": 98.5, "low": 97.9, "close": 98.1, "volume": 10.0,
+            },
+        ])}
+
+        signals = [{
+            "ts": start_dt.isoformat(),
+            "signal": "SHORT",
+            "confidence": 0.9,
+            "normalized_score": -0.4,
+            "price": 100.0,
+            "stop_loss": 101.0,
+            "take_profit": 98.0,
+            "hold_minutes": 45,
+            "timeframe_bias": "5m",
+            "breakdown": {},
+        }]
+
+        scored = engine._score_signals(signals, candles)
+        row = scored[0]
+
+        assert row["high_in_window_+5m"] == 101.5
+        assert row["low_in_window_+5m"] == 97.5
+        assert row["sl_hit_in_window_+5m"] is True
+        assert row["tp_hit_in_window_+5m"] is True
+
     def test_score_signals_exit_type(self):
         """Each signal should have exit_type after scoring."""
         engine = self._make_engine()
