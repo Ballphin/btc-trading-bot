@@ -5049,16 +5049,23 @@ async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None)
             "engine_versions": sorted({p.get("engine_version") for p in all_pulses if p.get("engine_version")}),
         }
 
-    # Hit rates per horizon
+    # Hit rates per horizon — with CI for small samples
     hit_rates: dict = {}
     for horizon in ["+5m", "+15m", "+1h"]:
         key = f"hit_{horizon}"
-        hits = sum(1 for p in scored if p.get(key))
+        scored_for_h = [p for p in scored if key in p]
+        hits = sum(1 for p in scored_for_h if p.get(key))
+        n_h = len(scored_for_h)
+        overall = round(hits / n_h, 4) if n_h > 0 else 0
+        ci_95 = round(1.96 * math.sqrt(overall * (1 - overall) / n_h), 4) if n_h > 0 else 0
         hit_rates[horizon] = {
-            "overall": round(hits / n_scored, 4) if n_scored > 0 else 0,
+            "overall": overall,
+            "n_complete": n_h,
+            "n_total": n_scored,
+            "ci_95": ci_95,
         }
         for sig in ["BUY", "SHORT"]:
-            sig_scored = [p for p in scored if p.get("signal") == sig]
+            sig_scored = [p for p in scored_for_h if p.get("signal") == sig]
             sig_hits = sum(1 for p in sig_scored if p.get(key))
             hit_rates[horizon][sig] = (
                 round(sig_hits / len(sig_scored), 4)
@@ -5106,16 +5113,81 @@ async def get_pulse_scorecard(ticker: str, engine_version: Optional[str] = None)
 async def get_pulse_scorecard_details(ticker: str, horizon: str = "+5m"):
     """Return individual scored pulse details for a specific horizon.
 
-    Each entry includes: ts, signal, price, stop_loss, take_profit,
-    hit status, net return, and high/low reached during the horizon window.
+    Prefers verified outcomes from pulse_verifier when available,
+    falls back to raw pulse.jsonl data.
     """
+    from tradingagents.backtesting.pulse_verifier import (
+        load_verified_outcomes,
+        VERIFICATION_VERSION,
+    )
+
     ticker = ticker.upper()
     if horizon not in ("+5m", "+15m", "+1h"):
         raise HTTPException(status_code=400, detail="horizon must be +5m, +15m, or +1h")
 
+    # Try verified outcomes first
+    verified = load_verified_outcomes(ticker)
+    attr_map = {"+5m": "fwd_5m", "+15m": "fwd_15m", "+1h": "fwd_1h"}
+    attr = attr_map[horizon]
+
+    if verified:
+        trades = []
+        for vo in verified.values():
+            hr = getattr(vo, attr)
+            if hr is None:
+                continue
+            # Data quality
+            if hr.window_candle_count == 0:
+                data_quality = "missing"
+            elif not hr.window_complete:
+                data_quality = "partial"
+            else:
+                data_quality = "complete"
+
+            # Missing value reason
+            missing_reason = None
+            if hr.window_candle_count == 0:
+                missing_reason = "missing candles"
+            elif not hr.window_complete:
+                missing_reason = "partial window"
+            elif vo.stop_loss is None or vo.take_profit is None:
+                missing_reason = "no SL/TP"
+
+            trades.append({
+                "ts": vo.ts,
+                "signal": vo.signal,
+                "confidence": vo.confidence,
+                "price": vo.entry_price,
+                "stop_loss": vo.stop_loss,
+                "take_profit": vo.take_profit,
+                "hit": hr.hit,
+                "net_return": hr.net_return,
+                "raw_return": hr.raw_return,
+                "threshold": hr.threshold,
+                "high_in_window": hr.window_high,
+                "low_in_window": hr.window_low,
+                "sl_hit_in_window": hr.sl_touched,
+                "tp_hit_in_window": hr.tp_touched,
+                "hold_minutes": vo.hold_minutes,
+                "exit_type": vo.exit_type,
+                "data_quality": data_quality,
+                "missing_reason": missing_reason,
+                "sl_atr_ratio": vo.sl_atr_ratio,
+                "regime_mode": vo.regime_mode,
+            })
+
+        return {
+            "ticker": ticker,
+            "horizon": horizon,
+            "trades": trades,
+            "source": "verified",
+            "verification_version": VERIFICATION_VERSION,
+        }
+
+    # Fallback to raw pulse data
     pulse_path = _champion_pulse_path(ticker)
     if not pulse_path.exists():
-        return {"ticker": ticker, "horizon": horizon, "trades": []}
+        return {"ticker": ticker, "horizon": horizon, "trades": [], "source": "none"}
 
     all_pulses = _read_pulses(ticker, limit=10000)
     hit_key = f"hit_{horizon}"
@@ -5129,7 +5201,6 @@ async def get_pulse_scorecard_details(ticker: str, horizon: str = "+5m"):
         high_w = p.get(f"high_in_window_{horizon}")
         low_w = p.get(f"low_in_window_{horizon}")
 
-        # Determine if SL/TP would have been hit within this horizon window
         signal = p["signal"]
         sl_hit_in_window = False
         tp_hit_in_window = False
@@ -5137,9 +5208,17 @@ async def get_pulse_scorecard_details(ticker: str, horizon: str = "+5m"):
             if signal == "BUY":
                 sl_hit_in_window = low_w <= sl
                 tp_hit_in_window = (tp is not None and high_w >= tp)
-            else:  # SHORT
+            else:
                 sl_hit_in_window = high_w >= sl
                 tp_hit_in_window = (tp is not None and low_w <= tp)
+
+        # Data quality
+        data_quality = "complete" if high_w is not None else "missing"
+        missing_reason = None
+        if high_w is None:
+            missing_reason = "not verified yet"
+        elif sl is None or tp is None:
+            missing_reason = "no SL/TP"
 
         trades.append({
             "ts": p.get("ts"),
@@ -5157,9 +5236,107 @@ async def get_pulse_scorecard_details(ticker: str, horizon: str = "+5m"):
             "tp_hit_in_window": tp_hit_in_window,
             "hold_minutes": p.get("hold_minutes"),
             "exit_type": p.get("exit_type"),
+            "data_quality": data_quality,
+            "missing_reason": missing_reason,
         })
 
-    return {"ticker": ticker, "horizon": horizon, "trades": trades}
+    return {"ticker": ticker, "horizon": horizon, "trades": trades, "source": "raw"}
+
+
+@app.post("/api/pulse/verify/{ticker}")
+async def verify_pulse_outcomes(ticker: str):
+    """Force re-verification of all scored + unscored BUY/SHORT pulses.
+
+    Fetches 1m + 5m candles for the full pulse history range,
+    verifies all pulses, and persists the outcomes.
+    """
+    from tradingagents.backtesting.pulse_verifier import (
+        verify_pulses,
+        save_verified_outcomes,
+        dedup_signals,
+        _ensure_utc_aware,
+        VERIFICATION_VERSION,
+    )
+    from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
+    from tradingagents.pulse.config import get_config as _get_cfg
+
+    ticker = ticker.upper()
+    pulse_path = _champion_pulse_path(ticker)
+    if not pulse_path.exists():
+        return {"ticker": ticker, "total": 0, "verified": 0, "error": "no pulses found"}
+
+    all_pulses = _read_pulses(ticker, limit=10000)
+    actionable = [
+        p for p in all_pulses
+        if p.get("signal") in ("BUY", "SHORT") and p.get("price") and p["price"] > 0
+    ]
+
+    if not actionable:
+        return {"ticker": ticker, "total": len(all_pulses), "verified": 0}
+
+    # Dedup before verification
+    actionable = dedup_signals(actionable)
+
+    # Find time range
+    ts_list = []
+    for p in actionable:
+        try:
+            ts_list.append(datetime.fromisoformat(p["ts"].replace("Z", "+00:00")))
+        except Exception:
+            pass
+
+    if not ts_list:
+        return {"ticker": ticker, "total": len(all_pulses), "verified": 0, "error": "no valid timestamps"}
+
+    range_start = min(ts_list) - timedelta(minutes=5)
+    range_end = max(ts_list) + timedelta(minutes=70)
+
+    base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
+    hl = HyperliquidClient()
+
+    try:
+        candles_1m = hl.get_ohlcv(
+            base_asset, "1m",
+            start=range_start.strftime("%Y-%m-%d"),
+            end=(range_end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=3600,
+        )
+        candles_5m = hl.get_ohlcv(
+            base_asset, "5m",
+            start=range_start.strftime("%Y-%m-%d"),
+            end=(range_end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            max_age_override=3600,
+        )
+    except Exception as e:
+        return {"ticker": ticker, "total": len(all_pulses), "verified": 0, "error": str(e)[:200]}
+
+    candles_1m = _ensure_utc_aware(candles_1m)
+    candles_5m = _ensure_utc_aware(candles_5m)
+
+    cfg = _get_cfg()
+    exec_cost_bps = float(cfg.get("forward_return", "exec_cost_bps", default=5))
+
+    for p in actionable:
+        p["ticker"] = ticker
+
+    outcomes = verify_pulses(
+        actionable, candles_1m, candles_5m, cfg,
+        exec_cost=exec_cost_bps / 10_000.0,
+    )
+
+    if outcomes:
+        async with _get_pulse_lock(ticker):
+            save_verified_outcomes(ticker, outcomes)
+
+    n_insufficient = sum(1 for o in outcomes if o.exit_type == "insufficient_data")
+
+    return {
+        "ticker": ticker,
+        "total": len(all_pulses),
+        "verified": len(outcomes),
+        "skipped_insufficient": n_insufficient,
+        "verification_version": VERIFICATION_VERSION,
+    }
 
 
 @app.get("/api/pulse/regime/current/{ticker}")
@@ -5232,8 +5409,16 @@ async def _score_pending_pulses():
     """Score unscored pulses older than 1h against actual forward returns.
 
     Uses candle OPEN at target timestamp (not close) per debate finding.
+    Timestamps are UTC-aware throughout (no tz-stripping).
+    Uses unified forward_hit_threshold from pulse_verifier.
     """
     from tradingagents.dataflows.hyperliquid_client import HyperliquidClient, PULSE_CACHE_TTL
+    from tradingagents.backtesting.pulse_verifier import (
+        forward_hit_threshold,
+        verify_single_pulse,
+        save_verified_outcomes,
+        _ensure_utc_aware,
+    )
 
     hl = HyperliquidClient()
     now_utc = datetime.now(timezone.utc)
@@ -5316,7 +5501,7 @@ async def _score_pending_pulses():
             for idx, h_min in enumerate(horizons_min):
                 horizon = f"+{h_min}m" if h_min != 60 else "+1h"
                 target_ts = pulse_ts + timedelta(minutes=int(h_min))
-                mask = candles["timestamp"] >= pd.Timestamp(target_ts.replace(tzinfo=None))
+                mask = candles["timestamp"] >= pd.Timestamp(target_ts)
                 if not mask.any():
                     continue
                 target_candle = candles[mask].iloc[0]
@@ -5325,12 +5510,7 @@ async def _score_pending_pulses():
                 # Raw return (direction-signed)
                 raw_return = (fwd_price - entry_price) / entry_price * direction
 
-                # Threshold: ATR-sqrt-time if available, else fallback fixed bps
-                if atr_at_pulse and atr_at_pulse > 0 and entry_price > 0:
-                    thr = atr_mul * float(atr_at_pulse) * math.sqrt(h_min / 60.0) / entry_price
-                else:
-                    fb_bps = fallback_bps[idx] if idx < len(fallback_bps) else fallback_bps[-1]
-                    thr = float(fb_bps) / 10_000.0
+                thr = forward_hit_threshold(atr_at_pulse, entry_price, h_min, cfg)
 
                 net_return = raw_return - exec_cost_bps / 10_000.0
                 hit = net_return >= thr
@@ -5341,8 +5521,8 @@ async def _score_pending_pulses():
 
                 # Track high/low within this horizon window
                 window_mask = (
-                    (candles["timestamp"] > pd.Timestamp(pulse_ts.replace(tzinfo=None)))
-                    & (candles["timestamp"] <= pd.Timestamp(target_ts.replace(tzinfo=None)))
+                    (candles["timestamp"] > pd.Timestamp(pulse_ts))
+                    & (candles["timestamp"] <= pd.Timestamp(target_ts))
                 )
                 window_candles = candles[window_mask]
                 if not window_candles.empty:
@@ -5353,10 +5533,10 @@ async def _score_pending_pulses():
                 try:
                     # Price at +10s and +30s relative to signal (for maker models)
                     p10_mask = candles["timestamp"] >= pd.Timestamp(
-                        (pulse_ts + timedelta(seconds=10)).replace(tzinfo=None)
+                        pulse_ts + timedelta(seconds=10)
                     )
                     p30_mask = candles["timestamp"] >= pd.Timestamp(
-                        (pulse_ts + timedelta(seconds=30)).replace(tzinfo=None)
+                        pulse_ts + timedelta(seconds=30)
                     )
                     p10 = float(candles[p10_mask].iloc[0]["open"]) if p10_mask.any() else None
                     p30 = float(candles[p30_mask].iloc[0]["open"]) if p30_mask.any() else None
@@ -5399,6 +5579,59 @@ async def _score_pending_pulses():
                     else:
                         f.write(json.dumps(entry, default=str) + "\n")
             os.replace(tmp_path, pulse_path)
+
+            # Persist verified outcomes for newly scored entries
+            try:
+                scored_entries = [
+                    e for e in all_entries
+                    if e.get("scored") and e.get("signal") in ("BUY", "SHORT")
+                    and not e.get("_raw")
+                ]
+                if scored_entries:
+                    # Fetch candles covering the full range of scored pulses
+                    ts_list = []
+                    for e in scored_entries:
+                        try:
+                            ts_list.append(datetime.fromisoformat(
+                                e["ts"].replace("Z", "+00:00")
+                            ))
+                        except Exception:
+                            pass
+                    if ts_list:
+                        range_start = min(ts_list) - timedelta(minutes=5)
+                        range_end = max(ts_list) + timedelta(minutes=70)
+                        try:
+                            candles_1m = hl.get_ohlcv(
+                                base_asset, "1m",
+                                start=range_start.strftime("%Y-%m-%d"),
+                                end=range_end.strftime("%Y-%m-%d"),
+                                max_age_override=3600,
+                            )
+                            candles_5m = hl.get_ohlcv(
+                                base_asset, "5m",
+                                start=range_start.strftime("%Y-%m-%d"),
+                                end=range_end.strftime("%Y-%m-%d"),
+                                max_age_override=3600,
+                            )
+                            candles_1m = _ensure_utc_aware(candles_1m)
+                            candles_5m = _ensure_utc_aware(candles_5m)
+                            verified = []
+                            for e in scored_entries:
+                                e["ticker"] = ticker
+                                vo = verify_single_pulse(
+                                    e, candles_1m, candles_5m, cfg,
+                                    exec_cost=exec_cost_bps / 10_000.0,
+                                )
+                                verified.append(vo)
+                            if verified:
+                                save_verified_outcomes(ticker, verified)
+                        except Exception as ve:
+                            logger.warning(
+                                "Failed to persist verified outcomes for %s: %s",
+                                ticker, ve,
+                            )
+            except Exception as ve2:
+                logger.warning("Verified outcome persistence error for %s: %s", ticker, ve2)
 
 
 # ── Pulse Backtest API ────────────────────────────────────────────────

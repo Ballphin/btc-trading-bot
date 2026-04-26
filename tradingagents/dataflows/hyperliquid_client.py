@@ -201,7 +201,7 @@ class HyperliquidClient(BaseDataClient):
             )
 
         df = pd.DataFrame(all_candles)
-        df["timestamp"] = pd.to_datetime(df["t"], unit="ms")
+        df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
         df["open"] = df["o"].astype(float)
         df["high"] = df["h"].astype(float)
         df["low"] = df["l"].astype(float)

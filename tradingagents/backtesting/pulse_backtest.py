@@ -44,6 +44,7 @@ from tradingagents.pulse.config import (
     use_config_override,
 )
 from tradingagents.pulse.fills import realistic_roundtrip_cost
+from tradingagents.backtesting.pulse_verifier import forward_hit_threshold
 from tradingagents.pulse.pulse_assembly import PulseInputs, score_pulse_from_inputs
 from tradingagents.pulse.regime import detect_regime
 from tradingagents.pulse.support_resistance import compute_support_resistance
@@ -642,14 +643,22 @@ class PulseBacktestEngine:
            auto-tune toward counter-trend setups. See adversarial review
            action #3 in the final plan.
         """
-        if not signals or candles["1m"].empty:
+        if not signals:
             return signals
 
-        candles_1m = _normalize_timestamp_column(candles["1m"])
+        candles_1m_raw = candles.get("1m", pd.DataFrame())
+        has_1m = not candles_1m_raw.empty
+        candles_1m = _normalize_timestamp_column(candles_1m_raw) if has_1m else candles_1m_raw
         funding_df = _normalize_timestamp_column(funding_df) if funding_df is not None else funding_df
         exec_cost = self._exec_cost_for_run()
 
-        thresholds = {"+5m": (5, 0.0005), "+15m": (15, 0.0010), "+1h": (60, 0.0015)}
+        cfg = None
+        try:
+            cfg = get_config()
+        except Exception:
+            pass
+
+        horizons = [("+5m", 5), ("+15m", 15), ("+1h", 60)]
 
         for entry in signals:
             price = entry.get("price")
@@ -665,11 +674,14 @@ class PulseBacktestEngine:
 
             direction = 1 if entry["signal"] == "BUY" else -1
 
-            for horizon, (minutes, min_move) in thresholds.items():
+            for horizon, minutes in horizons:
                 entry.setdefault(f"high_in_window_{horizon}", None)
                 entry.setdefault(f"low_in_window_{horizon}", None)
                 entry.setdefault(f"sl_hit_in_window_{horizon}", None)
                 entry.setdefault(f"tp_hit_in_window_{horizon}", None)
+
+                if not has_1m:
+                    continue
 
                 target_ts = pulse_ts + timedelta(minutes=minutes)
                 mask_window = (candles_1m["timestamp"] > pulse_ts) & (candles_1m["timestamp"] <= target_ts)
@@ -705,14 +717,20 @@ class PulseBacktestEngine:
                     funding_cost = self._integrate_funding(
                         funding_df, pulse_ts, target_ts, direction,
                     )
-                    # Horizons <=1h rarely span a funding stamp (funding
-                    # fires every 8h) but we keep the integration honest
-                    # — 0 funding periods crossed → 0 cost, no harm.
                     net_return = raw_return - exec_cost - funding_cost
-                    entry[f"hit_{horizon}"] = net_return >= min_move
+                    atr_1h = entry.get("atr_1h_at_pulse")
+                    thr = forward_hit_threshold(atr_1h, price, minutes, cfg)
+                    entry[f"hit_{horizon}"] = net_return >= thr
                     entry[f"return_{horizon}"] = round(net_return, 6)
+                    entry[f"threshold_{horizon}"] = round(thr, 6)
 
-            # SL/TP hit check within hold period
+            # SL/TP hit check within hold period (requires 1m candles)
+            entry["exit_type"] = "timeout"
+            entry["exit_return"] = None
+
+            if not has_1m:
+                continue
+
             hold_min = entry.get("hold_minutes", 45)
             sl = entry.get("stop_loss")
             tp = entry.get("take_profit")
@@ -720,9 +738,6 @@ class PulseBacktestEngine:
 
             mask_hold = (candles_1m["timestamp"] > pulse_ts) & (candles_1m["timestamp"] <= hold_end)
             hold_candles = candles_1m[mask_hold]
-
-            entry["exit_type"] = "timeout"
-            entry["exit_return"] = None
 
             if not hold_candles.empty and sl is not None and tp is not None:
                 # Gap detection logic: check if duration span is > 1.5 * hold_min

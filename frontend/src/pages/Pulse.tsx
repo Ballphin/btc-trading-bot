@@ -103,6 +103,9 @@ interface HitRates {
     overall: number;
     BUY?: number;
     SHORT?: number;
+    n_complete?: number;
+    n_total?: number;
+    ci_95?: number;
   };
 }
 
@@ -119,6 +122,29 @@ interface ScorecardData {
   hit_rates: HitRates;
   fill_summary?: Record<string, Record<FillModelName, FillSummaryEntry>>;
   engine_versions?: Array<string | number>;
+}
+
+interface ScorecardDetailTrade {
+  ts: string;
+  signal: 'BUY' | 'SHORT';
+  confidence?: number;
+  price: number;
+  stop_loss: number | null;
+  take_profit: number | null;
+  hit: boolean | null;
+  net_return: number | null;
+  raw_return?: number | null;
+  threshold?: number | null;
+  high_in_window: number | null;
+  low_in_window: number | null;
+  sl_hit_in_window: boolean | null;
+  tp_hit_in_window: boolean | null;
+  hold_minutes?: number;
+  exit_type?: string;
+  data_quality?: 'complete' | 'partial' | 'missing';
+  missing_reason?: string | null;
+  sl_atr_ratio?: number | null;
+  regime_mode?: string | null;
 }
 
 interface BacktestResult {
@@ -429,6 +455,13 @@ export default function Pulse() {
   const [btError, setBtError] = useState<string | null>(null);
   const [selectedBtHorizon, setSelectedBtHorizon] = useState<BacktestHorizon | null>(null);
 
+  // Scorecard detail state
+  const [scSelectedHorizon, setScSelectedHorizon] = useState<BacktestHorizon | null>(null);
+  const [scDetailTrades, setScDetailTrades] = useState<ScorecardDetailTrade[]>([]);
+  const [scDetailSource, setScDetailSource] = useState<string>('');
+  const [scDetailLoading, setScDetailLoading] = useState(false);
+  const [scRebuildLoading, setScRebuildLoading] = useState(false);
+
   // Set default backtest dates (last 30 days)
   useEffect(() => {
     const end = new Date();
@@ -526,6 +559,34 @@ export default function Pulse() {
       if (err instanceof Error && err.name === 'AbortError') return;
     }
   }, [ticker]);
+
+  const fetchScorecardDetails = useCallback(async (horizon: BacktestHorizon) => {
+    setScDetailLoading(true);
+    setScSelectedHorizon(horizon);
+    try {
+      const res = await fetch(`${API_BASE_URL}/pulse/scorecard/${ticker}/details?horizon=${encodeURIComponent(horizon)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setScDetailTrades(data.trades ?? []);
+      setScDetailSource(data.source ?? '');
+    } catch {
+      setScDetailTrades([]);
+      setScDetailSource('');
+    } finally {
+      setScDetailLoading(false);
+    }
+  }, [ticker]);
+
+  const rebuildVerified = useCallback(async () => {
+    setScRebuildLoading(true);
+    try {
+      await fetch(`${API_BASE_URL}/pulse/verify/${ticker}`, { method: 'POST' });
+      fetchScorecard();
+      if (scSelectedHorizon) fetchScorecardDetails(scSelectedHorizon);
+    } catch { /* ignore */ } finally {
+      setScRebuildLoading(false);
+    }
+  }, [ticker, fetchScorecard, scSelectedHorizon, fetchScorecardDetails]);
 
   // Keep refs updated with latest functions (HIGH: SSE fix for interval)
   fetchPulsesRef.current = fetchPulses;
@@ -1015,18 +1076,129 @@ export default function Pulse() {
                 </div>
               )}
 
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-white">Forward Return Hit Rates</h3>
+                <button
+                  onClick={rebuildVerified}
+                  disabled={scRebuildLoading}
+                  className={clsx(
+                    'inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors',
+                    scRebuildLoading
+                      ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                      : 'bg-accent-teal/10 text-accent-teal hover:bg-accent-teal/20 border border-accent-teal/30',
+                  )}
+                >
+                  <RefreshCw className={clsx('w-3 h-3', scRebuildLoading && 'animate-spin')} />
+                  {scRebuildLoading ? 'Rebuilding…' : 'Rebuild Verified'}
+                </button>
+              </div>
               <div className="grid grid-cols-3 gap-4">
                 {Object.entries(scorecard.hit_rates).map(([horizon, rates]) => (
-                  <div key={horizon} className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
+                  <button
+                    key={horizon}
+                    type="button"
+                    onClick={() => fetchScorecardDetails(horizon as BacktestHorizon)}
+                    className={clsx(
+                      'rounded-xl border p-4 text-center transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent-teal/40',
+                      scSelectedHorizon === horizon
+                        ? 'border-accent-teal/50 bg-accent-teal/10'
+                        : 'border-white/5 bg-navy-900/50 hover:border-white/15 hover:bg-navy-900/60',
+                    )}
+                  >
                     <div className="text-xs text-slate-500 mb-2">Hit Rate {horizon}</div>
                     <div className="text-2xl font-bold text-white">{(rates.overall * 100).toFixed(1)}%</div>
-                    <div className="flex gap-3 mt-2 text-xs">
-                      <span className="text-emerald-400">BUY: {((rates.BUY ?? 0) * 100).toFixed(1)}%</span>
-                      <span className="text-red-400">SHORT: {((rates.SHORT ?? 0) * 100).toFixed(1)}%</span>
+                    {rates.ci_95 != null && rates.n_complete != null && rates.n_complete < 100 && (
+                      <div className="text-[10px] text-slate-500 mt-0.5">
+                        ({Math.max(0, (rates.overall - rates.ci_95) * 100).toFixed(0)}–{Math.min(100, (rates.overall + rates.ci_95) * 100).toFixed(0)}%) n={rates.n_complete}
+                      </div>
+                    )}
+                    <div className="flex justify-center gap-3 mt-2 text-xs">
+                      <span className="text-emerald-400">BUY {((rates.BUY ?? 0) * 100).toFixed(1)}%</span>
+                      <span className="text-red-400">SHORT {((rates.SHORT ?? 0) * 100).toFixed(1)}%</span>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
+
+              {/* Scorecard detail table */}
+              {scSelectedHorizon && (
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5 mt-4">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">Signal Details {scSelectedHorizon}</h3>
+                      <div className="text-xs text-slate-500 mt-1">
+                        {scDetailSource === 'verified' ? (
+                          <span className="text-emerald-400/80">✓ Verified data (Hyperliquid 1m/5m candles)</span>
+                        ) : scDetailSource === 'raw' ? (
+                          <span className="text-amber-400/80">⚠ Unverified — click Rebuild to verify</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="text-xs text-slate-500">
+                      {scDetailLoading ? 'Loading…' : `${scDetailTrades.length} signals`}
+                    </div>
+                  </div>
+
+                  {scDetailTrades.length > 0 ? (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-slate-500 border-b border-white/5">
+                            <th className="py-2 pr-3 font-medium">Time</th>
+                            <th className="py-2 px-3 font-medium">Signal</th>
+                            <th className="py-2 px-3 font-medium text-right">Entry</th>
+                            <th className="py-2 px-3 font-medium text-right">Stop</th>
+                            <th className="py-2 px-3 font-medium text-right">Target</th>
+                            <th className="py-2 px-3 font-medium text-center">Fwd Hit</th>
+                            <th className="py-2 px-3 font-medium text-center">TP Touch</th>
+                            <th className="py-2 px-3 font-medium text-center">SL Touch</th>
+                            <th className="py-2 px-3 font-medium text-right">Win High</th>
+                            <th className="py-2 px-3 font-medium text-right">Win Low</th>
+                            <th className="py-2 px-3 font-medium text-right">Net Ret</th>
+                            <th className="py-2 pl-3 font-medium text-center">Quality</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {scDetailTrades.map((t) => (
+                            <tr key={`${t.ts}-${t.signal}`} className="border-b border-white/5 last:border-b-0">
+                              <td className="py-2 pr-3 text-slate-400 whitespace-nowrap">{new Date(t.ts).toLocaleString()}</td>
+                              <td className="py-2 px-3"><SignalBadge signal={t.signal} /></td>
+                              <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(t.price)}</td>
+                              <td className="py-2 px-3 text-right text-red-400">{formatBacktestPrice(t.stop_loss)}</td>
+                              <td className="py-2 px-3 text-right text-emerald-400">{formatBacktestPrice(t.take_profit)}</td>
+                              <td className={clsx('py-2 px-3 text-center font-semibold', t.hit === true ? 'text-emerald-400' : t.hit === false ? 'text-red-400' : 'text-slate-500')}>
+                                {t.hit == null ? '—' : t.hit ? 'Hit' : 'Miss'}
+                              </td>
+                              <td className={clsx('py-2 px-3 text-center', t.tp_hit_in_window === true ? 'text-emerald-400' : 'text-slate-500')}>
+                                {t.tp_hit_in_window == null ? '—' : t.tp_hit_in_window ? 'Yes' : 'No'}
+                              </td>
+                              <td className={clsx('py-2 px-3 text-center', t.sl_hit_in_window === true ? 'text-red-400' : 'text-slate-500')}>
+                                {t.sl_hit_in_window == null ? '—' : t.sl_hit_in_window ? 'Yes' : 'No'}
+                              </td>
+                              <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(t.high_in_window)}</td>
+                              <td className="py-2 px-3 text-right text-slate-200">{formatBacktestPrice(t.low_in_window)}</td>
+                              <td className={clsx('py-2 px-3 text-right font-mono', (t.net_return ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                                {formatBacktestPct(t.net_return)}
+                              </td>
+                              <td className="py-2 pl-3 text-center">
+                                {t.data_quality === 'complete' ? (
+                                  <span className="text-emerald-400/70 text-[10px]">●</span>
+                                ) : t.data_quality === 'partial' ? (
+                                  <span className="text-amber-400/70 text-[10px]" title={t.missing_reason ?? 'partial window'}>◐</span>
+                                ) : (
+                                  <span className="text-slate-600 text-[10px]" title={t.missing_reason ?? 'missing candles'}>○</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : !scDetailLoading ? (
+                    <div className="text-sm text-slate-500 py-6 text-center">No detail data available. Click "Rebuild Verified" to verify pulse outcomes.</div>
+                  ) : null}
+                </div>
+              )}
 
               {/* 4 fill models per horizon */}
               {scorecard.fill_summary && Object.keys(scorecard.fill_summary).length > 0 && (
@@ -1266,6 +1438,11 @@ export default function Pulse() {
                     >
                       <div className="text-xs text-slate-500 mb-1">{horizon}</div>
                       <div className="text-lg font-bold text-white">{(rates.overall * 100).toFixed(1)}%</div>
+                      {rates.ci_95 != null && rates.n_complete != null && rates.n_complete < 100 && (
+                        <div className="text-[10px] text-slate-500 mt-0.5">
+                          ({Math.max(0, (rates.overall - rates.ci_95) * 100).toFixed(0)}–{Math.min(100, (rates.overall + rates.ci_95) * 100).toFixed(0)}%) n={rates.n_complete}
+                        </div>
+                      )}
                       <div className="flex justify-center gap-3 mt-1 text-xs">
                         <span className="text-emerald-400">BUY {((rates.BUY ?? 0) * 100).toFixed(1)}%</span>
                         <span className="text-red-400">SHORT {((rates.SHORT ?? 0) * 100).toFixed(1)}%</span>
