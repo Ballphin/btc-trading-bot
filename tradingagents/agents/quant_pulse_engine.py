@@ -489,7 +489,7 @@ def _apply_tsmom_gate(
     return normalized * parabolic_mul, False, None
 
 
-def score_pulse(
+def score_pulse_confluence(
     report: dict,
     signal_threshold: Optional[float] = None,
     backtest_mode: bool = False,
@@ -766,6 +766,226 @@ def score_pulse(
         "sr_near_side": sr_near_side,
         "z_4h_return": z_4h_return,
     }
+
+
+# ── v4 dispatcher (regime-switched arms) ─────────────────────────────
+
+def _funding_rate_per_hr(funding_rate: Optional[float]) -> float:
+    """Hyperliquid funding is settled hourly; the rate is already per-hour."""
+    if funding_rate is None:
+        return 0.0
+    return float(funding_rate)
+
+
+def _apply_economic_gate(
+    result: dict,
+    spot_price: Optional[float],
+    funding_rate: Optional[float],
+    cfg: PulseConfig,
+) -> dict:
+    """Reject signals where TP cannot cover round-trip fees + funding cost.
+
+    Per BLOCKER #5 of adversarial review: ex-ante check separate from the
+    ex-post integration done by ``pulse_verifier``.
+
+        gross_tp_pct ≥ safety_factor × (taker_fee + expected_funding_cost)
+    """
+    if not cfg.get("pulse_v4", "economic_gate", "enabled", default=True):
+        return result
+    if result.get("signal") in (None, "NEUTRAL"):
+        return result
+    tp = result.get("take_profit")
+    if tp is None or spot_price is None or spot_price <= 0:
+        return result
+    gross_tp_pct = abs(float(tp) - float(spot_price)) / float(spot_price)
+    hold_hours = max(1.0, float(result.get("hold_minutes") or 60) / 60.0)
+    expected_funding_cost_pct = abs(_funding_rate_per_hr(funding_rate)) * hold_hours
+    taker_fee_pct = float(cfg.get("pulse_v4", "economic_gate", "taker_fee_pct", default=0.00045))
+    safety_factor = float(cfg.get("pulse_v4", "economic_gate", "safety_factor", default=2.0))
+    threshold = safety_factor * (taker_fee_pct + expected_funding_cost_pct)
+    if gross_tp_pct < threshold:
+        return {
+            **result,
+            "signal": "NEUTRAL",
+            "confidence": 0.0,
+            "normalized_score": 0.0,
+            "stop_loss": None,
+            "take_profit": None,
+            "arm_reason": f"economic_gate_failed:gross_tp={gross_tp_pct:.4f}<thr={threshold:.4f}",
+        }
+    return result
+
+
+def score_pulse_v4(
+    report: dict,
+    *,
+    regime_mode: str,
+    vpd_signal: Optional[int],
+    liquidation_score: Optional[float],
+    realized_vol_recent: Optional[float],
+    realized_vol_prior: Optional[float],
+    cfg: PulseConfig,
+    confluence_kwargs: dict,
+) -> dict:
+    """Dispatch to the regime-appropriate arm (v4).
+
+    * ``high_vol_trend`` → VPD-reversal arm.
+    * ``chop``           → VWAP mean-reversion arm.
+    * ``trend`` / ``mixed`` (or any unrecognised) → confluence (legacy).
+
+    Each arm's result is merged with a baseline shape so callers see the
+    same keys as ``score_pulse_confluence``.
+    """
+    from tradingagents.pulse.arms import score_pulse_vpd_reversal, score_pulse_vwap_mr
+
+    arms_cfg = cfg.get("pulse_v4", "arms", default={}) or {}
+    spot_price = report.get("spot_price")
+    timeframes = report.get("timeframes", {}) or {}
+    atr_1h = (timeframes.get("1h") or {}).get("atr")
+    funding_rate = report.get("funding_rate")
+    vwap_daily = report.get("vwap_daily")
+
+    arm_result: Optional[dict] = None
+    arm_used = "confluence"
+
+    if regime_mode == "high_vol_trend" and (arms_cfg.get("vpd_reversal", {}) or {}).get("enabled", True):
+        arm_result = score_pulse_vpd_reversal(
+            spot_price=spot_price,
+            atr_1h=atr_1h,
+            vpd_signal=vpd_signal,
+            liquidation_score=liquidation_score,
+            realized_vol_recent=realized_vol_recent,
+            realized_vol_prior=realized_vol_prior,
+            cfg=cfg,
+        )
+        arm_used = "vpd_reversal"
+    elif regime_mode == "chop" and (arms_cfg.get("vwap_mean_reversion", {}) or {}).get("enabled", True):
+        arm_result = score_pulse_vwap_mr(
+            spot_price=spot_price,
+            vwap_daily=vwap_daily,
+            atr_1h=atr_1h,
+            funding_rate=funding_rate,
+            cfg=cfg,
+        )
+        arm_used = "vwap_mean_reversion"
+
+    if arm_result is None or arm_result.get("signal") == "NEUTRAL":
+        # Fall through to confluence (also covers trend / mixed / failed gates).
+        confluence = score_pulse_confluence(report, regime_mode=regime_mode,
+                                            cfg=cfg, **confluence_kwargs)
+        confluence["arm_used"] = "confluence"
+        # Preserve arm_reason if the arm produced one (debug trace).
+        if arm_result is not None and arm_result.get("arm_reason"):
+            confluence["arm_reason"] = arm_result["arm_reason"]
+        confluence = _apply_economic_gate(confluence, spot_price, funding_rate, cfg)
+        return confluence
+
+    # Pad missing keys so arm result matches confluence-shape contract.
+    padded = {
+        "raw_normalized_score": arm_result.get("normalized_score", 0.0),
+        "timeframe_bias": "1h",
+        "key_levels": {"support": confluence_kwargs.get("support"),
+                       "resistance": confluence_kwargs.get("resistance")},
+        "reasoning": f"{arm_used}:{arm_result.get('arm_reason', 'fired')}",
+        "volatility_flag": report.get("max_1m_move_pct", 0) > 1.0,
+        "breakdown": {arm_used: float(arm_result.get("normalized_score", 0.0))},
+        "signal_threshold": float(cfg.get("confluence", "signal_threshold", default=0.25)),
+        "persistence_mul": 1.0,
+        "override_reason": None,
+        "tsmom_direction": confluence_kwargs.get("tsmom_direction"),
+        "tsmom_strength": confluence_kwargs.get("tsmom_strength"),
+        "tsmom_gated_out": False,
+        "tsmom_gate_reason": None,
+        "tsmom_gate_mode": "disabled",
+        "regime_mode": regime_mode,
+        "sr_source": confluence_kwargs.get("sr_source", "none"),
+        "sr_near_side": None,
+        "z_4h_return": confluence_kwargs.get("z_4h_return"),
+        **arm_result,
+    }
+    padded["arm_used"] = arm_used
+    return _apply_economic_gate(padded, spot_price, funding_rate, cfg)
+
+
+def score_pulse(
+    report: dict,
+    signal_threshold: Optional[float] = None,
+    backtest_mode: bool = False,
+    support: Optional[float] = None,
+    resistance: Optional[float] = None,
+    last_4h_close_ts: Optional[datetime] = None,
+    tsmom_direction: Optional[int] = None,
+    tsmom_strength: Optional[float] = None,
+    regime_mode: str = "mixed",
+    liquidation_score: Optional[float] = None,
+    realized_vol_recent: Optional[float] = None,
+    realized_vol_prior: Optional[float] = None,
+    book_imbalance: Optional[float] = None,
+    prev_signal: Optional[str] = None,
+    ema_liquidity_ok: bool = True,
+    z_4h_return: Optional[float] = None,
+    sr_source: str = "none",
+    cfg: Optional[PulseConfig] = None,
+    # v4-only inputs (ignored when pulse_v4.enabled = False)
+    vpd_signal: Optional[int] = None,
+    liquidity_sweep_dir: Optional[int] = None,
+    pattern_hits: Optional[Dict[str, list]] = None,
+) -> dict:
+    """Public entry point. Routes to v4 dispatcher when enabled, else legacy.
+
+    Backwards-compatible: when ``cfg.pulse_v4.enabled`` is False (the
+    default), behaviour is byte-identical to the legacy
+    ``score_pulse_confluence`` (verified by ``test_v4_disabled_parity``).
+    """
+    cfg = cfg or get_config()
+    if not cfg.get("pulse_v4", "enabled", default=False):
+        return score_pulse_confluence(
+            report,
+            signal_threshold=signal_threshold,
+            backtest_mode=backtest_mode,
+            support=support,
+            resistance=resistance,
+            last_4h_close_ts=last_4h_close_ts,
+            tsmom_direction=tsmom_direction,
+            tsmom_strength=tsmom_strength,
+            regime_mode=regime_mode,
+            liquidation_score=liquidation_score,
+            realized_vol_recent=realized_vol_recent,
+            realized_vol_prior=realized_vol_prior,
+            book_imbalance=book_imbalance,
+            prev_signal=prev_signal,
+            ema_liquidity_ok=ema_liquidity_ok,
+            z_4h_return=z_4h_return,
+            sr_source=sr_source,
+            cfg=cfg,
+        )
+    confluence_kwargs = dict(
+        signal_threshold=signal_threshold,
+        backtest_mode=backtest_mode,
+        support=support,
+        resistance=resistance,
+        last_4h_close_ts=last_4h_close_ts,
+        tsmom_direction=tsmom_direction,
+        tsmom_strength=tsmom_strength,
+        liquidation_score=liquidation_score,
+        realized_vol_recent=realized_vol_recent,
+        realized_vol_prior=realized_vol_prior,
+        book_imbalance=book_imbalance,
+        prev_signal=prev_signal,
+        ema_liquidity_ok=ema_liquidity_ok,
+        z_4h_return=z_4h_return,
+        sr_source=sr_source,
+    )
+    return score_pulse_v4(
+        report,
+        regime_mode=regime_mode,
+        vpd_signal=vpd_signal,
+        liquidation_score=liquidation_score,
+        realized_vol_recent=realized_vol_recent,
+        realized_vol_prior=realized_vol_prior,
+        cfg=cfg,
+        confluence_kwargs=confluence_kwargs,
+    )
 
 
 # ── Templated reasoning ──────────────────────────────────────────────

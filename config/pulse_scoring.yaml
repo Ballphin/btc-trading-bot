@@ -202,3 +202,59 @@ edge_gate:
     "2024-08-05": 0.08
     "2023-08-17": 0.06
     "2024-03-05": 0.05
+
+# ── Pulse v4: regime-switched arms (default OFF for parity) ───────────
+# When enabled=False, score_pulse() is byte-identical to legacy
+# score_pulse_confluence (BLOCKER #6 parity test enforces this).
+pulse_v4:
+  enabled: false
+  arms:
+    confluence:
+      enabled: true
+    vpd_reversal:
+      enabled: true
+      regimes: [high_vol_trend]
+      vpd_corr_threshold: -0.30
+      require_liq_or_vol_fade: true
+      vol_fade_ratio: 0.7
+      sl_atr_mul: 1.5
+      tp_atr_mul: 2.0
+      hold_minutes: 90
+    vwap_mean_reversion:
+      enabled: true
+      regimes: [chop]
+      atr_band_mul: 1.5
+      min_atr_pct_of_price: 0.0015
+      weekend_disabled: true
+      funding_gate_threshold: 0.00005    # 0.005% per hour
+      sl_atr_mul: 1.8
+      tp_atr_mul: 1.4
+      hold_minutes: 30
+  patterns:
+    structural:
+      enabled: true
+      timeframes: [1h, 4h]
+      kernel_bandwidth_bars: 8
+      symmetry_tolerance_pct: 0.015
+      channel_atr_band_mul: 0.5
+      channel_min_extrema: 6
+      channel_min_bars: 18
+      channel_max_volume_ratio: 0.7
+      double_bottom_match_pct: 0.02
+      double_bottom_wick_ratio: 0.5
+      double_bottom_reclaim_minutes: 15
+    candles:
+      hammer_wick_ratio: 0.70
+      engulfing_volume_mul: 1.2
+  vpd:
+    lookback_bars: 20
+    corr_threshold: -0.30
+  liquidity_sweep:
+    extreme_lookback_bars: 60
+    reclaim_within_bars: 10
+    reclaim_volume_mul: 2.0
+    reject_aligned_funding: true
+  economic_gate:
+    enabled: true
+    taker_fee_pct: 0.00045
+    safety_factor: 2.0

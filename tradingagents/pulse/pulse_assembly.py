@@ -19,11 +19,13 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 
 _VALID_REGIME_MODES = {"trend", "chop", "high_vol_trend", "mixed"}
 _VALID_SR_SOURCES = {"pivot", "book", "both", "none"}
+_VALID_TERNARY = {-1, 0, 1, None}
+_VALID_TFS = {"1m", "5m", "15m", "1h", "4h"}
 
 
 @dataclass
@@ -66,6 +68,11 @@ class PulseInputs:
     # --- Regime diagnostics (for parabolic soft-gate) ---
     z_4h_return: Optional[float] = None
 
+    # --- Pulse v4 inputs (None when v4 disabled) ---
+    vpd_signal: Optional[int] = None              # -1 / 0 / +1 / None
+    liquidity_sweep_dir: Optional[int] = None     # -1 / 0 / +1 / None
+    pattern_hits: Dict[str, List[str]] = field(default_factory=dict)
+
     # --- Config + misc ---
     cfg: Any = None  # PulseConfig; avoid circular import in type annotation
 
@@ -90,6 +97,28 @@ class PulseInputs:
             raise ValueError(
                 f"prev_signal must be BUY/SHORT/NEUTRAL/None, got {self.prev_signal!r}"
             )
+        if self.vpd_signal not in _VALID_TERNARY:
+            raise ValueError(
+                f"vpd_signal must be -1/0/1/None, got {self.vpd_signal!r}"
+            )
+        if self.liquidity_sweep_dir not in _VALID_TERNARY:
+            raise ValueError(
+                f"liquidity_sweep_dir must be -1/0/1/None, got {self.liquidity_sweep_dir!r}"
+            )
+        if not isinstance(self.pattern_hits, dict):
+            raise ValueError(
+                f"pattern_hits must be a dict, got {type(self.pattern_hits).__name__}"
+            )
+        for name, tfs in self.pattern_hits.items():
+            if not isinstance(name, str):
+                raise ValueError(f"pattern_hits keys must be strings, got {type(name).__name__}")
+            if not isinstance(tfs, list):
+                raise ValueError(f"pattern_hits[{name!r}] must be a list, got {type(tfs).__name__}")
+            for tf in tfs:
+                if tf not in _VALID_TFS:
+                    raise ValueError(
+                        f"pattern_hits[{name!r}] contains invalid tf {tf!r}; expected one of {_VALID_TFS}"
+                    )
 
     def as_score_kwargs(self) -> dict:
         """Return the kwargs dict for the legacy score_pulse() signature.
@@ -113,6 +142,9 @@ class PulseInputs:
             "z_4h_return": self.z_4h_return,
             "sr_source": self.sr_source,
             "cfg": self.cfg,
+            "vpd_signal": self.vpd_signal,
+            "liquidity_sweep_dir": self.liquidity_sweep_dir,
+            "pattern_hits": self.pattern_hits,
         }
 
 
