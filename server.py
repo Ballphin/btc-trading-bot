@@ -19,6 +19,7 @@ Provides:
 
 import asyncio
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -5749,6 +5750,161 @@ async def start_pulse_backtest(ticker: str, req: PulseBacktestRequest):
             }
 
     return EventSourceResponse(run_backtest())
+
+
+class PulseBacktestV4Request(BaseModel):
+    start_date: str
+    end_date: str
+    interval_minutes: int = 15
+    threshold: float = 0.25
+    data_source: str = "auto"  # auto | hyperliquid | binance
+
+
+@app.post("/api/pulse/backtest-v4/{ticker}")
+async def start_pulse_backtest_v4(ticker: str, req: PulseBacktestV4Request):
+    """Start a v4-pattern historical backtest with regime-switched arms.
+
+    Forces ``pulse_v4.enabled = true`` via config override so the replay
+    uses the strict pattern detectors (structural, candles, VPD,
+    liquidity sweep) and regime-switched arms (vpd_reversal,
+    vwap_mean_reversion) instead of the legacy confluence engine.
+    """
+    ticker = ticker.upper()
+    if not ticker.endswith("-USD") and not ticker.endswith("USDT"):
+        raise HTTPException(status_code=400, detail="Pulse backtest is crypto-only")
+
+    try:
+        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format (use YYYY-MM-DD)")
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date")
+    if (end_dt - start_dt).days > 90:
+        raise HTTPException(status_code=400, detail="Max backtest range is 90 days")
+
+    job_id = str(uuid.uuid4())[:8]
+
+    async def run_v4_backtest():
+        try:
+            from tradingagents.backtesting.pulse_backtest import PulseBacktestEngine
+            from tradingagents.pulse.config import (
+                PulseConfig, get_config, use_config_override,
+            )
+
+            # Build v4-on config override from current on-disk config
+            base_cfg = get_config()
+            merged_data = copy.deepcopy(base_cfg.data)
+            merged_data.setdefault("pulse_v4", {})
+            merged_data["pulse_v4"]["enabled"] = True
+            # Force arms on for backtest visibility
+            merged_data["pulse_v4"].setdefault("arms", {})
+            for arm in ("confluence", "vpd_reversal", "vwap_mean_reversion"):
+                merged_data["pulse_v4"]["arms"].setdefault(arm, {})
+                merged_data["pulse_v4"]["arms"][arm]["enabled"] = True
+            merged_data["pulse_v4"].setdefault("patterns", {})
+            for pat in ("structural", "candles"):
+                merged_data["pulse_v4"]["patterns"].setdefault(pat, {})
+                merged_data["pulse_v4"]["patterns"][pat]["enabled"] = True
+
+            v4_cfg = PulseConfig(
+                data=merged_data,
+                source_path=base_cfg.source_path,
+                mtime=base_cfg.mtime,
+                content_hash=base_cfg.content_hash,
+                active_regime=base_cfg.active_regime,
+                venue=req.data_source if req.data_source != "auto" else base_cfg.venue,
+                data_source=req.data_source if req.data_source != "auto" else base_cfg.data_source,
+            )
+
+            engine = PulseBacktestEngine(
+                ticker=ticker,
+                start_date=req.start_date,
+                end_date=req.end_date,
+                pulse_interval_minutes=req.interval_minutes,
+                signal_threshold=req.threshold,
+                results_dir=str(EVAL_RESULTS_DIR),
+                config_override=v4_cfg,
+                active_regime=v4_cfg.active_regime,
+            )
+
+            yield {
+                "event": "progress",
+                "data": json.dumps({
+                    "phase": "starting",
+                    "message": f"Starting v4 backtest for {ticker} ({req.start_date} to {req.end_date})  job={job_id}",
+                }),
+            }
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, engine.run)
+
+            # Tag result as v4
+            result["engine_version"] = "v4"
+            result["job_id"] = job_id
+            result["v4_enabled"] = True
+
+            # Write pattern snapshot sidecar for lazy-fetch endpoint
+            snapshots = result.pop("pattern_snapshots", [])
+            if snapshots:
+                try:
+                    sidecar_dir = EVAL_RESULTS_DIR / ticker
+                    sidecar_dir.mkdir(parents=True, exist_ok=True)
+                    sidecar_path = sidecar_dir / f"backtest-v4-{job_id}-patterns.jsonl"
+                    with sidecar_path.open("w") as f:
+                        for snap in snapshots:
+                            f.write(json.dumps(snap, default=str) + "\n")
+                except Exception as e:
+                    logger.warning(f"[Pulse Backtest V4] Failed to write sidecar: {e}")
+
+            # Strip heavy geometry from SSE result (lazy-fetched separately)
+            lightweight_result = dict(result)
+            lightweight_result.pop("pattern_snapshots", None)
+
+            yield {
+                "event": "result",
+                "data": json.dumps(lightweight_result, default=str),
+            }
+            yield {
+                "event": "done",
+                "data": json.dumps({"status": "completed"}),
+            }
+        except Exception as e:
+            logger.error(f"[Pulse Backtest V4] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(e)}),
+            }
+
+    return EventSourceResponse(run_v4_backtest())
+
+
+@app.get("/api/pulse/backtest-v4/{ticker}/patterns")
+async def get_backtest_v4_patterns(ticker: str, job_id: str):
+    """Lazy-fetch pattern geometry for a completed v4 backtest job."""
+    ticker = ticker.upper()
+    sidecar_path = EVAL_RESULTS_DIR / ticker / f"backtest-v4-{job_id}-patterns.jsonl"
+    if not sidecar_path.exists():
+        raise HTTPException(status_code=404, detail=f"No pattern sidecar for job {job_id}")
+
+    patterns = []
+    try:
+        with sidecar_path.open() as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    patterns.append(json.loads(line))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read sidecar: {e}")
+
+    return {
+        "ticker": ticker,
+        "job_id": job_id,
+        "patterns": patterns,
+        "count": len(patterns),
+    }
 
 
 # ── Auto-Tune Endpoints (Stage 2 Phase A) ────────────────────────────

@@ -467,3 +467,42 @@ def detect_structural_all(
         if rect is not None:
             out.append(rect)
     return out
+
+
+def _to_chartable(hit: PatternHit, df: pd.DataFrame) -> Dict[str, Any]:
+    """Resolve a PatternHit's raw indices to absolute timestamps/prices.
+
+    Returns a JSON-serializable dict with ``extrema`` as a list of
+    ``{timestamp, open, high, low, close, kind}`` so the frontend can
+    draw trend lines and markers without knowing the original DataFrame.
+    """
+    extrema_out = []
+    for idx in hit.extrema_indices:
+        try:
+            row = df.iloc[idx]
+            ts = row["timestamp"]
+            # Handle both pd.Timestamp and datetime
+            if hasattr(ts, "isoformat"):
+                ts_str = ts.isoformat()
+            elif hasattr(ts, "strftime"):
+                ts_str = ts.strftime("%Y-%m-%dT%H:%M:%S%z")
+            else:
+                ts_str = str(ts)
+            extrema_out.append({
+                "timestamp": ts_str,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "kind": "max" if "max" in hit.name or hit.direction == -1 else "min",
+            })
+        except (IndexError, KeyError):
+            continue
+    return {
+        "name": hit.name,
+        "direction": hit.direction,
+        "fired_at_idx": hit.fired_at_idx,
+        "confirmation_idx": hit.confirmation_idx,
+        "extrema": extrema_out,
+        "metadata": dict(hit.metadata),
+    }

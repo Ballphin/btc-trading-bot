@@ -398,6 +398,61 @@ export async function fetchPulseExplain(
 }
 
 
+// ── v4 Backtest Pattern Inspector ────────────────────────────────────
+
+export interface PatternExtremum {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  kind: 'max' | 'min';
+}
+
+export interface PatternSnapshot {
+  ts: string;
+  confirmation_ts: string | null;
+  timeframe: string;
+  name: string;
+  direction: 1 | -1;
+  chartable: {
+    name: string;
+    direction: number;
+    fired_at_idx: number;
+    confirmation_idx: number;
+    extrema: PatternExtremum[];
+    metadata: Record<string, number>;
+  };
+  signal_ts: string | null;
+  validation: 'correct' | 'incorrect' | 'unresolved' | null;
+}
+
+export interface PatternValidationSummary {
+  total: number;
+  correct: number;
+  incorrect: number;
+  unresolved: number;
+  by_pattern_type: Record<string, {
+    n: number;
+    correct: number;
+    incorrect: number;
+  }>;
+}
+
+export async function fetchBacktestV4Patterns(
+  ticker: string,
+  job_id: string,
+): Promise<{ ticker: string; job_id: string; patterns: PatternSnapshot[]; count: number }> {
+  const url = `${API_BASE_URL}/pulse/backtest-v4/${encodeURIComponent(ticker)}/patterns?job_id=${encodeURIComponent(job_id)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`BacktestV4Patterns ${res.status}: ${body || res.statusText}`);
+  }
+  return res.json();
+}
+
+
 // ── Auto-Tune ────────────────────────────────────────────────────────
 // Mirrors `server.py /api/pulse/autotune/*` and
 // `tradingagents/backtesting/autotune.py` TuneReport shape.

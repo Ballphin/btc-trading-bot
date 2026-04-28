@@ -7,6 +7,8 @@ interface Props {
   patterns: ChartPattern[];
   highlightedName: string | null;
   onHighlight: (name: string | null) => void;
+  /** Minimum combined_score; patterns below this get a subdued warning badge. */
+  minCombinedScore?: number;
 }
 
 const STATE_LABEL: Record<string, string> = {
@@ -31,7 +33,7 @@ function BiasIcon({ bias }: { bias: string }) {
   return <Minus className="w-3.5 h-3.5 text-slate-500" />;
 }
 
-export default function PatternLegend({ patterns, highlightedName, onHighlight }: Props) {
+export default function PatternLegend({ patterns, highlightedName, onHighlight, minCombinedScore = 0.0 }: Props) {
   if (patterns.length === 0) {
     return (
       <div className="text-xs text-slate-500 py-6 text-center border border-dashed border-white/5 rounded-lg">
@@ -46,6 +48,7 @@ export default function PatternLegend({ patterns, highlightedName, onHighlight }
         const isHL = highlightedName === p.name;
         const dim = highlightedName !== null && !isHL;
         const invalid = p.state === 'invalidated';
+        const lowScore = minCombinedScore > 0 && p.combined_score < minCombinedScore && !invalid;
 
         return (
           <button
@@ -57,6 +60,7 @@ export default function PatternLegend({ patterns, highlightedName, onHighlight }
                 ? 'border-accent-teal/40 bg-accent-teal/5'
                 : 'border-white/5 bg-navy-900/40 hover:border-white/15',
               dim && 'opacity-40',
+              lowScore && !dim && !isHL && 'border-amber-500/20',
             )}
           >
             <div className="flex items-center gap-2">
@@ -79,6 +83,9 @@ export default function PatternLegend({ patterns, highlightedName, onHighlight }
               >
                 {p.display_name}
               </span>
+              {lowScore && (
+                <span className="text-[10px] text-amber-400/80 bg-amber-500/10 px-1 rounded">Low</span>
+              )}
               {p.regime_aligned && (
                 <Sparkles className="w-3 h-3 text-amber-300" aria-label="Aligned with liquidation regime" />
               )}
@@ -92,6 +99,8 @@ export default function PatternLegend({ patterns, highlightedName, onHighlight }
               <span className="text-slate-500">Fit {(p.fit_score * 100).toFixed(0)}%</span>
               <span className="text-slate-600">·</span>
               <span className="text-slate-500">Score {(p.combined_score * 100).toFixed(0)}%</span>
+              <span className="text-slate-600">·</span>
+              <span className="text-slate-500">{p.bars_in_pattern} bars</span>
               <div className="flex-1 ml-1 h-1 bg-white/5 rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full"

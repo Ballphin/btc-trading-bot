@@ -136,11 +136,22 @@ export default function PulseExplain() {
 
   const candles = useMemo<CandleBar[]>(() => data?.candles[tf] ?? [], [data, tf]);
 
+  // Asset-dependent minimum combined_score (WCT/SQR review).
+  // BTC majors need stronger pattern quality; thin altcoins relax slightly.
+  const minCombinedScore = useMemo(() => {
+    const base = ticker.replace('-USD', '').replace('USDT', '').toUpperCase();
+    if (base === 'BTC') return 0.50;
+    if (['ETH', 'SOL', 'AVAX'].includes(base)) return 0.45;
+    return 0.30;
+  }, [ticker]);
+
   // Patterns scoped to current TF, sorted by combined_score, invalidated hidden.
   const tfPatterns = useMemo(() => {
     if (!data) return [];
     return data.chart_patterns
       .filter((p) => p.timeframe === tf)
+      // Preserve all patterns in the list so users can still inspect low-score ones,
+      // but surface a warning badge via PatternLegend when score < threshold.
       .sort((a, b) => b.combined_score - a.combined_score);
   }, [data, tf]);
 
@@ -438,6 +449,7 @@ export default function PulseExplain() {
               patterns={tfPatterns}
               highlightedName={highlighted}
               onHighlight={setHighlighted}
+              minCombinedScore={minCombinedScore}
             />
           </div>
 

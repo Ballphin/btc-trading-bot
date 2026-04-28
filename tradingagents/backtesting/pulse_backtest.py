@@ -48,6 +48,8 @@ from tradingagents.backtesting.pulse_verifier import forward_hit_threshold
 from tradingagents.pulse.pulse_assembly import PulseInputs, score_pulse_from_inputs
 from tradingagents.pulse.regime import detect_regime
 from tradingagents.pulse.support_resistance import compute_support_resistance
+from tradingagents.pulse.v4_inputs import compute_v4_inputs, V4Inputs
+from tradingagents.pulse.patterns.structural import detect_structural_all, _to_chartable
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,8 @@ class PulseBacktestEngine:
         self._data_source: str = "unknown"
         self._funding_source: str = "unknown"
         self._stitch_report: Optional[dict] = None
+        # Pattern snapshots for v4 backtest chart overlay
+        self._pattern_snapshots: List[Dict[str, Any]] = []
 
     def run(self) -> Dict[str, Any]:
         """Execute the full backtest pipeline.
@@ -199,8 +203,15 @@ class PulseBacktestEngine:
         # Phase 3: Score forward returns
         scored = self._score_signals(signals, candles, funding_df)
 
+        # Phase 3b: Validate pattern correctness using existing hit_+1h
+        pattern_validation_summary = self._validate_patterns(scored)
+
         # Phase 4: Compute metrics
-        return self._compute_metrics(scored, candles)
+        metrics = self._compute_metrics(scored, candles)
+        metrics["pattern_validation_summary"] = pattern_validation_summary
+        metrics["schema_version"] = 2
+        metrics["pattern_snapshots"] = self._pattern_snapshots[-500:]  # cap at 500
+        return metrics
 
     # ── Phase 1: Pre-fetch ────────────────────────────────────────────
 
@@ -361,6 +372,86 @@ class PulseBacktestEngine:
             # Score via unified PulseInputs (v3 parity with live pipeline)
             cfg = get_config()
 
+            # --- v4 inputs: slice candles to current timestamp (no lookahead) ---
+            v4_inputs: Optional[V4Inputs] = None
+            sliced_candles: Dict[str, pd.DataFrame] = {}
+            try:
+                for tf, df in candles.items():
+                    if df is not None and not df.empty:
+                        mask = df["timestamp"] <= current
+                        sliced_candles[tf] = df[mask]
+                    else:
+                        sliced_candles[tf] = df
+                atr_by_tf = {}
+                for tf in ("1h", "4h"):
+                    tf_data = report.get("timeframes", {}).get(tf, {})
+                    atr_by_tf[tf] = tf_data.get("atr")
+                v4_inputs = compute_v4_inputs(
+                    candles_by_tf=sliced_candles,
+                    atr_by_tf=atr_by_tf,
+                    funding_rate=report.get("funding_rate"),
+                    cfg=cfg,
+                )
+            except Exception:
+                pass
+
+            # --- Structural pattern snapshots (full geometry for charting)
+            # Run only at 1h/4h candle closes to reduce CPU by 15-60×
+            is_1h_close = current.minute == 0
+            is_4h_close = (current.hour % 4 == 0 and current.minute == 0)
+            if (is_1h_close or is_4h_close) and v4_inputs is not None:
+                for tf in ("1h", "4h"):
+                    if tf == "4h" and not is_4h_close:
+                        continue
+                    if tf == "1h" and not is_1h_close:
+                        continue
+                    df = sliced_candles.get(tf)
+                    if df is None or df.empty:
+                        continue
+                    atr = atr_by_tf.get(tf)
+                    kw = {
+                        "bandwidth": 8,
+                        "atr": atr,
+                        "candles_1m": sliced_candles.get("1m"),
+                    }
+                    if cfg is not None:
+                        kw["bandwidth"] = int(cfg.get("pulse_v4", "patterns", "structural", "kernel_bandwidth_bars", default=8))
+                        kw["symmetry_pct"] = float(cfg.get("pulse_v4", "patterns", "structural", "symmetry_tolerance_pct", default=0.015))
+                        kw["channel_atr_band_mul"] = float(cfg.get("pulse_v4", "patterns", "structural", "channel_atr_band_mul", default=0.5))
+                        kw["channel_min_extrema"] = int(cfg.get("pulse_v4", "patterns", "structural", "channel_min_extrema", default=6))
+                        kw["channel_min_bars"] = int(cfg.get("pulse_v4", "patterns", "structural", "channel_min_bars", default=18))
+                        kw["channel_max_volume_ratio"] = float(cfg.get("pulse_v4", "patterns", "structural", "channel_max_volume_ratio", default=0.7))
+                        kw["double_bottom_match_pct"] = float(cfg.get("pulse_v4", "patterns", "structural", "double_bottom_match_pct", default=0.02))
+                        kw["double_bottom_wick_ratio"] = float(cfg.get("pulse_v4", "patterns", "structural", "double_bottom_wick_ratio", default=0.5))
+                        kw["double_bottom_reclaim_minutes"] = int(cfg.get("pulse_v4", "patterns", "structural", "double_bottom_reclaim_minutes", default=15))
+                    try:
+                        hits = detect_structural_all(df, **kw)
+                        for hit in hits:
+                            chartable = _to_chartable(hit, df)
+                            # Derive confirmation timestamp from the DataFrame
+                            confirm_ts = None
+                            if hit.confirmation_idx < len(df):
+                                confirm_row = df.iloc[hit.confirmation_idx]
+                                ts_val = confirm_row["timestamp"]
+                                if hasattr(ts_val, "isoformat"):
+                                    confirm_ts = ts_val.isoformat()
+                                elif hasattr(ts_val, "strftime"):
+                                    confirm_ts = ts_val.strftime("%Y-%m-%dT%H:%M:%S%z")
+                                else:
+                                    confirm_ts = str(ts_val)
+                            self._pattern_snapshots.append({
+                                "ts": current.isoformat(),
+                                "confirmation_ts": confirm_ts,
+                                "timeframe": tf,
+                                "name": hit.name,
+                                "direction": hit.direction,
+                                "chartable": chartable,
+                                "signal_ts": None,  # filled in when signal matches
+                                "validation": None,  # filled in after _score_signals
+                            })
+                    except Exception:
+                        pass
+
             # --- Regime ---
             regime_mode = "mixed"
             try:
@@ -460,6 +551,9 @@ class PulseBacktestEngine:
                 resistance=resistance,
                 sr_source=sr_source,
                 z_4h_return=z_4h_return,
+                vpd_signal=v4_inputs.vpd_signal if v4_inputs else None,
+                liquidity_sweep_dir=v4_inputs.liquidity_sweep_dir if v4_inputs else None,
+                pattern_hits=v4_inputs.pattern_hits if v4_inputs else {},
                 cfg=cfg,
             )
             result = score_pulse_from_inputs(inputs)
@@ -477,6 +571,25 @@ class PulseBacktestEngine:
                     current += timedelta(seconds=interval_sec)
                     continue
 
+            # Determine signal direction as integer for pattern matching
+            signal_dir = 1 if result["signal"] == "BUY" else -1
+
+            # Associate patterns whose confirmation_ts <= current and direction aligns
+            patterns_at_signal = []
+            current_iso = current.isoformat()
+            for snap in self._pattern_snapshots:
+                if snap["signal_ts"] is not None:
+                    continue  # already associated
+                confirm_ts = snap.get("confirmation_ts")
+                if confirm_ts is not None and confirm_ts <= current_iso:
+                    if snap["direction"] == signal_dir:
+                        snap["signal_ts"] = current_iso
+                        patterns_at_signal.append({
+                            "name": snap["name"],
+                            "timeframe": snap["timeframe"],
+                            "direction": snap["direction"],
+                        })
+
             # Record signal
             entry = {
                 "ts": current.isoformat(),
@@ -489,6 +602,8 @@ class PulseBacktestEngine:
                 "hold_minutes": result.get("hold_minutes"),
                 "timeframe_bias": result.get("timeframe_bias"),
                 "breakdown": result.get("breakdown", {}),
+                "arm_used": result.get("arm_used", "confluence"),
+                "patterns": patterns_at_signal,
             }
             signals.append(entry)
 
@@ -873,6 +988,64 @@ class PulseBacktestEngine:
         # Long pays (+), short receives (−). Multiply by direction.
         total = float(crossed.sum()) * direction
         return total
+
+    # ── Phase 3b: Pattern validation ─────────────────────────────────
+
+    def _validate_patterns(self, scored_signals: List[Dict]) -> Dict[str, Any]:
+        """Mark each pattern snapshot as correct/incorrect using hit_+1h.
+
+        A pattern is "correct" if the signal it influenced scored
+        ``hit_+1h=True`` (price moved in the predicted direction within
+        the +1h horizon, using the existing forward-return engine).
+        """
+        if not self._pattern_snapshots:
+            return {}
+
+        # Build lookup: signal_ts -> hit_+1h
+        signal_lookup = {}
+        for s in scored_signals:
+            ts = s.get("ts")
+            if ts:
+                signal_lookup[ts] = s.get("hit_+1h")
+
+        summary = {
+            "total": 0,
+            "correct": 0,
+            "incorrect": 0,
+            "unresolved": 0,
+            "by_pattern_type": {},
+        }
+
+        for snap in self._pattern_snapshots:
+            sig_ts = snap.get("signal_ts")
+            if sig_ts is None:
+                continue  # pattern never influenced a signal
+
+            hit = signal_lookup.get(sig_ts)
+            if hit is None:
+                snap["validation"] = "unresolved"
+                summary["unresolved"] += 1
+                continue
+
+            snap["validation"] = "correct" if hit else "incorrect"
+            if hit:
+                summary["correct"] += 1
+            else:
+                summary["incorrect"] += 1
+            summary["total"] += 1
+
+            # Per-pattern-type breakdown
+            name = snap.get("name", "unknown")
+            pt = summary["by_pattern_type"].setdefault(name, {
+                "n": 0, "correct": 0, "incorrect": 0,
+            })
+            pt["n"] += 1
+            if hit:
+                pt["correct"] += 1
+            else:
+                pt["incorrect"] += 1
+
+        return summary
 
     # ── Phase 4: Compute metrics ──────────────────────────────────────
 

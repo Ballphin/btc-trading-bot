@@ -165,6 +165,21 @@ interface BacktestResult {
   gap_count: number;
   n_excluded_warmup: number;
   return_autocorr_lag1: number;
+  engine_version?: string;
+  job_id?: string;
+  v4_enabled?: boolean;
+  schema_version?: number;
+  pattern_validation_summary?: {
+    total: number;
+    correct: number;
+    incorrect: number;
+    unresolved: number;
+    by_pattern_type: Record<string, {
+      n: number;
+      correct: number;
+      incorrect: number;
+    }>;
+  };
   signals?: BacktestSignal[];
   live_history_filter?: {
     confidence_100_only: boolean;
@@ -428,7 +443,7 @@ export default function Pulse() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [scorecard, setScorecard] = useState<ScorecardData | null>(null);
-  const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble'>('signals');
+  const [activeTab, setActiveTab] = useState<'signals' | 'scorecard' | 'backtest' | 'ensemble' | 'historic'>('signals');
   const [runningPulse, setRunningPulse] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [selectedTF, setSelectedTF] = useState<string | null>(null);
@@ -455,6 +470,19 @@ export default function Pulse() {
   const [btError, setBtError] = useState<string | null>(null);
   const [selectedBtHorizon, setSelectedBtHorizon] = useState<BacktestHorizon | null>(null);
 
+  // Historic v4 backtest state
+  const [histStartDate, setHistStartDate] = useState('');
+  const [histEndDate, setHistEndDate] = useState('');
+  const [histDataSource, setHistDataSource] = useState<'auto' | 'hyperliquid' | 'binance'>('auto');
+  const [histRunning, setHistRunning] = useState(false);
+  const [histResult, setHistResult] = useState<BacktestResult | null>(null);
+  const [histError, setHistError] = useState<string | null>(null);
+  const [selectedHistHorizon, setSelectedHistHorizon] = useState<BacktestHorizon | null>(null);
+  // Pattern Inspector state
+  const [patternInspectorOpen, setPatternInspectorOpen] = useState(false);
+  const [patternSnapshots, setPatternSnapshots] = useState<import('../lib/api').PatternSnapshot[]>([]);
+  const [patternInspectorLoading, setPatternInspectorLoading] = useState(false);
+
   // Scorecard detail state
   const [scSelectedHorizon, setScSelectedHorizon] = useState<BacktestHorizon | null>(null);
   const [scDetailTrades, setScDetailTrades] = useState<ScorecardDetailTrade[]>([]);
@@ -467,8 +495,12 @@ export default function Pulse() {
     const end = new Date();
     const start = new Date(end);
     start.setDate(start.getDate() - 30);
-    setBtStartDate(start.toISOString().split('T')[0]);
-    setBtEndDate(end.toISOString().split('T')[0]);
+    const startStr = start.toISOString().split('T')[0];
+    const endStr = end.toISOString().split('T')[0];
+    setBtStartDate(startStr);
+    setBtEndDate(endStr);
+    setHistStartDate(startStr);
+    setHistEndDate(endStr);
   }, []);
 
   useEffect(() => {
@@ -478,6 +510,32 @@ export default function Pulse() {
     }
     setSelectedBtHorizon(prev => (prev && btResult.hit_rates?.[prev] ? prev : '+5m'));
   }, [btResult]);
+
+  useEffect(() => {
+    if (!histResult) {
+      setSelectedHistHorizon(null);
+      return;
+    }
+    setSelectedHistHorizon(prev => (prev && histResult.hit_rates?.[prev] ? prev : '+5m'));
+  }, [histResult]);
+
+  // Fetch pattern geometry when Pattern Inspector opens
+  useEffect(() => {
+    if (!patternInspectorOpen || !histResult?.job_id) return;
+    setPatternInspectorLoading(true);
+    import('../lib/api').then(({ fetchBacktestV4Patterns }) => {
+      fetchBacktestV4Patterns(ticker, histResult.job_id!)
+        .then((res) => {
+          setPatternSnapshots(res.patterns);
+        })
+        .catch(() => {
+          setPatternSnapshots([]);
+        })
+        .finally(() => {
+          setPatternInspectorLoading(false);
+        });
+    });
+  }, [patternInspectorOpen, histResult?.job_id, ticker]);
 
   // Fetch data with race condition guards (BLOCKER: SSE fix)
   const fetchPulses = useCallback(async (loadMore = false) => {
@@ -683,6 +741,64 @@ export default function Pulse() {
     setBtRunning(false);
   };
 
+  const runHistoricBacktest = async () => {
+    setHistRunning(true);
+    setHistError(null);
+    setHistResult(null);
+    setSelectedHistHorizon(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/pulse/backtest-v4/${ticker}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_date: histStartDate,
+          end_date: histEndDate,
+          interval_minutes: 15,
+          threshold: 0.25,
+          data_source: histDataSource,
+        }),
+      });
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (reader) {
+        let sawFinalResult = false;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('event: result')) {
+              sawFinalResult = true;
+              continue;
+            }
+            if (line.startsWith('data: ')) {
+              try {
+                const payload = JSON.parse(line.slice(6));
+                if (payload.ticker || payload.hit_rates) {
+                  setHistResult((prev) => {
+                    const next = sawFinalResult && prev
+                      ? { ...prev, ...payload }
+                      : payload;
+                    return next;
+                  });
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      setHistError(e.message || 'Historic backtest failed');
+    }
+    setHistRunning(false);
+  };
+
   // The most recent pulse (for general checks like price staleness)
   const absoluteLatestPulse = pulses.length > 0 ? pulses[0] : null;
 
@@ -849,6 +965,7 @@ export default function Pulse() {
           { key: 'ensemble', label: 'Ensemble', icon: Layers },
           { key: 'scorecard', label: 'Scorecard', icon: BarChart3 },
           { key: 'backtest', label: 'Backtest', icon: TrendingUp },
+          { key: 'historic', label: 'Historic v4', icon: Activity },
         ].map(tab => (
           <button
             key={tab.key}
@@ -1586,6 +1703,322 @@ export default function Pulse() {
               <div className="text-xs text-slate-600 flex gap-4">
                 <span>Return autocorr (lag-1): {btResult.return_autocorr_lag1.toFixed(4)}</span>
                 <span>Period: {btResult.period}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Historic v4 Backtest Tab */}
+      {activeTab === 'historic' && (
+        <div className="space-y-6">
+          {/* Form */}
+          <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <h3 className="text-sm font-semibold text-white">Historic v4 Backtest</h3>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-teal/10 text-accent-teal border border-accent-teal/20">v4 patterns</span>
+            </div>
+            <div className="flex items-end gap-4 flex-wrap">
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">Start Date</label>
+                <input
+                  type="date"
+                  value={histStartDate}
+                  onChange={e => setHistStartDate(e.target.value)}
+                  className="bg-navy-800 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:outline-none focus:ring-1 focus:ring-accent-teal"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">End Date</label>
+                <input
+                  type="date"
+                  value={histEndDate}
+                  onChange={e => setHistEndDate(e.target.value)}
+                  className="bg-navy-800 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:outline-none focus:ring-1 focus:ring-accent-teal"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-500 mb-1">Data Source</label>
+                <select
+                  value={histDataSource}
+                  onChange={e => setHistDataSource(e.target.value as any)}
+                  className="bg-navy-800 text-white text-sm rounded-lg px-3 py-2 border border-white/10 focus:outline-none focus:ring-1 focus:ring-accent-teal"
+                >
+                  <option value="auto">Auto (HL / Binance)</option>
+                  <option value="hyperliquid">Hyperliquid</option>
+                  <option value="binance">Binance</option>
+                </select>
+              </div>
+              <button
+                onClick={runHistoricBacktest}
+                disabled={histRunning}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-accent-teal text-navy-950 text-sm font-semibold hover:bg-accent-teal/90 transition-colors disabled:opacity-50"
+              >
+                {histRunning ? (
+                  <><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Running...</>
+                ) : (
+                  <><Play className="w-3.5 h-3.5" /> Run v4 Backtest</>
+                )}
+              </button>
+            </div>
+            {histError && <div className="mt-3 text-sm text-red-400">{histError}</div>}
+          </div>
+
+          {/* Results */}
+          {histResult && (
+            <div className="space-y-4">
+              {/* Sample Size Warning */}
+              {histResult.sample_size_warning && (
+                <div className="rounded-xl bg-amber-500/10 border border-amber-500/20 p-4 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h3 className="text-sm font-semibold text-amber-500">Insufficient Sample Size</h3>
+                    <p className="text-xs text-amber-500/80 mt-1">
+                      Fewer than 50 trades resolved with a Take Profit or Stop Loss hit. Win rate metrics may not be statistically significant.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Primary Win Rate Card */}
+              <div className="rounded-xl bg-navy-900/80 border border-white/10 p-5 flex items-center justify-between">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <h3 className="text-sm font-semibold text-slate-400">v4 Engine SL/TP Win Rate</h3>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-teal/10 text-accent-teal border border-accent-teal/20">v4</span>
+                  </div>
+                  <div className="flex items-baseline gap-3">
+                    <span className={clsx('text-3xl font-bold', histResult.sl_tp_win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>
+                      {(histResult.sl_tp_win_rate * 100).toFixed(1)}%
+                    </span>
+                    <span className="text-xs text-slate-500">
+                      from {histResult.outcomes.tp_hit + histResult.outcomes.sl_hit} resolved trades
+                    </span>
+                  </div>
+                </div>
+                <div className="flex gap-4 text-sm">
+                  <div className="text-center">
+                    <div className="text-emerald-400 font-semibold">{histResult.outcomes.tp_hit}</div>
+                    <div className="text-xs text-slate-500 mt-1">TP Hit</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-red-400 font-semibold">{histResult.outcomes.sl_hit}</div>
+                    <div className="text-xs text-slate-500 mt-1">SL Hit</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="text-slate-300 font-semibold">{histResult.outcomes.timeout}</div>
+                    <div className="text-xs text-slate-500 mt-1">Timeout</div>
+                  </div>
+                  <div className="text-center opacity-50">
+                    <div className="text-slate-300 font-semibold">{histResult.outcomes.missing_sltp}</div>
+                    <div className="text-xs text-slate-500 mt-1">No SL/TP</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Stats Grid */}
+              <div className="grid grid-cols-4 gap-4">
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
+                  <div className="text-xs text-slate-500 mb-1">Signals Processed</div>
+                  <div className="text-xl font-bold text-white">{histResult.total_signals}</div>
+                  <div className="flex gap-2 mt-1 text-xs">
+                    <span className="text-emerald-400">{histResult.signal_breakdown.BUY} BUY</span>
+                    <span className="text-red-400">{histResult.signal_breakdown.SHORT} SHORT</span>
+                  </div>
+                </div>
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
+                  <div className="text-xs text-slate-500 mb-1">Sharpe Ratio</div>
+                  <div className={clsx('text-xl font-bold', histResult.sharpe_ratio >= 1 ? 'text-emerald-400' : histResult.sharpe_ratio >= 0 ? 'text-amber-400' : 'text-red-400')}>
+                    {histResult.sharpe_ratio.toFixed(2)}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
+                  <div className="text-xs text-slate-500 mb-1">Max Drawdown</div>
+                  <div className="text-xl font-bold text-red-400">{histResult.max_drawdown_pct.toFixed(1)}%</div>
+                </div>
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-4">
+                  <div className="text-xs text-slate-500 mb-1">Data Quality</div>
+                  <div className="text-xl font-bold text-white">{histResult.gap_count} gaps</div>
+                  <div className="text-xs text-slate-500 mt-1">{histResult.n_excluded_warmup} warmup excluded</div>
+                </div>
+              </div>
+
+              {/* Forward Hit Rates */}
+              <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5">
+                <h3 className="text-sm font-semibold text-white mb-3">Forward Hit Rates (v4 Engine)</h3>
+                <div className="grid grid-cols-3 gap-4">
+                  {(['+5m', '+15m', '+1h'] as BacktestHorizon[]).map((h) => {
+                    const hr = histResult.hit_rates?.[h];
+                    if (!hr) return null;
+                    return (
+                      <button
+                        key={h}
+                        onClick={() => setSelectedHistHorizon(h)}
+                        className={clsx(
+                          'rounded-lg border p-4 text-left transition-colors',
+                          selectedHistHorizon === h
+                            ? 'border-accent-teal/40 bg-accent-teal/5'
+                            : 'border-white/5 bg-navy-900/40 hover:border-white/15',
+                        )}
+                      >
+                        <div className="text-xs text-slate-500 mb-1">{h}</div>
+                        <div className={clsx('text-2xl font-bold', (hr.overall ?? 0) >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>
+                          {((hr.overall ?? 0) * 100).toFixed(1)}%
+                        </div>
+                        <div className="text-xs text-slate-500 mt-1">
+                          BUY {((hr.BUY ?? 0) * 100).toFixed(0)}% · SHORT {((hr.SHORT ?? 0) * 100).toFixed(0)}%
+                        </div>
+                        <div className="text-[11px] text-slate-600 mt-1">
+                          n={hr.n_complete ?? 0}/{hr.n_total ?? 0}
+                          {hr.ci_95 ? ` · ±${(hr.ci_95 * 100).toFixed(1)}%` : ''}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Equity Curve */}
+              {histResult.profitability_curve && histResult.profitability_curve.length > 2 && (
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5">
+                  <h3 className="text-sm font-semibold text-white mb-3">v4 Equity Curve</h3>
+                  <MiniSparkline data={histResult.profitability_curve} width={600} height={120} />
+                </div>
+              )}
+
+              {/* Pattern Inspector */}
+              {histResult.pattern_validation_summary && (
+                <div className="rounded-xl bg-navy-900/50 border border-white/5 p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-semibold text-white">Pattern Inspector</h3>
+                    <button
+                      onClick={() => setPatternInspectorOpen(o => !o)}
+                      className={clsx(
+                        'px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
+                        patternInspectorOpen
+                          ? 'bg-accent-teal/20 text-accent-teal border border-accent-teal/30'
+                          : 'bg-white/5 text-slate-400 border border-white/10 hover:bg-white/10',
+                      )}
+                    >
+                      {patternInspectorOpen ? 'Hide Patterns' : 'Show Patterns'}
+                    </button>
+                  </div>
+
+                  {/* Summary card */}
+                  {(() => {
+                    const s = histResult.pattern_validation_summary;
+                    const total = s?.total ?? 0;
+                    const correct = s?.correct ?? 0;
+                    const incorrect = s?.incorrect ?? 0;
+                    const accuracy = total > 0 ? Math.round((correct / total) * 100) : 0;
+                    return (
+                      <div className="mb-3">
+                        <div className="flex items-center gap-3 mb-2">
+                          <span className="text-lg font-bold text-white">{accuracy}%</span>
+                          <span className="text-xs text-slate-400">
+                            {correct} correct / {incorrect} incorrect
+                            {s?.unresolved ? ` / ${s.unresolved} unresolved` : ''}
+                          </span>
+                        </div>
+                        {/* By pattern type */}
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {Object.entries(s?.by_pattern_type ?? {}).map(([name, pt]) => {
+                            const n = pt?.n ?? 0;
+                            const ptCorrect = pt?.correct ?? 0;
+                            const ptAcc = n > 0 ? Math.round((ptCorrect / n) * 100) : 0;
+                            // Thresholds from plan: candlestick >= 20, structural >= 5
+                            const minN = name.includes('engulfing') || name.includes('hammer') || name.includes('doji')
+                              ? 20 : 5;
+                            const sufficient = n >= minN;
+                            return (
+                              <div
+                                key={name}
+                                className={clsx(
+                                  'rounded-lg border p-2 text-xs',
+                                  sufficient
+                                    ? 'border-white/10 bg-white/5'
+                                    : 'border-amber-500/20 bg-amber-500/5',
+                                )}
+                              >
+                                <div className="font-medium text-slate-300 capitalize">
+                                  {name.replace(/_/g, ' ')}
+                                </div>
+                                <div className={clsx(
+                                  'font-bold mt-0.5',
+                                  sufficient ? 'text-white' : 'text-amber-400',
+                                )}>
+                                  {sufficient ? `${ptAcc}%` : `N=${n} (need ${minN})`}
+                                </div>
+                                <div className="text-[10px] text-slate-500 mt-0.5">
+                                  {ptCorrect}/{n}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Pattern list when open */}
+                  {patternInspectorOpen && (
+                    <div className="mt-3 border-t border-white/5 pt-3">
+                      {patternInspectorLoading ? (
+                        <div className="text-xs text-slate-500">Loading pattern geometry...</div>
+                      ) : patternSnapshots.length === 0 ? (
+                        <div className="text-xs text-slate-500">No patterns with geometry available.</div>
+                      ) : (
+                        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                          {patternSnapshots.map((snap, i) => {
+                            const validation = snap.validation;
+                            const colorClass =
+                              validation === 'correct'
+                                ? 'border-emerald-500/30 bg-emerald-500/5'
+                                : validation === 'incorrect'
+                                  ? 'border-red-500/30 bg-red-500/5'
+                                  : 'border-amber-500/30 bg-amber-500/5';
+                            const iconColor =
+                              validation === 'correct'
+                                ? 'text-emerald-400'
+                                : validation === 'incorrect'
+                                  ? 'text-red-400'
+                                  : 'text-amber-400';
+                            const dirLabel = snap.direction === 1 ? 'Bullish' : 'Bearish';
+                            return (
+                              <div
+                                key={i}
+                                className={clsx(
+                                  'rounded-lg border p-2.5 text-xs flex items-start gap-2',
+                                  colorClass,
+                                )}
+                              >
+                                <span className={clsx('font-bold mt-0.5', iconColor)}>
+                                  {validation === 'correct' ? '✓' : validation === 'incorrect' ? '✗' : '?'}
+                                </span>
+                                <div className="flex-1">
+                                  <div className="font-medium text-white capitalize">
+                                    {snap.name.replace(/_/g, ' ')} <span className="text-slate-500">({snap.timeframe})</span>
+                                  </div>
+                                  <div className="text-slate-400 mt-0.5">
+                                    {dirLabel} · {snap.chartable?.extrema?.length ?? 0} extrema
+                                    {snap.signal_ts ? ` · Signal: ${new Date(snap.signal_ts).toLocaleTimeString()}` : ''}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Diagnostics */}
+              <div className="text-xs text-slate-600 flex gap-4">
+                <span>Return autocorr (lag-1): {histResult.return_autocorr_lag1.toFixed(4)}</span>
+                <span>Period: {histResult.period}</span>
+                {histResult.engine_version && <span className="text-accent-teal">Engine: {histResult.engine_version}</span>}
               </div>
             </div>
           )}

@@ -28,20 +28,16 @@ import argparse
 import logging
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Dict
+from typing import Dict, Tuple
 
 import pandas as pd
 
 from tradingagents.dataflows.historical_router import (
+    HL_LAUNCH_UTC,
     fetch_funding_historical,
     fetch_ohlcv_historical,
 )
 from tradingagents.pulse.v4_inputs import compute_v4_inputs
-from tradingagents.pulse.patterns.candles import detect_all as detect_candles
-from tradingagents.pulse.patterns.extrema import find_extrema
-from tradingagents.pulse.patterns.structural import detect_structural_all
-from tradingagents.pulse.vpd import compute_vpd
-from tradingagents.pulse.liquidity_sweep import detect_liquidity_sweep
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger("validate_v4")
@@ -50,8 +46,13 @@ logger.setLevel(logging.INFO)
 TIMEFRAMES = ("1m", "15m", "1h", "4h")
 
 
-def _fetch_all(ticker: str, start: str, end: str) -> tuple[Dict[str, pd.DataFrame], pd.DataFrame]:
+def _fetch_all(
+    ticker: str,
+    start: str,
+    end: str,
+) -> tuple[Dict[str, pd.DataFrame], Dict[str, str], pd.DataFrame, str | None]:
     candles: Dict[str, pd.DataFrame] = {}
+    sources: Dict[str, str] = {}
     for tf in TIMEFRAMES:
         logger.info("fetching %s candles…", tf)
         try:
@@ -60,18 +61,40 @@ def _fetch_all(ticker: str, start: str, end: str) -> tuple[Dict[str, pd.DataFram
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
             df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
             candles[tf] = df
+            sources[tf] = res.source
             logger.info("  %s: %d bars from %s", tf, len(df), res.source)
         except Exception as exc:
             logger.warning("  %s: FAILED (%s)", tf, exc)
             candles[tf] = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            sources[tf] = "failed"
+    funding_source: str | None = None
     try:
         funding_df, src = fetch_funding_historical(ticker, start, end)
         funding_df["timestamp"] = pd.to_datetime(funding_df["timestamp"], utc=True, errors="coerce")
+        funding_source = src
         logger.info("funding: %d entries from %s", len(funding_df), src)
     except Exception as exc:
         logger.warning("funding FAILED (%s)", exc)
         funding_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
-    return candles, funding_df
+        funding_source = "failed"
+    return candles, sources, funding_df, funding_source
+
+
+def _validate_expected_binance_sources(
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    sources: Dict[str, str],
+) -> Tuple[bool, list[str]]:
+    """Return whether the requested historical window matches Binance-source expectations."""
+    errors: list[str] = []
+    if end_dt <= HL_LAUNCH_UTC:
+        for tf in ("1h", "4h"):
+            if sources.get(tf) != "binance_futures":
+                errors.append(
+                    f"{tf} source={sources.get(tf)!r} (expected 'binance_futures' for pre-HL window)"
+                )
+    return (len(errors) == 0), errors
 
 
 def _funding_at(funding_df: pd.DataFrame, ts: pd.Timestamp) -> float | None:
@@ -161,7 +184,23 @@ def main() -> int:
     print(f"\n=== Pulse v4 pattern validation ===")
     print(f"ticker: {args.ticker}   window: {start_str} → {end_str}   step: {args.step_hours}h\n")
 
-    candles, funding_df = _fetch_all(args.ticker, start_str, end_str)
+    candles, sources, funding_df, funding_source = _fetch_all(args.ticker, start_str, end_str)
+
+    print("Resolved sources:")
+    for tf in TIMEFRAMES:
+        print(f"  {tf:<3} {sources.get(tf, 'unknown')}")
+    print(f"  funding {funding_source or 'unknown'}\n")
+
+    sources_ok, source_errors = _validate_expected_binance_sources(
+        start_dt=start_dt,
+        end_dt=end_dt,
+        sources=sources,
+    )
+    if not sources_ok:
+        print("ERROR: source validation failed")
+        for err in source_errors:
+            print(f"  - {err}")
+        return 2
 
     # Quick data sanity.
     for tf in TIMEFRAMES:
@@ -224,6 +263,16 @@ def main() -> int:
     print("  * sweep                                      — expect 0.2–3 fires/day on BTC")
     print("  * vpd                                        — expect 0.5–5 fires/day")
     print("  Far outside these ranges → likely bug (too strict / too loose).\n")
+
+    if n_any_hit == 0:
+        print("VERDICT: FAIL — no v4 pattern hits detected in the selected Binance BTC window.")
+        return 3
+
+    if n_any_hit == n_steps:
+        print("VERDICT: WARN — every evaluation step fired at least one hit; detector may be too loose.")
+        return 4
+
+    print("VERDICT: PASS — v4 detector produced non-empty, non-pathological hits on Binance BTC history.")
     return 0
 
 
