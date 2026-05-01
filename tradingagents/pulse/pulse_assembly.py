@@ -72,6 +72,7 @@ class PulseInputs:
     vpd_signal: Optional[int] = None              # -1 / 0 / +1 / None
     liquidity_sweep_dir: Optional[int] = None     # -1 / 0 / +1 / None
     pattern_hits: Dict[str, List[str]] = field(default_factory=dict)
+    structural_hits: List[Any] = field(default_factory=list)  # List[PatternHit] with quality
 
     # --- Config + misc ---
     cfg: Any = None  # PulseConfig; avoid circular import in type annotation
@@ -145,6 +146,7 @@ class PulseInputs:
             "vpd_signal": self.vpd_signal,
             "liquidity_sweep_dir": self.liquidity_sweep_dir,
             "pattern_hits": self.pattern_hits,
+            "structural_hits": self.structural_hits,
         }
 
 

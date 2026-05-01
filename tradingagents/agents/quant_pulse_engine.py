@@ -120,6 +120,27 @@ _BEARISH_PATTERNS = {
     "three_black_crows", "bearish_harami",
 }
 
+# Regime-pattern interaction: multipliers applied to structural pattern
+# quality scores.  Calibrated conservatively; values will be tuned by
+# the Phase 5 calibration pipeline.
+_PATTERN_FAMILIES = {
+    "head_shoulders": "reversal",
+    "inverse_head_shoulders": "reversal",
+    "double_top": "reversal",
+    "double_bottom": "reversal",
+    "channel_up": "continuation",
+    "channel_down": "continuation",
+    "ascending_triangle": "neutral",
+    "rectangle": "neutral",
+}
+
+_REGIME_PATTERN_MUL: Dict[str, Dict[str, float]] = {
+    "trend":          {"reversal": 1.2, "continuation": 0.8, "neutral": 0.5},
+    "chop":           {"reversal": 0.6, "continuation": 0.4, "neutral": 1.0},
+    "high_vol_trend": {"reversal": 0.3, "continuation": 0.5, "neutral": 0.2},
+    "mixed":          {"reversal": 1.0, "continuation": 1.0, "neutral": 1.0},
+}
+
 
 def _score_patterns(
     patterns: list,
@@ -148,6 +169,27 @@ def _score_patterns(
         elif p in _BEARISH_PATTERNS:
             total -= base
     return total
+
+
+def _score_structural_hits(
+    structural_hits: list,
+    regime_mode: str = "mixed",
+) -> float:
+    """Quality-weighted directional score from structural PatternHit objects.
+
+    Each hit contributes ``direction × quality × regime_mul``.  The total is
+    capped to [-1.0, +1.0] to prevent structural patterns from overwhelming
+    the indicator confluence.
+    """
+    if not structural_hits:
+        return 0.0
+    regime_muls = _REGIME_PATTERN_MUL.get(regime_mode, _REGIME_PATTERN_MUL["mixed"])
+    total = 0.0
+    for hit in structural_hits:
+        family = _PATTERN_FAMILIES.get(hit.name, "neutral")
+        mul = regime_muls.get(family, 1.0)
+        total += hit.direction * hit.quality * mul
+    return max(-1.0, min(1.0, total))
 
 
 # ── Order flow scoring (tiered premium + adaptive funding) ────────────
@@ -508,6 +550,7 @@ def score_pulse_confluence(
     z_4h_return: Optional[float] = None,
     sr_source: str = "none",
     cfg: Optional[PulseConfig] = None,
+    structural_hits: Optional[list] = None,
 ) -> dict:
     """Score a pulse report → {signal, confidence, breakdown, ...}.
 
@@ -641,6 +684,19 @@ def score_pulse_confluence(
     weighted_sum += of_weighted
     breakdown["order_flow"] = round(of_weighted, 4)
     breakdown["book_imbalance"] = round(book_s * 0.5, 4) if book_s else 0.0
+
+    # Structural pattern quality score (regime-aware) ------------------
+    struct_score = _score_structural_hits(
+        structural_hits or [], regime_mode=regime_mode,
+    )
+    if struct_score != 0.0:
+        # Structural patterns contribute with fixed weight (10% of total).
+        # This is additive so high-quality patterns nudge confluence in
+        # the pattern's direction, but can't create a signal alone.
+        struct_weight = 0.10
+        struct_weighted = struct_weight * struct_score
+        weighted_sum += struct_weighted
+        breakdown["structural_patterns"] = round(struct_weighted, 4)
 
     # Normalized_score now lives in ~[-sum(weights)-OF_w, +same] ≈ [-1.3, 1.3]
     normalized = max(-1.0, min(1.0, weighted_sum))
@@ -930,6 +986,7 @@ def score_pulse(
     vpd_signal: Optional[int] = None,
     liquidity_sweep_dir: Optional[int] = None,
     pattern_hits: Optional[Dict[str, list]] = None,
+    structural_hits: Optional[list] = None,
 ) -> dict:
     """Public entry point. Routes to v4 dispatcher when enabled, else legacy.
 
@@ -958,6 +1015,7 @@ def score_pulse(
             z_4h_return=z_4h_return,
             sr_source=sr_source,
             cfg=cfg,
+            structural_hits=structural_hits,
         )
     confluence_kwargs = dict(
         signal_threshold=signal_threshold,
@@ -975,6 +1033,7 @@ def score_pulse(
         ema_liquidity_ok=ema_liquidity_ok,
         z_4h_return=z_4h_return,
         sr_source=sr_source,
+        structural_hits=structural_hits,
     )
     return score_pulse_v4(
         report,

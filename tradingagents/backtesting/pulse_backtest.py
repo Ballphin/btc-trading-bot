@@ -554,6 +554,7 @@ class PulseBacktestEngine:
                 vpd_signal=v4_inputs.vpd_signal if v4_inputs else None,
                 liquidity_sweep_dir=v4_inputs.liquidity_sweep_dir if v4_inputs else None,
                 pattern_hits=v4_inputs.pattern_hits if v4_inputs else {},
+                structural_hits=v4_inputs.structural_hits if v4_inputs else [],
                 cfg=cfg,
             )
             result = score_pulse_from_inputs(inputs)

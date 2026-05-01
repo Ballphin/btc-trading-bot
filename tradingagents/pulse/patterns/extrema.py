@@ -15,7 +15,7 @@ extremum.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Literal, Sequence
+from typing import List, Literal, Sequence, Union
 
 import numpy as np
 
@@ -55,16 +55,84 @@ def _gaussian_smooth(values: np.ndarray, bandwidth: int) -> np.ndarray:
     return out
 
 
+# ── LOOCV bandwidth selection ────────────────────────────────────────
+
+_BANDWIDTH_CANDIDATES = (3, 5, 8, 12, 16)
+_BANDWIDTH_CACHE: dict[int, int] = {}  # len(closes) → optimal bandwidth
+
+
+def _loocv_score(values: np.ndarray, bw: int) -> float:
+    """Leave-one-out CV score for Gaussian kernel with bandwidth ``bw``.
+
+    Uses the closed-form LOO trick for linear smoothers::
+
+        LOO_i = (y_i - ŷ_i) / (1 - w_ii)
+
+    where ``w_ii`` is the diagonal of the hat matrix.  This avoids
+    O(n²) refitting and runs in O(n × bw) time.
+    """
+    n = len(values)
+    if n < 2 * bw + 3:
+        return float("inf")
+    smoothed = _gaussian_smooth(values, bw)
+    half = 2 * bw
+    total = 0.0
+    count = 0
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        wlo = lo - (i - half)
+        whi = wlo + (hi - lo)
+        x = np.arange(-half, half + 1, dtype=float)
+        w = np.exp(-0.5 * (x / bw) ** 2)
+        w = w[wlo:whi]
+        w = w / w.sum()
+        w_ii = float(w[i - lo])  # self-weight
+        if abs(1.0 - w_ii) < 1e-12:
+            continue
+        loo_resid = (values[i] - smoothed[i]) / (1.0 - w_ii)
+        total += loo_resid ** 2
+        count += 1
+    return total / max(count, 1)
+
+
+def _select_bandwidth(values: np.ndarray) -> int:
+    """Pick the bandwidth from ``_BANDWIDTH_CANDIDATES`` that minimises LOOCV.
+
+    Caches by series length to avoid recomputing on every call within
+    the same backtest bar (structural detectors run on 1h and 4h candles
+    which have stable lengths within a session).
+    """
+    n = len(values)
+    if n in _BANDWIDTH_CACHE:
+        return _BANDWIDTH_CACHE[n]
+    best_bw = _BANDWIDTH_CANDIDATES[0]
+    best_score = float("inf")
+    for bw in _BANDWIDTH_CANDIDATES:
+        if n < 2 * bw + 3:
+            continue
+        score = _loocv_score(values, bw)
+        if score < best_score:
+            best_score = score
+            best_bw = bw
+    # Keep cache bounded (LRU-ish: just cap size)
+    if len(_BANDWIDTH_CACHE) > 64:
+        _BANDWIDTH_CACHE.clear()
+    _BANDWIDTH_CACHE[n] = best_bw
+    return best_bw
+
+
 def find_extrema(
     closes: Sequence[float],
-    bandwidth: int = 8,
+    bandwidth: Union[int, str] = 8,
     raw_prices: Sequence[float] | None = None,
 ) -> List[Extremum]:
     """Return local minima/maxima on the smoothed close series.
 
     Args:
         closes: 1-D sequence of close prices (length ≥ 2 × bandwidth + 3).
-        bandwidth: kernel σ in bars. Extrema confirm at ``idx + bandwidth``.
+        bandwidth: kernel σ in bars, or ``"auto"`` to select via LOOCV.
+            Extrema confirm at ``idx + bandwidth``.
         raw_prices: if provided, the ``Extremum.price`` field uses this
             series at ``idx`` (e.g., raw highs for tops, raw lows for
             bottoms). Defaults to ``closes``.
@@ -75,9 +143,13 @@ def find_extrema(
     """
     arr = np.asarray(list(closes), dtype=float)
     n = len(arr)
-    if n < 2 * bandwidth + 3:
+    if isinstance(bandwidth, str) and bandwidth == "auto":
+        bw = _select_bandwidth(arr)
+    else:
+        bw = int(bandwidth)
+    if n < 2 * bw + 3:
         return []
-    smoothed = _gaussian_smooth(arr, bandwidth)
+    smoothed = _gaussian_smooth(arr, bw)
     diffs = np.diff(smoothed)            # length n-1
     out: List[Extremum] = []
     raw = np.asarray(list(raw_prices), dtype=float) if raw_prices is not None else arr
@@ -85,7 +157,7 @@ def find_extrema(
     # to i + 2*bandwidth. Therefore an extremum at idx i is prefix-stable
     # only once we've observed bar i + 2*bandwidth + 1 (need diffs[i] which
     # uses smoothed[i+1] which depends on values up to i + 1 + 2*bandwidth).
-    half = 2 * bandwidth
+    half = 2 * bw
     confirmation_offset = half + 1
     last_safe_idx = n - 1 - confirmation_offset
     for i in range(1, len(diffs)):

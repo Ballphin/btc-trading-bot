@@ -13,14 +13,14 @@ report builder is byte-identical when v4 is disabled.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from tradingagents.pulse.liquidity_sweep import detect_liquidity_sweep
 from tradingagents.pulse.patterns.candles import detect_all as detect_candles_all
-from tradingagents.pulse.patterns.structural import detect_structural_all
+from tradingagents.pulse.patterns.structural import PatternHit, detect_structural_all
 from tradingagents.pulse.vpd import compute_vpd
 
 
@@ -29,6 +29,7 @@ class V4Inputs:
     vpd_signal: Optional[int]                    # -1 / 0 / +1 / None
     liquidity_sweep_dir: Optional[int]           # -1 / 0 / +1 / None
     pattern_hits: Dict[str, List[str]]           # name -> [tf, ...]
+    structural_hits: List[Any] = field(default_factory=list)  # List[PatternHit] with quality
 
 
 def compute_v4_inputs(
@@ -98,6 +99,7 @@ def compute_v4_inputs(
 
     # --- Pattern hits (candles per TF + structural on 1h/4h) -------
     pattern_hits: Dict[str, List[str]] = {}
+    structural_hits: List[PatternHit] = []
     for tf, df in candles_by_tf.items():
         if df is None or df.empty:
             continue
@@ -130,9 +132,11 @@ def compute_v4_inputs(
             hits = []
         for hit in hits:
             pattern_hits.setdefault(hit.name, []).append(tf)
+            structural_hits.append(hit)
 
     return V4Inputs(
         vpd_signal=vpd_signal,
         liquidity_sweep_dir=liquidity_sweep_dir,
         pattern_hits=pattern_hits,
+        structural_hits=structural_hits,
     )
