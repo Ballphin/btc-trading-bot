@@ -290,6 +290,47 @@ def _release_ticker(ticker: str) -> None:
         _ANALYSIS_IN_FLIGHT.discard(ticker)
 
 
+def _try_claim_boundary(logical_label: str) -> bool:
+    """Cross-process atomic boundary claim using O_EXCL file creation.
+
+    The in-memory ``_BOUNDARY_CLAIM_LOCK`` only prevents duplicate launches
+    within a single Python process. When two uvicorn processes are running
+    (e.g. a stale ``--reload`` worker and a fresh start), each has its own
+    in-memory lock and both fire analyses for the same boundary, producing
+    duplicate Telegram alerts.
+
+    This helper creates a per-boundary lock file with ``O_CREAT | O_EXCL``
+    so the first process to call it wins; later callers (in any process)
+    see ``FileExistsError`` and skip.
+
+    The lock files live in ``EVAL_RESULTS_DIR`` and are stamped with the
+    PID + timestamp so post-mortem debugging can identify the winner.
+    Stale lock files older than 12 hours are cleaned up on each call.
+    """
+    EVAL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = EVAL_RESULTS_DIR / f".boundary_{logical_label}.lock"
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, f"pid={os.getpid()} ts={datetime.now(timezone.utc).isoformat()}\n".encode())
+        finally:
+            os.close(fd)
+        # Best-effort cleanup of lock files older than 12h
+        try:
+            cutoff = time.time() - 12 * 3600
+            for old in EVAL_RESULTS_DIR.glob(".boundary_*.lock"):
+                if old.stat().st_mtime < cutoff:
+                    old.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        logger.warning(f"[Scheduler] Boundary claim file error: {e}; falling back to in-memory check")
+        return True  # Don't deadlock if FS is unavailable
+
+
 def _load_model_config_into_default() -> None:
     """Merge persisted model/ensemble settings into DEFAULT_CONFIG (survives restarts).
     If the lock is enforced and persisted provider is not allowed, force-coerce
@@ -488,11 +529,16 @@ async def _auto_analysis_scheduler():
             logical_label = boundary_utc.strftime("%Y-%m-%dT%H")
             logical_date = boundary_utc.strftime("%Y-%m-%d")
 
-            # Atomic boundary claim: skip this boundary if self-tick already ran it
+            # Atomic cross-process boundary claim: skip if any process (this
+            # uvicorn worker, a stale --reload child, or the /api/health
+            # self-tick) already ran this boundary. Uses O_EXCL file lock so
+            # the claim is durable across processes — the in-memory lock alone
+            # was insufficient and produced duplicate Telegram alerts when two
+            # backend processes were both running.
+            if not _try_claim_boundary(logical_label):
+                print(f"[Scheduler] Boundary {logical_label} already claimed by another process; skipping", flush=True)
+                continue
             with _BOUNDARY_CLAIM_LOCK:
-                if _scheduler_state.get("last_run") == logical_label:
-                    print(f"[Scheduler] Boundary {logical_label} already claimed (self-tick ran it); skipping", flush=True)
-                    continue
                 _scheduler_state["last_run"] = logical_label
                 _scheduler_state["last_status"] = "ok (claimed by in-process)"
                 _save_scheduler_state()
@@ -1721,16 +1767,16 @@ async def health(tick: int = 0):
             expected_label = prev_boundary.strftime("%Y-%m-%dT%H")
 
             if now_utc >= physical_trigger:
-                # Atomic boundary claim
+                # Atomic cross-process boundary claim (O_EXCL file lock).
+                # Without this, two backend processes' self-ticks race and
+                # produce duplicate Telegram alerts.
                 launched = []
-                with _BOUNDARY_CLAIM_LOCK:
-                    if _scheduler_state.get("last_run") != expected_label:
+                claim_won = _try_claim_boundary(expected_label)
+                if claim_won:
+                    with _BOUNDARY_CLAIM_LOCK:
                         _scheduler_state["last_run"] = expected_label
                         _scheduler_state["last_status"] = "ok (self-tick)"
                         _save_scheduler_state()
-                        claim_won = True
-                    else:
-                        claim_won = False
 
                 if claim_won:
                     logical_date = prev_boundary.strftime("%Y-%m-%d")
