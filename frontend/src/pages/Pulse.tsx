@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Zap, Play, Pause, RefreshCw, TrendingUp, TrendingDown, Minus, Clock, BarChart3, AlertTriangle, Activity, Gauge, ShieldAlert, ChevronRight, Layers } from 'lucide-react';
 import { clsx } from 'clsx';
-import { API_BASE_URL } from '../lib/api';
+import { API_BASE_URL, type StructuralHit } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
 import EnsembleTab from '../components/EnsembleTab';
 
@@ -58,6 +58,7 @@ interface PulseEntry {
   tsmom_gate_reason?: string | null;
   tsmom_gate_mode?: string | null;
   regime_mode?: string;
+  structural_hits?: StructuralHit[];
   // S/R (v3.1)
   support?: number | null;
   resistance?: number | null;
@@ -369,14 +370,62 @@ function RegimeBadge({ mode }: { mode?: string }) {
 function OverrideBadge({ reason }: { reason?: string | null }) {
   if (!reason) return null;
   return (
-    <span
-      title={`Override: ${reason}`}
-      className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold bg-rose-500/10 text-rose-300 ring-1 ring-rose-500/30"
-    >
-      <ShieldAlert className="w-2.5 h-2.5" /> {reason}
+    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/30 font-semibold max-w-[150px] truncate" title={`Override: ${reason}`}>
+      <ShieldAlert className="w-2.5 h-2.5 shrink-0" /> OVR
     </span>
   );
 }
+
+function StructuralPatternsBadge({ hits }: { hits?: StructuralHit[] }) {
+  if (!hits || hits.length === 0) return null;
+
+  return (
+    <div className="relative group flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+      <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-fuchsia-500/10 text-fuchsia-300 ring-1 ring-fuchsia-500/30 font-semibold cursor-help">
+        <Activity className="w-2.5 h-2.5" /> {hits.length} Pattern{hits.length > 1 ? 's' : ''}
+      </span>
+      
+      {/* Pop-up Tooltip */}
+      <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block z-50 w-max min-w-[240px]">
+        <div className="bg-navy-800 border border-white/10 shadow-xl rounded-lg p-3 text-xs">
+          <div className="font-semibold text-slate-300 mb-2 border-b border-white/5 pb-1">Structural Patterns Detected</div>
+          <div className="space-y-1.5">
+            {hits.map((hit, i) => (
+              <div key={i} className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-1.5">
+                  {hit.direction > 0 ? (
+                    <TrendingUp className="w-3 h-3 text-emerald-400" />
+                  ) : hit.direction < 0 ? (
+                    <TrendingDown className="w-3 h-3 text-red-400" />
+                  ) : (
+                    <Minus className="w-3 h-3 text-slate-400" />
+                  )}
+                  <span className="text-slate-200 capitalize">{hit.name.replace(/_/g, ' ')}</span>
+                </div>
+                <div className="flex items-center gap-2 text-right">
+                  <span className={clsx(
+                    'px-1 rounded font-mono',
+                    hit.quality >= 0.5 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
+                  )}>
+                    Fit: {hit.quality.toFixed(2)}
+                  </span>
+                  {hit.invalidation_price && (
+                    <span className="text-slate-500 font-mono">
+                      Break: ${hit.invalidation_price >= 1000 ? hit.invalidation_price.toLocaleString(undefined, { maximumFractionDigits: 0 }) : hit.invalidation_price < 1 ? hit.invalidation_price.toPrecision(4) : hit.invalidation_price.toFixed(2)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        {/* Triangle pointer */}
+        <div className="absolute -bottom-1.5 left-4 w-3 h-3 bg-navy-800 border-b border-r border-white/10 rotate-45 transform" />
+      </div>
+    </div>
+  );
+}
+
 
 function EngineBadge({ version, hash }: { version?: number; hash?: string }) {
   if (version == null) return null;
@@ -902,6 +951,7 @@ export default function Pulse() {
                   nearSide={latestPulse.sr_near_side}
                 />
                 <RegimeBadge mode={latestPulse.regime_mode} />
+                <StructuralPatternsBadge hits={latestPulse.structural_hits} />
                 <OverrideBadge reason={latestPulse.override_reason} />
                 <PartialBarBadge flags={latestPulse.partial_bar_flags} />
                 <EngineBadge
@@ -1119,6 +1169,7 @@ export default function Pulse() {
                   nearSide={p.sr_near_side}
                 />
                 <RegimeBadge mode={p.regime_mode} />
+                <StructuralPatternsBadge hits={p.structural_hits} />
                 <OverrideBadge reason={p.override_reason} />
                 <PartialBarBadge flags={p.partial_bar_flags} />
                 <EngineBadge version={p.engine_version} hash={p.config_hash} />

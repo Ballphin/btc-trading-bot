@@ -133,6 +133,10 @@ def compute_v4_inputs(
         for hit in hits:
             pattern_hits.setdefault(hit.name, []).append(tf)
             structural_hits.append(hit)
+            
+    # Cap to top 3 hits by quality to prevent JSON payload bloat
+    structural_hits.sort(key=lambda h: h.quality, reverse=True)
+    structural_hits = structural_hits[:3]
 
     return V4Inputs(
         vpd_signal=vpd_signal,

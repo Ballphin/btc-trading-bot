@@ -690,10 +690,10 @@ def score_pulse_confluence(
         structural_hits or [], regime_mode=regime_mode,
     )
     if struct_score != 0.0:
-        # Structural patterns contribute with fixed weight (10% of total).
+        # Structural patterns contribute with fixed weight (15% of total).
         # This is additive so high-quality patterns nudge confluence in
         # the pattern's direction, but can't create a signal alone.
-        struct_weight = 0.10
+        struct_weight = 0.15
         struct_weighted = struct_weight * struct_score
         weighted_sum += struct_weighted
         breakdown["structural_patterns"] = round(struct_weighted, 4)

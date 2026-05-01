@@ -69,6 +69,14 @@ export interface AnalysisData {
   r_ratio_warning?: boolean;
   hold_period_scalar?: number;
   hedge_penalty_applied?: number;
+  structural_hits?: StructuralHit[];
+}
+
+export interface StructuralHit {
+  name: string;
+  direction: number;
+  quality: number;
+  invalidation_price: number | null;
 }
 
 export interface BacktestMetrics {
@@ -244,6 +252,7 @@ export interface SSEEvent {
   r_ratio_warning?: boolean;
   hold_period_scalar?: number;
   hedge_penalty_applied?: number;
+  structural_hits?: StructuralHit[];
 }
 
 const log = (...args: unknown[]) => { if (import.meta.env.DEV) console.log(...args); };
