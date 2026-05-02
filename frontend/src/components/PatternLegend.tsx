@@ -96,7 +96,22 @@ export default function PatternLegend({ patterns, highlightedName, onHighlight, 
               <span className={clsx('px-1.5 py-0.5 rounded', STATE_COLOR[p.state])}>
                 {STATE_LABEL[p.state]}
               </span>
-              <span className="text-slate-500">Fit {(p.fit_score * 100).toFixed(0)}%</span>
+              <span className="text-slate-500">Fit {p.fit_score != null ? `${(p.fit_score * 100).toFixed(0)}%` : 'N/A'}</span>
+              <span className="text-slate-600">·</span>
+              <span 
+                className={clsx(
+                  p.volume_score == null || p.volume_score === 0.5
+                    ? "text-slate-500"
+                    : p.volume_score >= 0.8
+                      ? "text-emerald-400 font-medium"
+                      : p.volume_score < 0.5
+                        ? "text-amber-400"
+                        : "text-slate-500"
+                )} 
+                title="Volume Confirmation — 0.5 means not applicable for this pattern type"
+              >
+                Vol {p.volume_score == null || p.volume_score === 0.5 ? '—' : `${(p.volume_score * 100).toFixed(0)}%`}
+              </span>
               <span className="text-slate-600">·</span>
               <span className="text-slate-500">Score {(p.combined_score * 100).toFixed(0)}%</span>
               <span className="text-slate-600">·</span>

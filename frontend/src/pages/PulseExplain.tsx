@@ -400,8 +400,7 @@ export default function PulseExplain() {
           <div className="mt-3 flex items-start gap-2 text-[11px] text-slate-500">
             <Info className="w-3 h-3 mt-0.5 flex-shrink-0" />
             <span>
-              Fit score measures pattern geometry match, not historical success rate.
-              Patterns are detected for explanation only — they do not alter the signal.
+              Fit score measures pattern geometry match. The Structural Patterns Engine cross-references these with the market regime to alter the signal conviction by up to ±15%.
             </span>
           </div>
         </div>
@@ -442,7 +441,7 @@ export default function PulseExplain() {
           {/* Pattern legend */}
           <div className="rounded-xl border border-white/10 bg-navy-900/50 p-3">
             <div className="text-[10px] uppercase tracking-wide text-slate-500 mb-2 flex items-center justify-between">
-              <span>Patterns on {tf}</span>
+              <span>Structural Patterns Engine ({tf})</span>
               <span className="text-slate-600">{tfPatterns.length}</span>
             </div>
             <PatternLegend

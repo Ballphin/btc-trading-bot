@@ -18,6 +18,7 @@ Provides:
 """
 
 import asyncio
+import concurrent.futures
 import contextvars
 import copy
 import json
@@ -4631,10 +4632,10 @@ async def get_latest_pulse(ticker: str):
 # with the majority BEFORE the entry so patterns have context; small tail
 # AFTER so state-FSM can see breakouts.
 _EXPLAIN_WINDOWS = {
-    "5m":  {"before": 36, "after": 12, "interval_sec": 300},
-    "15m": {"before": 36, "after": 12, "interval_sec": 900},
-    "1h":  {"before": 54, "after": 18, "interval_sec": 3600},
-    "4h":  {"before": 30, "after": 10, "interval_sec": 14400},
+    "5m":  {"before": 150, "after": 12, "interval_sec": 300},
+    "15m": {"before": 150, "after": 12, "interval_sec": 900},
+    "1h":  {"before": 250, "after": 18, "interval_sec": 3600},
+    "4h":  {"before": 250, "after": 10, "interval_sec": 14400},
 }
 
 
@@ -4649,15 +4650,24 @@ def _floor_ts_5min(ts: str) -> int:
         return 0
 
 
+# Simple time-bounded cache for explain candle fetches.
+# Key: (ticker, floored_ts_5min, tf) → (serial_list, DataFrame)
+# Evicts entries older than 10 minutes to keep memory bounded.
+_explain_candle_cache: Dict[tuple, Tuple[float, List[dict], Any]] = {}
+_EXPLAIN_CACHE_TTL = 600  # seconds
+
+
 def _fetch_explain_candles(ticker: str, ts: str) -> Dict[str, Any]:
     """Fetch candle windows for all TFs around the given signal ts.
 
     Returns dict of TF → list[dict{ts,o,h,l,c,v}] plus raw DataFrames (not
     serialized) for detector use.
+
+    Uses parallel fetches (one thread per TF) and a time-bounded cache to
+    prevent API throttling when rapidly browsing signals.
     """
     from tradingagents.dataflows.hyperliquid_client import HyperliquidClient
     base_asset = ticker.replace("-USD", "").replace("USDT", "").upper()
-    hl = HyperliquidClient()
 
     try:
         target_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -4666,34 +4676,43 @@ def _fetch_explain_candles(ticker: str, ts: str) -> Dict[str, Any]:
     except Exception:
         target_dt = datetime.now(timezone.utc)
 
-    candles_serial: Dict[str, List[dict]] = {}
-    candles_df: Dict[str, Any] = {}
+    floored = _floor_ts_5min(ts)
+    now = time.monotonic()
 
-    for tf, win in _EXPLAIN_WINDOWS.items():
+    # Evict stale cache entries
+    stale = [k for k, (t, _, _) in _explain_candle_cache.items() if now - t > _EXPLAIN_CACHE_TTL]
+    for k in stale:
+        _explain_candle_cache.pop(k, None)
+
+    def _fetch_one_tf(tf: str, win: dict) -> Tuple[str, Optional[List[dict]], Any]:
+        cache_key = (ticker, floored, tf)
+        cached = _explain_candle_cache.get(cache_key)
+        if cached is not None:
+            _, serial, df = cached
+            return (tf, serial, df)
+
+        hl = HyperliquidClient()
         interval_sec = win["interval_sec"]
         start_dt = target_dt - timedelta(seconds=interval_sec * win["before"])
         end_dt = target_dt + timedelta(seconds=interval_sec * win["after"])
         start_str = start_dt.strftime("%Y-%m-%d")
-        # end date inclusive, add 1 day padding to ensure tail bars present
         end_str = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
         try:
             df = hl.get_ohlcv(base_asset, interval=tf, start=start_str, end=end_str)
         except Exception as e:
             logger.warning(f"[explain] fetch failed {ticker} {tf}: {e}")
-            continue
+            return (tf, None, None)
         if df is None or df.empty:
-            continue
+            return (tf, None, None)
 
-        # Trim to the requested window by timestamp
         df = df.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
         df = df.sort_values("timestamp").reset_index(drop=True)
         if df.empty:
-            continue
+            return (tf, None, None)
 
-        candles_df[tf] = df
-        candles_serial[tf] = [
+        serial = [
             {
                 "ts": int(row.timestamp.timestamp()),
                 "o": float(row.open),
@@ -4704,6 +4723,22 @@ def _fetch_explain_candles(ticker: str, ts: str) -> Dict[str, Any]:
             }
             for row in df.itertuples(index=False)
         ]
+        _explain_candle_cache[cache_key] = (now, serial, df)
+        return (tf, serial, df)
+
+    # Fetch all TFs in parallel
+    candles_serial: Dict[str, List[dict]] = {}
+    candles_df: Dict[str, Any] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_fetch_one_tf, tf, win): tf
+            for tf, win in _EXPLAIN_WINDOWS.items()
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            tf, serial, df = fut.result()
+            if serial is not None and df is not None:
+                candles_serial[tf] = serial
+                candles_df[tf] = df
 
     return {"serial": candles_serial, "df": candles_df}
 

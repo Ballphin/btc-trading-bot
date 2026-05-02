@@ -56,6 +56,12 @@ def volume_score_monotonic(
     head → right-shoulder. For Bottom patterns we want INCLINING on the way up.
 
     Returns 1.0 for perfect monotone, 0.0 for strictly opposite, ~0.5 otherwise.
+
+    **Noise sensitivity (known limitation):** With only 3-5 anchor volumes
+    (typical for H&S and double-top patterns), a single anomalous bar (wash
+    trade, liquidation cascade) flips a pairwise comparison and drops the score
+    by 1/n. For n=2 (3 anchors), one outlier drops from 1.0 → 0.5. Consider
+    Spearman rank correlation for n≥5 in a future iteration.
     """
     if len(volumes) < 2:
         return 0.5
