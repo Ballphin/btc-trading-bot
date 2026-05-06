@@ -479,6 +479,53 @@ export interface AutoTuneRequest {
   seed?: number;
 }
 
+
+// ── HedgeFund API ─────────────────────────────────────────────────────────
+
+export interface HedgeFundAgent {
+  key: string;
+  display_name: string;
+  description: string;
+  investing_style: string;
+  order: number;
+}
+
+export interface HedgeFundRequest {
+  tickers: string[];
+  selected_analysts: string[];
+  start_date?: string;
+  end_date?: string;
+  model_name?: string;
+  model_provider?: string;
+  initial_cash?: number;
+}
+
+export interface HedgeFundDecision {
+  action: string;
+  quantity: number;
+}
+
+export interface HedgeFundResult {
+  decisions: Record<string, HedgeFundDecision>;
+  analyst_signals: Record<string, any>;
+}
+
+export async function getHedgeFundAgents(): Promise<HedgeFundAgent[]> {
+  const res = await fetch(`${API_BASE_URL}/hedgefund/agents`);
+  if (!res.ok) throw new Error('Failed to fetch agents');
+  return res.json();
+}
+
+export async function startHedgeFundAnalysis(req: HedgeFundRequest): Promise<{ job_id: string }> {
+  const res = await fetch(`${API_BASE_URL}/hedgefund/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error('Failed to start hedgefund analysis');
+  return res.json();
+}
+
 export interface AutoTuneSpec extends AutoTuneRequest {
   ticker: string;
   active_regime: AutoTuneRegime;

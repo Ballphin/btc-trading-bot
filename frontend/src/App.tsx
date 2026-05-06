@@ -14,6 +14,7 @@ const Scorecard = lazy(() => import('./pages/Scorecard'));
 const Pulse = lazy(() => import('./pages/Pulse'));
 const PulseExplain = lazy(() => import('./pages/PulseExplain'));
 const AutoTune = lazy(() => import('./pages/AutoTune'));
+const HedgeFund = lazy(() => import('./pages/HedgeFund'));
 
 function PageLoader() {
   return (
@@ -52,6 +53,7 @@ export default function App() {
                 <Route path="/pulse" element={<Pulse />} />
                 <Route path="/pulse/explain/:ticker/:ts" element={<ErrorBoundary><PulseExplain /></ErrorBoundary>} />
                 <Route path="/autotune" element={<ErrorBoundary><AutoTune /></ErrorBoundary>} />
+                <Route path="/hedgefund" element={<ErrorBoundary><HedgeFund /></ErrorBoundary>} />
               </Routes>
             </Suspense>
           </ErrorBoundary>

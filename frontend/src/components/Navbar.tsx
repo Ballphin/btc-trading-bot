@@ -1,13 +1,14 @@
 import { memo, useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3, Target, Zap, Sliders } from 'lucide-react';
+import { Activity, History, Home, TrendingUp, Server, ServerOff, BarChart3, Target, Zap, Sliders, Briefcase } from 'lucide-react';
 import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 
 const NAV_ITEMS = [
+  { to: '/hedgefund', label: 'Hedge Fund', icon: Briefcase },
   { to: '/', label: 'Home', icon: Home },
   { to: '/backtest', label: 'Backtest', icon: TrendingUp },
-  { to: '/backtests', label: 'Backtest History', icon: BarChart3 },
+  { to: '/backtests', label: 'Backtests', icon: BarChart3 },
   { to: '/scorecard', label: 'Scorecard', icon: Target },
   { to: '/pulse', label: 'Pulse', icon: Zap },
   { to: '/autotune', label: 'Auto-Tune', icon: Sliders },
@@ -64,7 +65,7 @@ export default memo(function Navbar() {
                   key={item.to}
                   to={item.to}
                   className={clsx(
-                    'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors no-underline',
+                    'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors no-underline whitespace-nowrap',
                     isActive
                       ? 'bg-accent-teal/10 text-accent-teal'
                       : 'text-slate-400 hover:text-white hover:bg-white/5',
