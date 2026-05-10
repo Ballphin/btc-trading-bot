@@ -1,37 +1,121 @@
-import { useState, useEffect, useRef } from 'react';
-import { Briefcase, AlertCircle, Play, CheckCircle2, Circle } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Briefcase, AlertCircle, Play, CheckCircle2, Circle, RefreshCw, ServerOff, Timer } from 'lucide-react';
 import { clsx } from 'clsx';
 import { getHedgeFundAgents, startHedgeFundAnalysis, API_BASE_URL } from '../lib/api';
 import type { HedgeFundAgent, HedgeFundRequest, HedgeFundResult } from '../lib/api';
 
+function renderReasoning(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeHedgeFundError(err: unknown): string {
+  const msg = typeof err === 'string'
+    ? err
+    : err instanceof Error
+      ? err.message
+      : String(err ?? 'Analysis failed');
+
+  const lower = msg.toLowerCase();
+  if (lower.includes('429') || lower.includes('too many requests')) {
+    return 'NVIDIA rate limit reached (429). Please wait 30–60 seconds and retry, or select fewer analysts.';
+  }
+
+  return msg;
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = typeof err === 'string'
+    ? err
+    : err instanceof Error
+      ? err.message
+      : String(err ?? '');
+  const lower = msg.toLowerCase();
+  return lower.includes('429') || lower.includes('too many requests');
+}
+
 export default function HedgeFund() {
+  const [serverStatus, setServerStatus] = useState<'online' | 'offline' | 'waking'>('waking');
   const [agents, setAgents] = useState<HedgeFundAgent[]>([]);
   const [selectedAgents, setSelectedAgents] = useState<Set<string>>(new Set());
   const [tickerInput, setTickerInput] = useState('AAPL');
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rateLimitCooldownSec, setRateLimitCooldownSec] = useState(0);
   
   const [jobId, setJobId] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ node: string }[]>([]);
   const [result, setResult] = useState<HedgeFundResult | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
   
   const eventSourceRef = useRef<EventSource | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const handleUiError = useCallback((err: unknown) => {
+    setError(normalizeHedgeFundError(err));
+    if (isRateLimitError(err)) {
+      setRateLimitCooldownSec((prev) => Math.max(prev, 45));
+    }
+  }, []);
 
   useEffect(() => {
-    getHedgeFundAgents()
-      .then(data => {
-        setAgents(data);
-        // Pre-select a few common ones
-        const defaultSet = new Set(['warren_buffett', 'michael_burry', 'technical_analyst']);
-        const initialSelected = new Set(data.map(a => a.key).filter(k => defaultSet.has(k)));
-        if (initialSelected.size === 0 && data.length > 0) {
-            initialSelected.add(data[0].key);
-        }
-        setSelectedAgents(initialSelected);
-      })
-      .catch(err => console.error('Failed to load agents:', err));
+    if (rateLimitCooldownSec <= 0) return;
+    const id = setInterval(() => {
+      setRateLimitCooldownSec((s) => (s > 0 ? s - 1 : 0));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [rateLimitCooldownSec]);
+
+  const checkServerHealth = useCallback(async (retryOnFail = true): Promise<boolean> => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch(`${API_BASE_URL}/health`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (response.ok) {
+        setServerStatus('online');
+        return true;
+      }
+      setServerStatus('offline');
+      return false;
+    } catch {
+      if (retryOnFail) {
+        setServerStatus('waking');
+        // Retry once after a short delay (Render cold start)
+        await new Promise(r => setTimeout(r, 5000));
+        return checkServerHealth(false);
+      }
+      setServerStatus('offline');
+      return false;
+    }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    checkServerHealth().then(online => {
+      if (cancelled || !online) return;
+      getHedgeFundAgents()
+        .then(data => {
+          if (cancelled) return;
+          setAgents(data);
+          const initialSelected = new Set(data.slice(0, 13).map(a => a.key));
+          if (initialSelected.size === 0 && data.length > 0) {
+              initialSelected.add(data[0].key);
+          }
+          setSelectedAgents(initialSelected);
+        })
+        .catch(err => console.error('Failed to load agents:', err));
+    });
+    return () => { cancelled = true; };
+  }, [checkServerHealth]);
 
   const toggleAgent = (key: string) => {
     const next = new Set(selectedAgents);
@@ -43,9 +127,19 @@ export default function HedgeFund() {
     setSelectedAgents(next);
   };
 
+  const cleanupStream = () => {
+    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; }
+    if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
+  };
+
   const handleRun = async () => {
     if (!tickerInput) {
       setError('Please enter a ticker');
+      return;
+    }
+    if (rateLimitCooldownSec > 0) {
+      setError(`NVIDIA rate limit cooldown active. Retry in ${rateLimitCooldownSec}s.`);
       return;
     }
     if (selectedAgents.size === 0) {
@@ -58,18 +152,19 @@ export default function HedgeFund() {
       setError(null);
       setProgress([]);
       setResult(null);
+      setElapsedSec(0);
 
       const req: HedgeFundRequest = {
         tickers: tickerInput.split(',').map(t => t.trim()),
         selected_analysts: Array.from(selectedAgents),
-        model_name: 'gpt-4o', // Default model
-        model_provider: 'OpenAI',
+        model_name: 'deepseek-v4-pro',
+        model_provider: 'DeepSeek',
       };
 
       const res = await startHedgeFundAnalysis(req);
       setJobId(res.job_id);
     } catch (err: any) {
-      setError(err.message);
+      handleUiError(err);
       setLoading(false);
     }
   };
@@ -77,34 +172,73 @@ export default function HedgeFund() {
   useEffect(() => {
     if (!jobId) return;
 
+    cleanupStream();
+
     const source = new EventSource(`${API_BASE_URL}/hedgefund/stream/${jobId}`);
     eventSourceRef.current = source;
 
-    source.addEventListener('progress', (e: any) => {
-      const data = JSON.parse(e.data);
-      setProgress(p => [...p, data]);
-    });
+    // Elapsed timer
+    const startTime = Date.now();
+    elapsedRef.current = setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
 
-    source.addEventListener('done', (e: any) => {
-      const data = JSON.parse(e.data);
-      setResult(data);
+    // Scaled timeout: 30s base + 30s per analyst, capped at 600s
+    const timeoutMs = Math.min(30_000 + selectedAgents.size * 30_000, 600_000);
+    timeoutRef.current = setTimeout(() => {
+      setError('Analysis timed out — the LLM provider may be slow. Try again or select fewer analysts.');
       setLoading(false);
-      source.close();
-    });
+      cleanupStream();
+    }, timeoutMs);
 
-    source.addEventListener('error', (e: any) => {
-      let msg = 'Stream error';
+    source.addEventListener('progress', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.error) msg = data.error;
+        setProgress(p => [...p, data]);
       } catch {}
-      setError(msg);
+    });
+
+    source.addEventListener('done', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        setResult(data);
+      } catch {}
       setLoading(false);
-      source.close();
+      cleanupStream();
+    });
+
+    source.addEventListener('job_error', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        handleUiError(data.error || 'Analysis failed');
+      } catch {
+        setError('Analysis failed');
+      }
+      setLoading(false);
+      cleanupStream();
+    });
+
+    // Single error handler — distinguishes native vs custom SSE errors
+    source.addEventListener('error', (e: Event) => {
+      const me = e as MessageEvent;
+      if (me.data) {
+        // Custom error event from backend
+        try {
+          const data = JSON.parse(me.data);
+          handleUiError(data.error || 'Analysis failed');
+        } catch {
+          handleUiError(String(me.data));
+        }
+      } else {
+        // Native connectivity error
+        setError('Lost connection to server');
+      }
+      setLoading(false);
+      cleanupStream();
     });
 
     return () => {
-      source.close();
+      cleanupStream();
     };
   }, [jobId]);
 
@@ -119,6 +253,32 @@ export default function HedgeFund() {
           <p className="text-slate-400">Multi-agent LangGraph analysis powered by virattt/ai-hedge-fund</p>
         </div>
       </div>
+
+      {/* Server status banners */}
+      {serverStatus === 'waking' && (
+        <div className="mb-6 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center gap-3">
+          <div className="w-4 h-4 border-2 border-amber-400/30 border-t-amber-400 rounded-full animate-spin" />
+          <p className="text-sm text-amber-300">Waking up server... This may take up to 30 seconds on free tier.</p>
+        </div>
+      )}
+      {serverStatus === 'offline' && (
+        <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <ServerOff className="w-5 h-5 text-red-400" />
+            <div>
+              <p className="text-sm text-red-300 font-medium">Server is offline</p>
+              <p className="text-xs text-red-400/70 mt-0.5">Start the backend: <code className="bg-red-500/10 px-1.5 py-0.5 rounded">uvicorn server:app --port 8000</code></p>
+            </div>
+          </div>
+          <button
+            onClick={() => { setServerStatus('waking'); checkServerHealth(); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/20 text-red-300 text-sm hover:bg-red-500/30 transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Config Panel */}
@@ -180,7 +340,7 @@ export default function HedgeFund() {
 
               <button
                 onClick={handleRun}
-                disabled={loading || selectedAgents.size === 0 || !tickerInput}
+                disabled={loading || selectedAgents.size === 0 || !tickerInput || rateLimitCooldownSec > 0}
                 className="w-full py-3 rounded-xl bg-accent-blue text-white font-medium hover:bg-accent-blue/90 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {loading ? (
@@ -191,7 +351,7 @@ export default function HedgeFund() {
                 ) : (
                   <>
                     <Play className="w-4 h-4" />
-                    Run HedgeFund
+                    {rateLimitCooldownSec > 0 ? `Retry in ${rateLimitCooldownSec}s` : 'Run HedgeFund'}
                   </>
                 )}
               </button>
@@ -204,9 +364,17 @@ export default function HedgeFund() {
           {/* Progress Stream */}
           {(loading || progress.length > 0) && !result && (
             <div className="p-6 rounded-2xl bg-slate-900 border border-white/10">
-              <h3 className="text-white font-medium mb-4 flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-accent-blue animate-pulse" />
-                Live Execution Progress
+              <h3 className="text-white font-medium mb-4 flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-accent-blue animate-pulse" />
+                  Live Execution Progress
+                </span>
+                {loading && elapsedSec > 0 && (
+                  <span className="flex items-center gap-1.5 text-xs text-slate-500 font-mono">
+                    <Timer className="w-3 h-3" />
+                    {Math.floor(elapsedSec / 60)}:{String(elapsedSec % 60).padStart(2, '0')}
+                  </span>
+                )}
               </h3>
               <div className="space-y-3">
                 {progress.map((p, i) => (
@@ -232,7 +400,7 @@ export default function HedgeFund() {
             <div className="space-y-6">
               <div className="p-6 rounded-2xl bg-slate-900 border border-white/10">
                 <h3 className="text-xl font-bold text-white mb-2">Portfolio Manager Decision</h3>
-                {Object.entries(result.decisions).map(([ticker, dec]: [string, any]) => (
+                {Object.entries(result.decisions || {}).map(([ticker, dec]: [string, any]) => (
                   <div key={ticker} className="mt-4 p-4 rounded-xl bg-slate-950 border border-white/5">
                     <div className="flex items-center justify-between mb-4">
                       <div className="text-2xl font-bold text-white">{ticker}</div>
@@ -249,8 +417,8 @@ export default function HedgeFund() {
                       <div className="text-slate-400 mb-2">Quantity: <span className="text-white">{dec.quantity}</span></div>
                     )}
                     {dec.reasoning && (
-                      <div className="text-sm text-slate-300 mt-4 leading-relaxed">
-                        {dec.reasoning}
+                      <div className="text-sm text-slate-300 mt-4 leading-relaxed whitespace-pre-wrap break-words">
+                        {renderReasoning(dec.reasoning)}
                       </div>
                     )}
                   </div>
@@ -260,7 +428,7 @@ export default function HedgeFund() {
               <div className="p-6 rounded-2xl bg-slate-900 border border-white/10">
                 <h3 className="text-lg font-medium text-white mb-4">Analyst Signals</h3>
                 <div className="space-y-4">
-                  {Object.entries(result.analyst_signals || {}).map(([analystName, data]: [string, any]) => {
+                  {Object.entries((result.analyst_signals) || {}).map(([analystName, data]: [string, any]) => {
                     const signalInfo = data[tickerInput] || data[Object.keys(data)[0]]; // fallback if ticker format differs
                     if (!signalInfo) return null;
                     return (
@@ -281,8 +449,8 @@ export default function HedgeFund() {
                         {signalInfo.confidence !== undefined && (
                           <div className="text-xs text-slate-500 mb-2">Confidence: {Math.round(signalInfo.confidence)}%</div>
                         )}
-                        <p className="text-sm text-slate-400 mt-2 line-clamp-3 hover:line-clamp-none transition-all">
-                          {signalInfo.reasoning}
+                        <p className="text-sm text-slate-400 mt-2 line-clamp-3 hover:line-clamp-none transition-all whitespace-pre-wrap break-words">
+                          {renderReasoning(signalInfo.reasoning)}
                         </p>
                       </div>
                     );

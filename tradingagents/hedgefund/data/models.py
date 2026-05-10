@@ -74,6 +74,12 @@ class LineItem(BaseModel):
     # Allow additional fields dynamically
     model_config = {"extra": "allow"}
 
+    def __getattr__(self, name: str):
+        extra = object.__getattribute__(self, "__pydantic_extra__")
+        if extra and name in extra:
+            return extra[name]
+        return None
+
 
 class LineItemResponse(BaseModel):
     search_results: list[LineItem]

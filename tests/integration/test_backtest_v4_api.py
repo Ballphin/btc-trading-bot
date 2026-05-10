@@ -8,6 +8,14 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture
+def client():
+    from starlette.testclient import TestClient
+    from server import app
+
+    return TestClient(app)
+
+
 class TestBacktestV4API:
     def test_lazy_fetch_patterns_404_when_missing(self, client):
         """GET patterns endpoint returns 404 when sidecar file does not exist."""

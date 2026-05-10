@@ -56,9 +56,30 @@ class OpenAIClient(BaseLLMClient):
         """Return configured ChatOpenAI instance."""
         llm_kwargs = {"model": self.model}
 
+        provider = self.provider
+        provider_base_url = None
+        provider_api_key_env = None
+
+        # Optional NVIDIA route for DeepSeek-compatible models
+        # Uses OpenAI-compatible API endpoint when explicitly enabled.
+        if provider == "deepseek":
+            force_nvidia = os.environ.get("DEEPSEEK_USE_NVIDIA", "") in ("1", "true", "TRUE")
+            if force_nvidia:
+                provider_base_url = os.environ.get("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
+                if not provider_base_url.endswith("/v1"):
+                    provider_base_url = f"{provider_base_url}/v1"
+                provider_api_key_env = "NVIDIA_API_KEY"
+                nvidia_model = os.environ.get("NVIDIA_DEEPSEEK_MODEL", self.model)
+                if "/" not in nvidia_model and nvidia_model.startswith("deepseek-"):
+                    nvidia_model = f"deepseek-ai/{nvidia_model}"
+                llm_kwargs["model"] = nvidia_model
+
         # Provider-specific base URL and auth
-        if self.provider in _PROVIDER_CONFIG:
-            base_url, api_key_env = _PROVIDER_CONFIG[self.provider]
+        if provider in _PROVIDER_CONFIG:
+            if provider_base_url is None or provider_api_key_env is None:
+                base_url, api_key_env = _PROVIDER_CONFIG[provider]
+            else:
+                base_url, api_key_env = provider_base_url, provider_api_key_env
             llm_kwargs["base_url"] = base_url
             if api_key_env:
                 api_key = os.environ.get(api_key_env)
@@ -68,7 +89,7 @@ class OpenAIClient(BaseLLMClient):
                     # and produce a misleading error.
                     raise RuntimeError(
                         f"Missing {api_key_env} environment variable for provider "
-                        f"'{self.provider}'. Set it in your deployment env "
+                        f"'{provider}'. Set it in your deployment env "
                         f"(Render: Dashboard → Environment → Add Variable)."
                     )
                 llm_kwargs["api_key"] = api_key
@@ -85,14 +106,14 @@ class OpenAIClient(BaseLLMClient):
         # DeepSeek V4 models default to thinking mode, which requires
         # reasoning_content passback on tool-call turns. LangChain doesn't
         # handle this, so we disable thinking mode for all DeepSeek calls.
-        if self.provider == "deepseek":
+        if provider == "deepseek":
             llm_kwargs["model_kwargs"] = {
                 "extra_body": {"thinking": {"type": "disabled"}}
             }
 
         # Native OpenAI: use Responses API for consistent behavior across
         # all model families. Third-party providers use Chat Completions.
-        if self.provider == "openai":
+        if provider == "openai":
             llm_kwargs["use_responses_api"] = True
 
         return NormalizedChatOpenAI(**llm_kwargs)

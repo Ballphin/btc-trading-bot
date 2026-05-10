@@ -28,30 +28,31 @@ class TestV4BacktestPatternIntegration:
                 liquidity_sweep_dir=None,
                 pattern_hits={},
             )
-            # Mock prefetch to return minimal candles
-            with patch.object(engine, "_prefetch") as mock_prefetch:
-                ts = pd.date_range("2026-01-01", "2026-01-02", freq="1min")
-                df = pd.DataFrame({
-                    "timestamp": ts,
-                    "open": [50000.0] * len(ts),
-                    "high": [50100.0] * len(ts),
-                    "low": [49900.0] * len(ts),
-                    "close": [50000.0 + i * 0.1 for i in range(len(ts))],
-                    "volume": [100.0] * len(ts),
-                })
-                mock_prefetch.return_value = (
-                    {"1m": df, "15m": df.iloc[::15].reset_index(drop=True),
-                     "1h": df.iloc[::60].reset_index(drop=True),
-                     "4h": df.iloc[::240].reset_index(drop=True)},
-                    pd.DataFrame(columns=["timestamp", "funding_rate"]),
-                )
-                with patch.object(engine, "_score_signals", return_value=[]):
-                    with patch.object(engine, "_compute_metrics", return_value={}):
-                        try:
-                            engine.run()
-                        except Exception:
-                            pass
-                        assert mock_v4.called
+            ts = pd.date_range("2026-01-01", "2026-01-02", freq="1min", tz="UTC")
+            df = pd.DataFrame({
+                "timestamp": ts,
+                "open": [50000.0] * len(ts),
+                "high": [50100.0] * len(ts),
+                "low": [49900.0] * len(ts),
+                "close": [50000.0 + i * 0.1 for i in range(len(ts))],
+                "volume": [100.0] * len(ts),
+            })
+            candles = {
+                "1m": df,
+                "15m": df.iloc[::15].reset_index(drop=True),
+                "1h": df.iloc[::60].reset_index(drop=True),
+                "4h": df.iloc[::240].reset_index(drop=True),
+            }
+            with patch("tradingagents.backtesting.pulse_backtest.score_pulse_from_inputs") as mock_score:
+                mock_score.return_value = {
+                    "signal": "NEUTRAL",
+                    "confidence": 0.0,
+                    "normalized_score": 0.0,
+                    "hold_minutes": 45,
+                    "arm_used": "none",
+                }
+                engine._replay(candles, pd.DataFrame(columns=["timestamp", "funding_rate"]))
+            assert mock_v4.called
 
     def test_pattern_snapshots_list_exists(self):
         engine = self._make_engine()
@@ -124,36 +125,37 @@ class TestV4BacktestPatternIntegration:
     def test_signals_receive_arm_used_field(self):
         engine = self._make_engine()
         # Verify the signal dict now contains arm_used and patterns
-        with patch.object(engine, "_prefetch") as mock_prefetch:
-            ts = pd.date_range("2026-01-01", periods=100, freq="1min")
-            df = pd.DataFrame({
-                "timestamp": ts,
-                "open": [50000.0] * len(ts),
-                "high": [50100.0] * len(ts),
-                "low": [49900.0] * len(ts),
-                "close": [50000.0] * len(ts),
-                "volume": [100.0] * len(ts),
-            })
-            mock_prefetch.return_value = (
-                {"1m": df, "15m": df.iloc[::15].reset_index(drop=True)},
-                pd.DataFrame(columns=["timestamp", "funding_rate"]),
-            )
-            with patch("tradingagents.backtesting.pulse_backtest.score_pulse_from_inputs") as mock_score:
-                mock_score.return_value = {
-                    "signal": "BUY",
-                    "confidence": 0.5,
-                    "normalized_score": 0.3,
-                    "hold_minutes": 45,
-                    "arm_used": "confluence",
-                }
-                with patch("tradingagents.backtesting.pulse_backtest.compute_v4_inputs") as mock_v4:
-                    mock_v4.return_value = MagicMock(
-                        vpd_signal=1,
-                        liquidity_sweep_dir=None,
-                        pattern_hits={},
-                    )
-                    signals = engine._replay(df, pd.DataFrame())
-                    if signals:
-                        s = signals[0]
-                        assert "arm_used" in s
-                        assert "patterns" in s
+        ts = pd.date_range("2026-01-01", periods=100, freq="1min", tz="UTC")
+        df = pd.DataFrame({
+            "timestamp": ts,
+            "open": [50000.0] * len(ts),
+            "high": [50100.0] * len(ts),
+            "low": [49900.0] * len(ts),
+            "close": [50000.0] * len(ts),
+            "volume": [100.0] * len(ts),
+        })
+        candles = {
+            "1m": df,
+            "15m": df.iloc[::15].reset_index(drop=True),
+            "1h": df.iloc[::60].reset_index(drop=True),
+            "4h": df.iloc[::240].reset_index(drop=True),
+        }
+        with patch("tradingagents.backtesting.pulse_backtest.score_pulse_from_inputs") as mock_score:
+            mock_score.return_value = {
+                "signal": "BUY",
+                "confidence": 0.5,
+                "normalized_score": 0.3,
+                "hold_minutes": 45,
+                "arm_used": "confluence",
+            }
+            with patch("tradingagents.backtesting.pulse_backtest.compute_v4_inputs") as mock_v4:
+                mock_v4.return_value = MagicMock(
+                    vpd_signal=1,
+                    liquidity_sweep_dir=None,
+                    pattern_hits={},
+                )
+                signals = engine._replay(candles, pd.DataFrame(columns=["timestamp", "funding_rate"]))
+                if signals:
+                    s = signals[0]
+                    assert "arm_used" in s
+                    assert "patterns" in s

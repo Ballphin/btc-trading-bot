@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react';
+import { API_BASE_URL } from './lib/api';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Navbar from './components/Navbar';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -28,7 +29,7 @@ export default function App() {
   // Keep-alive ping to prevent Render free-tier from sleeping (5 minutes)
   useEffect(() => {
     const pingInterval = setInterval(() => {
-      fetch('/api/health').catch(() => {});
+      fetch(`${API_BASE_URL}/health`).catch(() => {});
     }, 300000);
     return () => clearInterval(pingInterval);
   }, []);

@@ -6505,8 +6505,8 @@ class HedgeFundRequest(BaseModel):
     selected_analysts: List[str]
     start_date: Optional[str] = None
     end_date: Optional[str] = None
-    model_name: Optional[str] = "gpt-4"
-    model_provider: Optional[str] = "OpenAI"
+    model_name: Optional[str] = "deepseek-v4-pro"
+    model_provider: Optional[str] = "DeepSeek"
     initial_cash: Optional[float] = 100000.0
 
 _hedgefund_jobs: Dict[str, dict] = {}
@@ -6523,8 +6523,48 @@ async def get_hedgefund_agents():
 
 @app.post("/api/hedgefund/analyze")
 async def start_hedgefund_analysis(req: HedgeFundRequest):
+    # Validate analyst keys before starting job
+    from tradingagents.hedgefund.utils.analysts import ANALYST_CONFIG
+    invalid = set(req.selected_analysts) - set(ANALYST_CONFIG.keys())
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown analysts: {sorted(invalid)}")
+
+    # Fail fast if provider API key is missing (avoid late SSE disconnect-looking failures)
+    provider_env_map = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "google": "GOOGLE_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "kimi": "MOONSHOT_API_KEY",
+        "xai": "XAI_API_KEY",
+        "gigachat": "GIGACHAT_API_KEY",
+    }
+    provider = (req.model_provider or "").strip().lower()
+    if provider == "deepseek":
+        if not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("NVIDIA_API_KEY")):
+            raise HTTPException(
+                status_code=400,
+                detail="DeepSeek API key missing. Set DEEPSEEK_API_KEY (or NVIDIA_API_KEY for NVIDIA OpenAI-compatible routing) in your environment or .env file.",
+            )
+
+    required_env = provider_env_map.get(provider)
+    if provider != "deepseek" and required_env and not os.getenv(required_env):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{req.model_provider} API key missing. Set {required_env} in your environment or .env file.",
+        )
+
+    # Purge stale jobs older than 1 hour
+    now_ts = time.time()
+    stale_ids = [jid for jid, j in _hedgefund_jobs.items() if now_ts - j.get("created_at", 0) > 3600]
+    for jid in stale_ids:
+        _hedgefund_jobs.pop(jid, None)
+        _hedgefund_queues.pop(jid, None)
+
     job_id = str(uuid.uuid4())
-    _hedgefund_jobs[job_id] = {"status": "running"}
+    _hedgefund_jobs[job_id] = {"status": "running", "created_at": now_ts}
     _hedgefund_queues[job_id] = deque()
 
     def run_job():
@@ -6564,19 +6604,40 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
                 },
             }
 
+            # Single stream() call — accumulate node outputs (no double invoke)
+            last_messages = None
+            merged_data = {}
             for s in agent.stream(inputs):
                 node_name = list(s.keys())[0]
+                node_output = s[node_name]
                 _hedgefund_queues[job_id].append({
                     "event": "progress",
-                    "data": {"node": node_name, "state": s[node_name]}
+                    "data": {"node": node_name}
                 })
+                if "messages" in node_output:
+                    last_messages = node_output["messages"]
+                if "data" in node_output:
+                    merged_data = {**merged_data, **node_output["data"]}
 
-            final_state = agent.invoke(inputs)
+            # Extract decisions from the last message (portfolio_manager output)
+            if not last_messages:
+                _hedgefund_jobs[job_id]["status"] = "failed"
+                _hedgefund_jobs[job_id]["error"] = "No output from workflow"
+                _hedgefund_queues[job_id].append({"event": "error", "data": "No output from workflow — agents may have failed"})
+                return
+
+            decisions = parse_hedge_fund_response(last_messages[-1].content)
+            if decisions is None:
+                _hedgefund_jobs[job_id]["status"] = "failed"
+                _hedgefund_jobs[job_id]["error"] = "LLM returned unparseable response"
+                _hedgefund_queues[job_id].append({"event": "error", "data": "LLM returned unparseable response — try again"})
+                return
+
             result = {
-                "decisions": parse_hedge_fund_response(final_state["messages"][-1].content),
-                "analyst_signals": final_state["data"]["analyst_signals"],
+                "decisions": decisions,
+                "analyst_signals": merged_data.get("analyst_signals", {}),
             }
-            
+
             _hedgefund_jobs[job_id]["status"] = "completed"
             _hedgefund_jobs[job_id]["result"] = result
             _hedgefund_queues[job_id].append({"event": "done", "data": result})
@@ -6598,30 +6659,33 @@ async def stream_hedgefund_analysis(job_id: str):
 
     async def event_generator():
         q = _hedgefund_queues.get(job_id)
-        if not q:
+        if q is None:
             return
 
-        while True:
-            if q:
-                msg = q.popleft()
-                if msg["event"] == "progress":
-                    # Simplify state for frontend
-                    data = msg["data"]
-                    yield {"event": "progress", "data": json.dumps({"node": data["node"]})}
-                elif msg["event"] == "done":
-                    yield {"event": "done", "data": json.dumps(msg["data"])}
-                    break
-                elif msg["event"] == "error":
-                    yield {"event": "error", "data": json.dumps({"error": msg["data"]})}
-                    break
-            else:
-                job = _hedgefund_jobs.get(job_id, {})
-                if job.get("status") in ["completed", "failed"]:
-                    # In case we missed the final message
-                    if job.get("status") == "completed" and "result" in job:
-                        yield {"event": "done", "data": json.dumps(job["result"])}
-                    break
-                await asyncio.sleep(0.5)
+        try:
+            while True:
+                if q:
+                    msg = q.popleft()
+                    if msg["event"] == "progress":
+                        data = msg["data"]
+                        yield {"event": "progress", "data": json.dumps({"node": data["node"]})}
+                    elif msg["event"] == "done":
+                        yield {"event": "done", "data": json.dumps(msg["data"])}
+                        break
+                    elif msg["event"] == "error":
+                        yield {"event": "job_error", "data": json.dumps({"error": msg["data"]})}
+                        break
+                else:
+                    job = _hedgefund_jobs.get(job_id, {})
+                    if job.get("status") in ["completed", "failed"]:
+                        if job.get("status") == "completed" and "result" in job:
+                            yield {"event": "done", "data": json.dumps(job["result"])}
+                        elif job.get("status") == "failed":
+                            yield {"event": "job_error", "data": json.dumps({"error": job.get("error", "Unknown error")})}
+                        break
+                    await asyncio.sleep(0.5)
+        finally:
+            _hedgefund_queues.pop(job_id, None)
 
     return EventSourceResponse(event_generator())
 

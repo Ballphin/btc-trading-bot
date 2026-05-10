@@ -53,16 +53,25 @@ class TestV4Inputs:
         assert isinstance(result.pattern_hits, dict)
 
     def test_vpd_signal_non_zero_when_neg_corr(self):
-        # Price ↓, Volume ↑ => negative correlation => vpd_signal = -1
-        prices = np.linspace(100, 80, 25)
-        volumes = np.linspace(100, 200, 25)
+        # Price ↓, Volume ↑ => negative correlation + new low => bullish divergence (+1)
+        returns = np.array([
+            -0.01, -0.02, -0.005, -0.03, -0.01,
+            -0.025, -0.008, -0.02, -0.015, -0.03,
+            -0.01, -0.02, -0.007, -0.025, -0.012,
+            -0.02, -0.011, -0.018, -0.013, -0.02,
+        ])
+        prices = [100.0]
+        volumes = [100.0]
+        for r in returns:
+            prices.append(prices[-1] * np.exp(r))
+            volumes.append(volumes[-1] * np.exp(-1.3 * r))
         df = pd.DataFrame({
-            "timestamp": pd.date_range("2026-01-01", periods=25, freq="15m"),
+            "timestamp": pd.date_range("2026-01-01", periods=len(prices), freq="15min"),
             "close": prices,
             "volume": volumes,
         })
         result = compute_v4_inputs(candles_by_tf={"15m": df})
-        assert result.vpd_signal == -1
+        assert result.vpd_signal == 1
 
     def test_graceful_on_empty_df(self):
         result = compute_v4_inputs(
@@ -84,7 +93,7 @@ class TestV4Inputs:
         prices = np.linspace(100, 80, 12)
         volumes = np.linspace(100, 200, 12)
         df = pd.DataFrame({
-            "timestamp": pd.date_range("2026-01-01", periods=12, freq="15m"),
+            "timestamp": pd.date_range("2026-01-01", periods=12, freq="15min"),
             "close": prices,
             "volume": volumes,
         })

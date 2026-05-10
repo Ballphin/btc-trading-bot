@@ -163,6 +163,26 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
             raise ValueError("Anthropic API key not found.  Please make sure ANTHROPIC_API_KEY is set in your .env file or provided via API keys.")
         return ChatAnthropic(model=model_name, api_key=api_key)
     elif model_provider == ModelProvider.DEEPSEEK:
+        # Optional NVIDIA route: OpenAI-compatible endpoint for DeepSeek-family models
+        # Enabled when NVIDIA_API_KEY is present (or DEEPSEEK_USE_NVIDIA=1 override).
+        force_nvidia = os.getenv("DEEPSEEK_USE_NVIDIA") in ("1", "true", "TRUE")
+        has_nvidia_key = bool(os.getenv("NVIDIA_API_KEY"))
+        has_deepseek_key = bool(os.getenv("DEEPSEEK_API_KEY"))
+        use_nvidia = force_nvidia or (has_nvidia_key and not has_deepseek_key)
+        if use_nvidia:
+            nvidia_api_key = (api_keys or {}).get("NVIDIA_API_KEY") or os.getenv("NVIDIA_API_KEY")
+            if not nvidia_api_key:
+                print("API Key Error: Please make sure NVIDIA_API_KEY is set in your .env file or provided via API keys.")
+                raise ValueError("NVIDIA API key not found. Please make sure NVIDIA_API_KEY is set in your .env file or provided via API keys.")
+
+            nvidia_base_url = os.getenv("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1").rstrip("/")
+            if not nvidia_base_url.endswith("/v1"):
+                nvidia_base_url = f"{nvidia_base_url}/v1"
+            nvidia_model = os.getenv("NVIDIA_DEEPSEEK_MODEL", model_name)
+            if "/" not in nvidia_model and nvidia_model.startswith("deepseek-"):
+                nvidia_model = f"deepseek-ai/{nvidia_model}"
+            return ChatOpenAI(model=nvidia_model, api_key=nvidia_api_key, base_url=nvidia_base_url)
+
         api_key = (api_keys or {}).get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             print(f"API Key Error: Please make sure DEEPSEEK_API_KEY is set in your .env file or provided via API keys.")
