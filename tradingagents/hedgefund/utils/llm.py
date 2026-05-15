@@ -51,10 +51,14 @@ def _default_with_error(
     err_text = _build_error_message(err)
     if isinstance(base, BaseModel):
         payload = base.model_dump()
-        reasoning = payload.get("reasoning")
-        if isinstance(reasoning, str):
-            payload["reasoning"] = f"{reasoning} | error: {err_text}"
-            return pydantic_model(**payload)
+        # Try "reasoning" first, then fall back to any string field
+        for key in ["reasoning"] + [k for k in payload if k != "reasoning"]:
+            if isinstance(payload.get(key), str):
+                payload[key] = f"{payload[key]} | error: {err_text}"
+                try:
+                    return pydantic_model(**payload)
+                except Exception:
+                    break
     return base
 
 

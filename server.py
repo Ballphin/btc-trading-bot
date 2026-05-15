@@ -5518,6 +5518,12 @@ async def _score_pending_pulses():
         all_entries = []
         modified = False
 
+        # Load pulse scoring config once per ticker so cfg/exec_cost_bps are
+        # always available in the post-write verified-outcome persistence path.
+        from tradingagents.pulse.config import get_config as _get_cfg
+        cfg = _get_cfg()
+        exec_cost_bps = float(cfg.get("forward_return", "exec_cost_bps", default=5))
+
         with open(pulse_path, "r") as f:
             for line in f:
                 line = line.strip()
@@ -5568,13 +5574,10 @@ async def _score_pending_pulses():
                 continue
 
             # v3 scoring: ATR-sqrt-time thresholds + 4 fill models.
-            from tradingagents.pulse.config import get_config as _get_cfg
             from tradingagents.pulse.fills import simple_fill_returns
-            cfg = _get_cfg()
 
             horizons_min = cfg.get("forward_return", "horizons_minutes", default=[5, 15, 60]) or [5, 15, 60]
             atr_mul = float(cfg.get("forward_return", "atr_multiplier", default=0.5))
-            exec_cost_bps = float(cfg.get("forward_return", "exec_cost_bps", default=5))
             fallback_bps = cfg.get("forward_return", "fallback_fixed_bps", default=[5, 10, 15]) or [5, 10, 15]
             atr_at_pulse = entry.get("atr_1h_at_pulse")
             threshold_source = "atr_sqrt_time" if atr_at_pulse else "fallback"
