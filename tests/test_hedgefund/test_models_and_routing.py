@@ -61,7 +61,8 @@ class TestDeepSeekRouting:
             assert out is sentinel
             mock_deepseek.assert_called_once_with(model="deepseek-v4-pro", api_key="ds-key")
 
-    def test_deepseek_auto_uses_nvidia_when_only_nvidia_key_exists(self, monkeypatch):
+    def test_deepseek_uses_nvidia_only_when_use_nvidia_flag_set(self, monkeypatch):
+        # New contract: NVIDIA route is opt-in, not auto-selected from key presence.
         monkeypatch.delenv("DEEPSEEK_USE_NVIDIA", raising=False)
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
@@ -71,7 +72,11 @@ class TestDeepSeekRouting:
             sentinel = object()
             mock_openai.return_value = sentinel
 
-            out = get_model("deepseek-v4-pro", ModelProvider.DEEPSEEK)
+            out = get_model(
+                "deepseek-v4-pro",
+                ModelProvider.DEEPSEEK,
+                use_nvidia=True,
+            )
 
             assert out is sentinel
             mock_openai.assert_called_once_with(
@@ -79,3 +84,13 @@ class TestDeepSeekRouting:
                 api_key="nv-key",
                 base_url="https://integrate.api.nvidia.com/v1",
             )
+
+    def test_deepseek_without_flag_requires_deepseek_key(self, monkeypatch):
+        # Without flag and without DEEPSEEK_API_KEY, must raise — never silently route to NVIDIA.
+        monkeypatch.delenv("DEEPSEEK_USE_NVIDIA", raising=False)
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
+
+        import pytest
+        with pytest.raises(ValueError, match="DeepSeek API key not found"):
+            get_model("deepseek-v4-pro", ModelProvider.DEEPSEEK)

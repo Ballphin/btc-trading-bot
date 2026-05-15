@@ -139,7 +139,7 @@ def get_models_list():
     ]
 
 
-def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None) -> ChatOpenAI | ChatGroq | ChatOllama | GigaChat | None:
+def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None, use_nvidia: bool = False) -> ChatOpenAI | ChatGroq | ChatOllama | GigaChat | None:
     if model_provider == ModelProvider.GROQ:
         api_key = (api_keys or {}).get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
         if not api_key:
@@ -163,13 +163,11 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
             raise ValueError("Anthropic API key not found.  Please make sure ANTHROPIC_API_KEY is set in your .env file or provided via API keys.")
         return ChatAnthropic(model=model_name, api_key=api_key)
     elif model_provider == ModelProvider.DEEPSEEK:
-        # Optional NVIDIA route: OpenAI-compatible endpoint for DeepSeek-family models
-        # Enabled when NVIDIA_API_KEY is present (or DEEPSEEK_USE_NVIDIA=1 override).
-        force_nvidia = os.getenv("DEEPSEEK_USE_NVIDIA") in ("1", "true", "TRUE")
-        has_nvidia_key = bool(os.getenv("NVIDIA_API_KEY"))
-        has_deepseek_key = bool(os.getenv("DEEPSEEK_API_KEY"))
-        use_nvidia = force_nvidia or (has_nvidia_key and not has_deepseek_key)
-        if use_nvidia:
+        # Default: direct DeepSeek (DEEPSEEK_API_KEY). NVIDIA route is opt-in
+        # via the explicit `use_nvidia` flag, or DEEPSEEK_USE_NVIDIA env override.
+        env_force_nvidia = os.getenv("DEEPSEEK_USE_NVIDIA") in ("1", "true", "TRUE")
+        route_nvidia = bool(use_nvidia) or env_force_nvidia
+        if route_nvidia:
             nvidia_api_key = (api_keys or {}).get("NVIDIA_API_KEY") or os.getenv("NVIDIA_API_KEY")
             if not nvidia_api_key:
                 print("API Key Error: Please make sure NVIDIA_API_KEY is set in your .env file or provided via API keys.")

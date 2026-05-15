@@ -6508,6 +6508,7 @@ class HedgeFundRequest(BaseModel):
     model_name: Optional[str] = "deepseek-v4-pro"
     model_provider: Optional[str] = "DeepSeek"
     initial_cash: Optional[float] = 100000.0
+    use_nvidia_deepseek: Optional[bool] = False
 
 _hedgefund_jobs: Dict[str, dict] = {}
 _hedgefund_queues: Dict[str, deque] = {}
@@ -6543,11 +6544,18 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
     }
     provider = (req.model_provider or "").strip().lower()
     if provider == "deepseek":
-        if not (os.getenv("DEEPSEEK_API_KEY") or os.getenv("NVIDIA_API_KEY")):
-            raise HTTPException(
-                status_code=400,
-                detail="DeepSeek API key missing. Set DEEPSEEK_API_KEY (or NVIDIA_API_KEY for NVIDIA OpenAI-compatible routing) in your environment or .env file.",
-            )
+        if req.use_nvidia_deepseek:
+            if not os.getenv("NVIDIA_API_KEY"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="NVIDIA API key missing. Set NVIDIA_API_KEY in your environment or .env file, or disable the NVIDIA route to use direct DeepSeek.",
+                )
+        else:
+            if not os.getenv("DEEPSEEK_API_KEY"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="DeepSeek API key missing. Set DEEPSEEK_API_KEY in your environment or .env file, or enable the NVIDIA DeepSeek route.",
+                )
 
     required_env = provider_env_map.get(provider)
     if provider != "deepseek" and required_env and not os.getenv(required_env):
@@ -6601,6 +6609,7 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
                     "show_reasoning": True,
                     "model_name": req.model_name,
                     "model_provider": req.model_provider,
+                    "use_nvidia_deepseek": bool(req.use_nvidia_deepseek),
                 },
             }
 

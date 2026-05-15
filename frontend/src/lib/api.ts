@@ -498,6 +498,7 @@ export interface HedgeFundRequest {
   model_name?: string;
   model_provider?: string;
   initial_cash?: number;
+  use_nvidia_deepseek?: boolean;
 }
 
 export interface HedgeFundDecision {

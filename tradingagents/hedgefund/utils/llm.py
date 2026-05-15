@@ -1,10 +1,61 @@
 """Helper functions for LLM"""
 
 import json
+import os
+import threading
+import time
 from pydantic import BaseModel
 from tradingagents.hedgefund.llm.models import get_model, get_model_info
 from tradingagents.hedgefund.utils.progress import progress
 from tradingagents.hedgefund.graph.state import AgentState
+
+
+# Process-wide throttle for the NVIDIA DeepSeek route. NVIDIA's free tier
+# rate-limits aggressively (HTTP 429) when 13 analysts fire concurrently;
+# serializing requests with a minimum interval trades latency for stability.
+_nvidia_throttle_lock = threading.Lock()
+_nvidia_last_call_ts: float = 0.0
+
+
+def _throttle_nvidia() -> None:
+    """Block until at least NVIDIA_MIN_INTERVAL_S has passed since last call."""
+    global _nvidia_last_call_ts
+    try:
+        min_interval = float(os.getenv("NVIDIA_MIN_INTERVAL_S", "6"))
+    except ValueError:
+        min_interval = 6.0
+    if min_interval <= 0:
+        return
+    with _nvidia_throttle_lock:
+        now = time.monotonic()
+        wait = min_interval - (now - _nvidia_last_call_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _nvidia_last_call_ts = time.monotonic()
+
+
+def _build_error_message(err: Exception) -> str:
+    msg = str(err or "unknown error").strip().replace("\n", " ")
+    msg = " ".join(msg.split())
+    if len(msg) > 300:
+        msg = f"{msg[:297]}..."
+    return f"{type(err).__name__}: {msg}" if msg else type(err).__name__
+
+
+def _default_with_error(
+    pydantic_model: type[BaseModel],
+    default_factory,
+    err: Exception,
+) -> BaseModel:
+    base = default_factory() if default_factory else create_default_response(pydantic_model)
+    err_text = _build_error_message(err)
+    if isinstance(base, BaseModel):
+        payload = base.model_dump()
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, str):
+            payload["reasoning"] = f"{reasoning} | error: {err_text}"
+            return pydantic_model(**payload)
+    return base
 
 
 def call_llm(
@@ -40,24 +91,37 @@ def call_llm(
 
     # Extract API keys from state if available
     api_keys = None
+    use_nvidia_deepseek = False
     if state:
-        request = state.get("metadata", {}).get("request")
+        meta = state.get("metadata", {}) or {}
+        request = meta.get("request")
         if request and hasattr(request, 'api_keys'):
             api_keys = request.api_keys
+        use_nvidia_deepseek = bool(meta.get("use_nvidia_deepseek", False))
 
-    model_info = get_model_info(model_name, model_provider)
-    llm = get_model(model_name, model_provider, api_keys)
+    try:
+        model_info = get_model_info(model_name, model_provider)
+        llm = get_model(model_name, model_provider, api_keys, use_nvidia=use_nvidia_deepseek)
 
-    # For non-JSON support models, we can use structured output
-    if not (model_info and not model_info.has_json_mode()):
-        llm = llm.with_structured_output(
-            pydantic_model,
-            method="json_mode",
-        )
+        # For non-JSON support models, we can use structured output
+        if not (model_info and not model_info.has_json_mode()):
+            llm = llm.with_structured_output(
+                pydantic_model,
+                method="json_mode",
+            )
+    except Exception as e:
+        if agent_name:
+            progress.update_status(agent_name, None, "Error - model initialization failed")
+        print(f"Error initializing model for LLM call: {e}")
+        return _default_with_error(pydantic_model, default_factory, e)
 
     # Call the LLM with retries
+    last_error = None
     for attempt in range(max_retries):
         try:
+            # NVIDIA free tier rate-limits aggressively; serialize calls.
+            if use_nvidia_deepseek and str(model_provider).lower().endswith("deepseek"):
+                _throttle_nvidia()
             # Call the LLM
             result = llm.invoke(prompt)
 
@@ -66,22 +130,28 @@ def call_llm(
                 parsed_result = extract_json_from_response(result.content)
                 if parsed_result:
                     return pydantic_model(**parsed_result)
+                if attempt == max_retries - 1:
+                    raise ValueError("Model response did not contain parseable JSON")
             else:
                 return result
 
         except Exception as e:
+            last_error = e
             if agent_name:
                 progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
 
             if attempt == max_retries - 1:
                 print(f"Error in LLM call after {max_retries} attempts: {e}")
-                # Use default_factory if provided, otherwise create a basic default
-                if default_factory:
-                    return default_factory()
-                return create_default_response(pydantic_model)
+                return _default_with_error(pydantic_model, default_factory, e)
 
-    # This should never be reached due to the retry logic above
-    return create_default_response(pydantic_model)
+    # Fallback guard in case of an unexpected loop exit
+    if isinstance(last_error, Exception):
+        return _default_with_error(pydantic_model, default_factory, last_error)
+    return _default_with_error(
+        pydantic_model,
+        default_factory,
+        RuntimeError("LLM call failed for unknown reason"),
+    )
 
 
 def create_default_response(model_class: type[BaseModel]) -> BaseModel:

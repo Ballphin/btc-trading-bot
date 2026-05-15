@@ -43,9 +43,51 @@ class TestHedgeFundAnalyzeValidation:
         assert resp.status_code == 400
         assert "DeepSeek API key missing" in resp.json()["detail"]
 
-    def test_accepts_deepseek_with_nvidia_key(self, monkeypatch):
+    def test_rejects_deepseek_with_only_nvidia_key_when_route_not_opted_in(self, monkeypatch):
+        # New contract: NVIDIA route is opt-in; without the flag, NVIDIA key alone is not enough.
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
+
+        resp = client.post(
+            "/api/hedgefund/analyze",
+            json={
+                "tickers": ["AAPL"],
+                "selected_analysts": [_valid_analyst()],
+                "model_provider": "DeepSeek",
+                "model_name": "deepseek-v4-pro",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "DeepSeek API key missing" in resp.json()["detail"]
+
+    def test_accepts_deepseek_via_nvidia_route_when_opted_in(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setenv("NVIDIA_API_KEY", "nv-test-key")
+
+        fake_thread = Mock()
+        fake_thread.start = Mock()
+
+        with patch.object(server_module.threading, "Thread", return_value=fake_thread):
+            resp = client.post(
+                "/api/hedgefund/analyze",
+                json={
+                    "tickers": ["AAPL"],
+                    "selected_analysts": [_valid_analyst()],
+                    "model_provider": "DeepSeek",
+                    "model_name": "deepseek-v4-pro",
+                    "use_nvidia_deepseek": True,
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "job_id" in body
+        fake_thread.start.assert_called_once()
+
+    def test_accepts_deepseek_default_route_with_deepseek_key(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-test-key")
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
 
         fake_thread = Mock()
         fake_thread.start = Mock()
@@ -62,8 +104,7 @@ class TestHedgeFundAnalyzeValidation:
             )
 
         assert resp.status_code == 200
-        body = resp.json()
-        assert "job_id" in body
+        assert "job_id" in resp.json()
         fake_thread.start.assert_called_once()
 
     def test_rejects_openai_without_openai_key(self, monkeypatch):

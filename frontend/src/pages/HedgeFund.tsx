@@ -45,6 +45,7 @@ export default function HedgeFund() {
   const [agents, setAgents] = useState<HedgeFundAgent[]>([]);
   const [selectedAgents, setSelectedAgents] = useState<Set<string>>(new Set());
   const [tickerInput, setTickerInput] = useState('AAPL');
+  const [useNvidia, setUseNvidia] = useState(false);
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +160,7 @@ export default function HedgeFund() {
         selected_analysts: Array.from(selectedAgents),
         model_name: 'deepseek-v4-pro',
         model_provider: 'DeepSeek',
+        use_nvidia_deepseek: useNvidia,
       };
 
       const res = await startHedgeFundAnalysis(req);
@@ -298,6 +300,24 @@ export default function HedgeFund() {
                   disabled={loading}
                 />
                 <p className="text-xs text-slate-500 mt-1">Note: Works for stocks only (financialdatasets.ai)</p>
+              </div>
+
+              <div className="pt-1">
+                <label className="flex items-start gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={useNvidia}
+                    onChange={(e) => setUseNvidia(e.target.checked)}
+                    disabled={loading}
+                    className="mt-1 accent-accent-blue"
+                  />
+                  <span className="text-sm text-slate-300">
+                    Use NVIDIA DeepSeek route
+                    <span className="block text-xs text-slate-500 mt-0.5">
+                      Free tier; throttled (~6s between calls) so 13 analysts run sequentially. Slower but avoids 429 errors. Default: direct DeepSeek API.
+                    </span>
+                  </span>
+                </label>
               </div>
 
               <div className="pt-2">
