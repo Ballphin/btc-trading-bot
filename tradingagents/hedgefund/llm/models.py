@@ -139,6 +139,13 @@ def get_models_list():
     ]
 
 
+def _llm_timeout_seconds() -> float:
+    try:
+        return float(os.getenv("HEDGEFUND_LLM_TIMEOUT_S", "90"))
+    except ValueError:
+        return 90.0
+
+
 def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None, use_nvidia: bool = False) -> ChatOpenAI | ChatGroq | ChatOllama | GigaChat | None:
     if model_provider == ModelProvider.GROQ:
         api_key = (api_keys or {}).get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
@@ -179,13 +186,18 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
             nvidia_model = os.getenv("NVIDIA_DEEPSEEK_MODEL", model_name)
             if "/" not in nvidia_model and nvidia_model.startswith("deepseek-"):
                 nvidia_model = f"deepseek-ai/{nvidia_model}"
-            return ChatOpenAI(model=nvidia_model, api_key=nvidia_api_key, base_url=nvidia_base_url)
+            return ChatOpenAI(
+                model=nvidia_model,
+                api_key=nvidia_api_key,
+                base_url=nvidia_base_url,
+                timeout=_llm_timeout_seconds(),
+            )
 
         api_key = (api_keys or {}).get("DEEPSEEK_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
             print(f"API Key Error: Please make sure DEEPSEEK_API_KEY is set in your .env file or provided via API keys.")
             raise ValueError("DeepSeek API key not found.  Please make sure DEEPSEEK_API_KEY is set in your .env file or provided via API keys.")
-        return ChatDeepSeek(model=model_name, api_key=api_key)
+        return ChatDeepSeek(model=model_name, api_key=api_key, timeout=_llm_timeout_seconds())
     elif model_provider == ModelProvider.GOOGLE:
         api_key = (api_keys or {}).get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key:

@@ -32,6 +32,7 @@ class TestDeepSeekRouting:
         monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
         monkeypatch.setenv("NVIDIA_API_BASE", "https://integrate.api.nvidia.com")
         monkeypatch.setenv("NVIDIA_DEEPSEEK_MODEL", "deepseek-v4-pro")
+        monkeypatch.setenv("HEDGEFUND_LLM_TIMEOUT_S", "45")
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
         with patch("tradingagents.hedgefund.llm.models.ChatOpenAI") as mock_openai:
@@ -45,11 +46,13 @@ class TestDeepSeekRouting:
                 model="deepseek-ai/deepseek-v4-pro",
                 api_key="nv-key",
                 base_url="https://integrate.api.nvidia.com/v1",
+                timeout=45.0,
             )
 
     def test_deepseek_uses_native_provider_when_deepseek_key_present(self, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_USE_NVIDIA", raising=False)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+        monkeypatch.setenv("HEDGEFUND_LLM_TIMEOUT_S", "45")
         monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
 
         with patch("tradingagents.hedgefund.llm.models.ChatDeepSeek") as mock_deepseek:
@@ -59,7 +62,11 @@ class TestDeepSeekRouting:
             out = get_model("deepseek-v4-pro", ModelProvider.DEEPSEEK)
 
             assert out is sentinel
-            mock_deepseek.assert_called_once_with(model="deepseek-v4-pro", api_key="ds-key")
+            mock_deepseek.assert_called_once_with(
+                model="deepseek-v4-pro",
+                api_key="ds-key",
+                timeout=45.0,
+            )
 
     def test_deepseek_uses_nvidia_only_when_use_nvidia_flag_set(self, monkeypatch):
         # New contract: NVIDIA route is opt-in, not auto-selected from key presence.
@@ -67,6 +74,7 @@ class TestDeepSeekRouting:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
         monkeypatch.setenv("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1")
+        monkeypatch.setenv("HEDGEFUND_LLM_TIMEOUT_S", "45")
 
         with patch("tradingagents.hedgefund.llm.models.ChatOpenAI") as mock_openai:
             sentinel = object()
@@ -83,6 +91,7 @@ class TestDeepSeekRouting:
                 model="deepseek-ai/deepseek-v4-pro",
                 api_key="nv-key",
                 base_url="https://integrate.api.nvidia.com/v1",
+                timeout=45.0,
             )
 
     def test_deepseek_without_flag_requires_deepseek_key(self, monkeypatch):

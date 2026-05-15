@@ -6533,6 +6533,29 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
     if invalid:
         raise HTTPException(status_code=400, detail=f"Unknown analysts: {sorted(invalid)}")
 
+    # HedgeFund endpoint is equity-focused; reject common crypto symbols quickly
+    # to avoid long-running jobs that eventually degrade to fallback outputs.
+    unsupported_crypto = []
+    for ticker in req.tickers:
+        t = (ticker or "").upper().strip()
+        if (
+            t.endswith("-USD")
+            or t.endswith("USDT")
+            or t.endswith("USDC")
+            or t.endswith("-PERP")
+            or "/" in t
+        ):
+            unsupported_crypto.append(ticker)
+    if unsupported_crypto:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "HedgeFund analysis supports equity tickers only. "
+                f"Unsupported crypto tickers: {unsupported_crypto}. "
+                "Use the main analysis endpoint for crypto pairs."
+            ),
+        )
+
     # Fail fast if provider API key is missing (avoid late SSE disconnect-looking failures)
     provider_env_map = {
         "openai": "OPENAI_API_KEY",

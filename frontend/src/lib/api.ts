@@ -523,7 +523,18 @@ export async function startHedgeFundAnalysis(req: HedgeFundRequest): Promise<{ j
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   });
-  if (!res.ok) throw new Error('Failed to start hedgefund analysis');
+  if (!res.ok) {
+    let detail = 'Failed to start hedgefund analysis';
+    try {
+      const payload = await res.json();
+      if (payload?.detail && typeof payload.detail === 'string') {
+        detail = payload.detail;
+      }
+    } catch {
+      // keep default detail
+    }
+    throw new Error(detail);
+  }
   return res.json();
 }
 

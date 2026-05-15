@@ -40,6 +40,17 @@ function isRateLimitError(err: unknown): boolean {
   return lower.includes('429') || lower.includes('too many requests');
 }
 
+function isLikelyCryptoTicker(ticker: string): boolean {
+  const t = ticker.toUpperCase();
+  return (
+    t.endsWith('-USD') ||
+    t.endsWith('USDT') ||
+    t.endsWith('USDC') ||
+    t.endsWith('-PERP') ||
+    t.includes('/')
+  );
+}
+
 export default function HedgeFund() {
   const [serverStatus, setServerStatus] = useState<'online' | 'offline' | 'waking'>('waking');
   const [agents, setAgents] = useState<HedgeFundAgent[]>([]);
@@ -139,6 +150,18 @@ export default function HedgeFund() {
       setError('Please enter a ticker');
       return;
     }
+    const tickers = tickerInput.split(',').map(t => t.trim()).filter(Boolean);
+    if (tickers.length === 0) {
+      setError('Please enter at least one ticker');
+      return;
+    }
+    const unsupported = tickers.filter(isLikelyCryptoTicker);
+    if (unsupported.length > 0) {
+      setError(
+        `HedgeFund supports stock tickers only. Unsupported crypto tickers: ${unsupported.join(', ')}. Use the main analysis flow for crypto.`
+      );
+      return;
+    }
     if (rateLimitCooldownSec > 0) {
       setError(`NVIDIA rate limit cooldown active. Retry in ${rateLimitCooldownSec}s.`);
       return;
@@ -156,7 +179,7 @@ export default function HedgeFund() {
       setElapsedSec(0);
 
       const req: HedgeFundRequest = {
-        tickers: tickerInput.split(',').map(t => t.trim()),
+        tickers,
         selected_analysts: Array.from(selectedAgents),
         model_name: 'deepseek-v4-pro',
         model_provider: 'DeepSeek',

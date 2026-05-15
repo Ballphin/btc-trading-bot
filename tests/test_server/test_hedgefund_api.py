@@ -14,6 +14,19 @@ def _valid_analyst() -> str:
 
 
 class TestHedgeFundAnalyzeValidation:
+    def test_rejects_crypto_ticker_for_hedgefund_flow(self):
+        resp = client.post(
+            "/api/hedgefund/analyze",
+            json={
+                "tickers": ["BTC-USD"],
+                "selected_analysts": [_valid_analyst()],
+                "model_provider": "DeepSeek",
+                "model_name": "deepseek-v4-pro",
+            },
+        )
+        assert resp.status_code == 400
+        assert "equity tickers only" in resp.json()["detail"]
+
     def test_rejects_unknown_analyst(self):
         resp = client.post(
             "/api/hedgefund/analyze",
