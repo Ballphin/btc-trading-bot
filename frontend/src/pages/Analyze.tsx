@@ -67,6 +67,55 @@ const STEP_KEY_MAP: Record<number, string> = {
   5: 'bull_bear', 6: 'research_manager', 7: 'trader', 8: 'risk_debate', 9: 'portfolio_manager',
 };
 
+interface FriendlyError {
+  title: string;
+  body: string;
+  link?: { href: string; text: string };
+  raw?: string;
+}
+
+// Translate raw upstream LLM/provider errors into actionable UI copy.
+// Falls back to the raw message when no known signature matches.
+function classifyAnalysisError(raw: string): FriendlyError {
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('insufficient balance') || /\b402\b/.test(raw)) {
+    return {
+      title: 'DeepSeek account out of credit',
+      body:
+        'The analysis reached DeepSeek but your account balance is $0, so the request was refused (HTTP 402 — Insufficient Balance). Top up your DeepSeek account and retry, or switch the model provider in the model config.',
+      link: { href: 'https://platform.deepseek.com/usage', text: 'Top up DeepSeek →' },
+      raw,
+    };
+  }
+
+  if (/\b429\b/.test(raw) || lower.includes('too many requests')) {
+    return {
+      title: 'Provider rate limited (429)',
+      body: 'The LLM provider returned 429 Too Many Requests. Wait 30–60 seconds and retry.',
+      raw,
+    };
+  }
+
+  if (lower.includes('api key') && lower.includes('missing')) {
+    return {
+      title: 'API key missing',
+      body: raw,
+    };
+  }
+
+  if (/\b5\d{2}\b/.test(raw) || lower.includes('gateway timeout') || lower.includes('timeout')) {
+    return {
+      title: 'Upstream provider is slow or unavailable',
+      body:
+        'The LLM provider timed out or returned a 5xx error. This is usually transient — retry in a minute. If it persists, switch providers in the model config.',
+      raw,
+    };
+  }
+
+  return { title: 'Analysis Failed', body: raw };
+}
+
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'START':
@@ -284,27 +333,48 @@ export default function Analyze() {
 
         {/* Right: Reports */}
         <div className="lg:col-span-2 space-y-4">
-          {state.status === 'error' && (
-            <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass p-6 border-red-500/40 border rounded-xl"
-            >
-              <div className="flex items-start gap-3">
-                <XCircle className="w-6 h-6 text-red-400 mt-0.5 shrink-0" />
-                <div className="space-y-2">
-                  <h3 className="text-red-400 font-semibold text-base">Analysis Failed</h3>
-                  <p className="text-slate-300 text-sm leading-relaxed">{state.error}</p>
-                  <button
-                    onClick={() => window.location.reload()}
-                    className="mt-3 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
-                  >
-                    Try Again
-                  </button>
+          {state.status === 'error' && (() => {
+            const friendly = classifyAnalysisError(state.error || 'Unknown error');
+            return (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="glass p-6 border-red-500/40 border rounded-xl"
+              >
+                <div className="flex items-start gap-3">
+                  <XCircle className="w-6 h-6 text-red-400 mt-0.5 shrink-0" />
+                  <div className="space-y-2 min-w-0">
+                    <h3 className="text-red-400 font-semibold text-base">{friendly.title}</h3>
+                    <p className="text-slate-300 text-sm leading-relaxed">{friendly.body}</p>
+                    {friendly.link && (
+                      <a
+                        href={friendly.link.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block text-sm font-medium text-accent-teal hover:underline"
+                      >
+                        {friendly.link.text}
+                      </a>
+                    )}
+                    {friendly.raw && friendly.raw !== friendly.body && (
+                      <details className="mt-2">
+                        <summary className="text-xs text-slate-500 cursor-pointer hover:text-slate-400">
+                          Show raw error
+                        </summary>
+                        <p className="text-xs text-slate-500 font-mono mt-1 break-all">{friendly.raw}</p>
+                      </details>
+                    )}
+                    <button
+                      onClick={() => window.location.reload()}
+                      className="mt-3 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium rounded-lg transition-colors"
+                    >
+                      Try Again
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </motion.div>
-          )}
+              </motion.div>
+            );
+          })()}
 
           {/* Agent reports */}
           {REPORT_CARDS.map(rc => (
