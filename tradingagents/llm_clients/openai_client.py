@@ -103,6 +103,15 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        # Default request timeout to avoid multi-minute hangs when the
+        # upstream provider returns 5xx and the OpenAI client retries.
+        # Configurable via LLM_TIMEOUT_S env var.
+        if "timeout" not in llm_kwargs:
+            try:
+                llm_kwargs["timeout"] = float(os.environ.get("LLM_TIMEOUT_S", "90"))
+            except ValueError:
+                llm_kwargs["timeout"] = 90.0
+
         # DeepSeek V4 models default to thinking mode, which requires
         # reasoning_content passback on tool-call turns. LangChain doesn't
         # handle this, so we disable thinking mode for all DeepSeek calls.

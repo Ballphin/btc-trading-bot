@@ -207,9 +207,25 @@ async def lifespan(app: FastAPI):
 # ── App setup ─────────────────────────────────────────────────────────
 app = FastAPI(title="TradingAgents API", version="1.0.0", lifespan=lifespan)
 
+# CORS: configurable origins. Per the Fetch spec, browsers reject the
+# combination of `Allow-Origin: *` and `Allow-Credentials: true`, so the
+# default explicitly enumerates the dev origins. Override via
+# CORS_ALLOW_ORIGINS env var (comma-separated) for deployment.
+_default_cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+_cors_env = os.environ.get("CORS_ALLOW_ORIGINS", "").strip()
+if _cors_env:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+else:
+    _cors_origins = _default_cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2338,7 +2354,8 @@ async def get_analysis(ticker: str, analysis_date: str):
     if not log_file.exists():
         raise HTTPException(status_code=404, detail=f"No analysis found for {ticker} on {analysis_date}")
 
-    data = json.loads(log_file.read_text())
+    # Disk read is blocking; offload to a worker thread.
+    data = await asyncio.to_thread(lambda: json.loads(log_file.read_text()))
 
     # Extract the base date to parse correctly via fallback hierarchy
     # Handle both legacy format (YYYY-MM-DDTHH) and new format (YYYY-MM-DD-HH-MM-AM/PM)
@@ -6515,6 +6532,9 @@ class HedgeFundRequest(BaseModel):
 
 _hedgefund_jobs: Dict[str, dict] = {}
 _hedgefund_queues: Dict[str, deque] = {}
+# Protects compound iterate+mutate operations on the dicts above.
+# Single-key writes are GIL-safe and don't need the lock.
+_hedgefund_jobs_lock = threading.Lock()
 
 @app.get("/api/hedgefund/agents")
 async def get_hedgefund_agents():
@@ -6590,16 +6610,19 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
             detail=f"{req.model_provider} API key missing. Set {required_env} in your environment or .env file.",
         )
 
-    # Purge stale jobs older than 1 hour
+    # Purge stale jobs older than 1 hour (compound iterate+mutate → needs lock)
     now_ts = time.time()
-    stale_ids = [jid for jid, j in _hedgefund_jobs.items() if now_ts - j.get("created_at", 0) > 3600]
-    for jid in stale_ids:
-        _hedgefund_jobs.pop(jid, None)
-        _hedgefund_queues.pop(jid, None)
-
     job_id = str(uuid.uuid4())
-    _hedgefund_jobs[job_id] = {"status": "running", "created_at": now_ts}
-    _hedgefund_queues[job_id] = deque()
+    with _hedgefund_jobs_lock:
+        stale_ids = [
+            jid for jid, j in _hedgefund_jobs.items()
+            if now_ts - j.get("created_at", 0) > 3600
+        ]
+        for jid in stale_ids:
+            _hedgefund_jobs.pop(jid, None)
+            _hedgefund_queues.pop(jid, None)
+        _hedgefund_jobs[job_id] = {"status": "running", "created_at": now_ts}
+        _hedgefund_queues[job_id] = deque()
 
     def run_job():
         try:

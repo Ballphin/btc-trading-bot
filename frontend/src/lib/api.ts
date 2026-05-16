@@ -527,8 +527,15 @@ export async function startHedgeFundAnalysis(req: HedgeFundRequest): Promise<{ j
     let detail = 'Failed to start hedgefund analysis';
     try {
       const payload = await res.json();
-      if (payload?.detail && typeof payload.detail === 'string') {
+      if (typeof payload?.detail === 'string') {
         detail = payload.detail;
+      } else if (Array.isArray(payload?.detail)) {
+        // FastAPI validation errors come back as a list of {loc, msg, type}.
+        detail = payload.detail
+          .map((d: any) => (typeof d?.msg === 'string' ? d.msg : JSON.stringify(d)))
+          .join('; ');
+      } else if (payload?.detail) {
+        detail = JSON.stringify(payload.detail);
       }
     } catch {
       // keep default detail
