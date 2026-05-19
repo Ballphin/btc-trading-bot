@@ -1,15 +1,149 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
+import { ArrowLeft, BarChart3, MessageSquare, Newspaper, PieChart, CheckCircle2, AlertTriangle, XCircle, Briefcase } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import AgentReportCard from '../components/AgentReportCard';
 import DebatePanel from '../components/DebatePanel';
 import PriceChart from '../components/PriceChart';
 import ReactMarkdown from 'react-markdown';
 import FinalDecisionCard from '../components/FinalDecisionCard';
-import { fetchAnalysis, fetchPrice, type AnalysisData, type PriceRecord } from '../lib/api';
+import {
+  fetchAnalysisEnvelope,
+  fetchPrice,
+  type AnalysisData,
+  type AnalysisDetailEnvelope,
+  type HedgeFundHistoryEntry,
+  type PriceRecord,
+} from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+
+function HedgeFundDetail({
+  ticker,
+  date,
+  entry,
+  onBack,
+}: {
+  ticker: string;
+  date: string;
+  entry: HedgeFundHistoryEntry;
+  onBack: () => void;
+}) {
+  const action = (entry.action || 'hold').toUpperCase();
+  const confPct = entry.confidence_0_1 != null
+    ? Math.round(entry.confidence_0_1 * 100)
+    : null;
+  const fmtUsd = (v: number | null | undefined) =>
+    v == null ? '—' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+
+  return (
+    <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="flex items-center gap-4 mb-8">
+        <button onClick={onBack} aria-label="Back to history" className="text-slate-400 hover:text-white transition-colors">
+          <ArrowLeft className="w-5 h-5" />
+        </button>
+        <div className="flex-1">
+          <h1 className="text-2xl font-bold text-white flex items-center gap-3">
+            {ticker}
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold">
+              <Briefcase className="w-3 h-3" />
+              HF · {action}{entry.quantity ? ` ${entry.quantity}` : ''}
+            </span>
+          </h1>
+          <p className="text-sm text-slate-500">HedgeFund run · {entry.ts_local || date}</p>
+        </div>
+        {confPct != null && (
+          <div className="text-right">
+            <div className="text-xs text-slate-500">Confidence</div>
+            <div className="text-xl font-semibold text-white">{confPct}%</div>
+          </div>
+        )}
+      </div>
+
+      {entry.truncated && (
+        <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-sm">
+          Some analyst reasoning was truncated to keep this record under 256 KB.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="glass p-6 space-y-3">
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide">Decision Context</h2>
+          <Row label="Action" value={action} />
+          <Row label="Quantity" value={entry.quantity?.toString() ?? '—'} />
+          <Row label="Price at decision" value={fmtUsd(entry.price_at_decision_usd)} />
+          <Row label="Notional" value={fmtUsd(entry.notional_usd)} />
+          <Row label="Initial cash" value={fmtUsd(entry.initial_cash)} />
+          <Row label="Tickers in run" value={(entry.tickers_in_run || []).join(', ') || '—'} />
+          <Row label="Model" value={`${entry.model_provider ?? '?'} / ${entry.model_name ?? '?'}`} />
+          <Row label="Window" value={`${entry.start_date ?? '?'} → ${entry.end_date ?? '?'}`} />
+          <Row label="Local time" value={entry.ts_local || '—'} />
+          {entry.price_capture_error && (
+            <div className="text-xs text-amber-400 mt-2">Price capture: {entry.price_capture_error}</div>
+          )}
+        </div>
+
+        <div className="glass p-6 lg:col-span-2">
+          <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3">Reasoning</h2>
+          <div className="prose prose-invert max-w-none text-slate-300 text-sm leading-relaxed whitespace-pre-wrap break-words">
+            <ReactMarkdown>{entry.reasoning || '_No reasoning recorded._'}</ReactMarkdown>
+          </div>
+        </div>
+      </div>
+
+      <div className="glass p-6 mt-6">
+        <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wide mb-3">
+          Analyst Signals
+          {entry.analyst_signals_empty && (
+            <span className="ml-2 text-xs font-normal text-slate-500">(no per-analyst signal recorded for this ticker)</span>
+          )}
+        </h2>
+        {!entry.analyst_signals_empty && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {Object.values(entry.analyst_signals).map((sig) => {
+              const sigColor =
+                sig.signal === 'bullish' ? 'text-green-400 bg-green-500/10 border-green-500/30' :
+                sig.signal === 'bearish' ? 'text-red-400 bg-red-500/10 border-red-500/30' :
+                'text-slate-300 bg-slate-700/30 border-slate-600/40';
+              const conf = sig.confidence_0_1 != null ? Math.round(sig.confidence_0_1 * 100) : null;
+              return (
+                <details key={sig.agent} className="rounded-lg bg-slate-900/40 border border-white/5 p-3">
+                  <summary className="cursor-pointer flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium text-white capitalize">
+                      {sig.agent.replace(/_agent$/, '').replaceAll('_', ' ')}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs px-2 py-0.5 rounded border font-medium ${sigColor}`}>
+                        {(sig.signal || 'neutral').toUpperCase()}
+                      </span>
+                      {conf != null && (
+                        <span className="text-xs text-slate-400 font-mono">{conf}%</span>
+                      )}
+                    </div>
+                  </summary>
+                  {sig.raw && (
+                    <pre className="mt-2 text-xs text-slate-400 overflow-x-auto whitespace-pre-wrap break-words">
+                      {JSON.stringify(sig.raw, null, 2)}
+                    </pre>
+                  )}
+                </details>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-slate-500">{label}</span>
+      <span className="text-white font-medium text-right">{value}</span>
+    </div>
+  );
+}
 
 function extractSignal(text: string): string {
   const upper = (text || '').toUpperCase();
@@ -45,7 +179,7 @@ export default function AnalysisDetail() {
   const { ticker, date } = useParams<{ ticker: string; date: string }>();
   useDocumentTitle(`${ticker} — ${date}`);
   const navigate = useNavigate();
-  const [analysis, setAnalysis] = useState<AnalysisData | null>(null);
+  const [envelope, setEnvelope] = useState<AnalysisDetailEnvelope | null>(null);
   const [priceData, setPriceData] = useState<PriceRecord[]>([]);
   const [analysisKey, setAnalysisKey] = useState('');
   const [activeTab, setActiveTab] = useState<'overview' | 'reports' | 'debates'>('overview');
@@ -57,11 +191,11 @@ export default function AnalysisDetail() {
     let cancelled = false;
 
     Promise.all([
-      fetchAnalysis(ticker, date).catch(() => null),
+      fetchAnalysisEnvelope(ticker, date).catch(() => null),
       fetchPrice(ticker, 30, '4h').catch(() => []),
-    ]).then(([a, p]) => {
+    ]).then(([env, p]) => {
       if (cancelled) return;
-      setAnalysis(a);
+      setEnvelope(env);
       setPriceData(p);
       setAnalysisKey(requestKey);
     });
@@ -79,7 +213,7 @@ export default function AnalysisDetail() {
     );
   }
 
-  if (!analysis) {
+  if (!envelope) {
     return (
       <div className="max-w-7xl mx-auto px-6 py-20 text-center">
         <p className="text-slate-500">Analysis not found for {ticker} on {date}</p>
@@ -89,6 +223,27 @@ export default function AnalysisDetail() {
       </div>
     );
   }
+
+  // Dispatch on kind from the API envelope (not from the file body) — see
+  // SSE rebuttal in the v2 plan. HedgeFund records have a fundamentally
+  // different schema (no SL/TP/horizon/reports) and get their own renderer.
+  if (envelope.kind === 'hedgefund') {
+    return (
+      <HedgeFundDetail
+        ticker={ticker!}
+        date={date!}
+        entry={envelope.data as HedgeFundHistoryEntry}
+        onBack={() => navigate(`/history/${ticker}`)}
+      />
+    );
+  }
+
+  // Main-analysis path: keep existing `AnalysisData` shape with the
+  // date_formatted merged from the envelope top-level.
+  const analysis: AnalysisData = {
+    ...(envelope.data as AnalysisData),
+    date_formatted: envelope.date_formatted || (envelope.data as AnalysisData).date_formatted,
+  };
 
   // SSE FIX: Format date with error boundary - use API formatted date or fallback
   const displayDate = analysis.date_formatted || date;

@@ -441,6 +441,22 @@ export default function HedgeFund() {
           {/* Results Display */}
           {result && (
             <div className="space-y-6">
+              {result.persisted === false && (
+                <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-amber-300">Result not saved to history</p>
+                    <p className="text-xs text-amber-400/80 mt-1 break-words">
+                      The decision below is valid but did not persist to the History tab.
+                      {result.persist_error && (
+                        <>
+                          {' '}Reason: <code className="font-mono">{result.persist_error}</code>
+                        </>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="p-6 rounded-2xl bg-slate-900 border border-white/10">
                 <h3 className="text-xl font-bold text-white mb-2">Portfolio Manager Decision</h3>
                 {Object.entries(result.decisions || {}).map(([ticker, dec]: [string, any]) => (

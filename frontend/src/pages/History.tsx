@@ -1,9 +1,34 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ChevronRight, ChevronDown, Activity, Clock } from 'lucide-react';
+import { ChevronRight, ChevronDown, Activity, Clock, Briefcase } from 'lucide-react';
 import SignalBadge from '../components/SignalBadge';
 import { fetchTickers, fetchAnalyses, type TickerInfo, type AnalysisSummary } from '../lib/api';
 import useDocumentTitle from '../hooks/useDocumentTitle';
+
+/**
+ * Render a kind-aware badge for a history row.
+ *
+ * Main analyses keep the existing green/red `SignalBadge`. HedgeFund entries
+ * get a visually distinct amber pill (`HF · ACTION QTY`) so users cannot
+ * confuse a portfolio-manager decision (no SL/TP, share-count quantity) with
+ * a main-analysis signal (entry/SL/TP/horizon).
+ */
+function AnalysisRowBadge({ a }: { a: AnalysisSummary }) {
+  if (a.kind === 'hedgefund') {
+    const action = (a.action || a.signal || 'HOLD').toUpperCase();
+    const qty = a.quantity ?? 0;
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold tracking-wide"
+        title="HedgeFund portfolio-manager decision (no stop-loss/take-profit)"
+      >
+        <Briefcase className="w-3 h-3" />
+        HF · {action}{qty ? ` ${qty}` : ''}
+      </span>
+    );
+  }
+  return <SignalBadge signal={a.signal} size="sm" />;
+}
 
 export default function History() {
   const { ticker: selectedTicker } = useParams<{ ticker?: string }>();
@@ -174,7 +199,7 @@ export default function History() {
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-3">
-                                  <SignalBadge signal={a.signal} size="sm" />
+                                  <AnalysisRowBadge a={a} />
                                   <ChevronRight className="w-4 h-4 text-slate-600 group-hover/sublink:text-accent-teal transition-colors" />
                                 </div>
                               </Link>

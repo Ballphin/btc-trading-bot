@@ -5,8 +5,8 @@ import { clsx } from 'clsx';
 import { API_BASE_URL } from '../lib/api';
 
 const NAV_ITEMS = [
-  { to: '/hedgefund', label: 'Hedge Fund', icon: Briefcase },
   { to: '/', label: 'Home', icon: Home },
+  { to: '/hedgefund', label: 'Hedge Fund', icon: Briefcase },
   { to: '/backtest', label: 'Backtest', icon: TrendingUp },
   { to: '/backtests', label: 'Backtests', icon: BarChart3 },
   { to: '/scorecard', label: 'Scorecard', icon: Target },

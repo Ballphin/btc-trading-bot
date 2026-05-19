@@ -289,6 +289,17 @@ def _history_filename_for(ticker: str) -> str:
     return f"history_{ticker.replace('/', '_')}.jsonl"
 
 
+# Subdirectories under EVAL_RESULTS_DIR/<ticker>/ that hold `full_states_log_*.json`
+# files we want to round-trip via the HISTORY gist.
+# Records are tagged with a `_kind` field so pull can route them to the right dir.
+_LOG_DIRS: tuple = ("TradingAgentsStrategy_logs", "HedgeFundStrategy_logs")
+_KIND_BY_DIR: dict = {
+    "TradingAgentsStrategy_logs": "main",
+    "HedgeFundStrategy_logs": "hedgefund",
+}
+_DIR_BY_KIND: dict = {v: k for k, v in _KIND_BY_DIR.items()}
+
+
 def pull_history_all(logs_root: Path) -> dict:
     """Download every `history_*.jsonl` from the HISTORY gist and reconstruct
     individual `full_states_log_*.json` files under
@@ -330,8 +341,7 @@ def pull_history_all(logs_root: Path) -> dict:
         if not content:
             continue
 
-        logs_dir = logs_root / ticker / "TradingAgentsStrategy_logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        ticker_root = logs_root / ticker
         ticker_pulled = 0
         import json as _json
         for line in content.splitlines():
@@ -344,6 +354,13 @@ def pull_history_all(logs_root: Path) -> dict:
                 body = rec.get("content")
                 if not fn or body is None:
                     continue
+                # Route to the correct sub-folder based on the record's _kind
+                # tag (default to main for backward compatibility with old
+                # gists that pre-date the hedgefund split).
+                kind = rec.get("_kind") or "main"
+                subdir_name = _DIR_BY_KIND.get(kind, "TradingAgentsStrategy_logs")
+                logs_dir = ticker_root / subdir_name
+                logs_dir.mkdir(parents=True, exist_ok=True)
                 dest = logs_dir / fn
                 if dest.exists():
                     continue
@@ -372,25 +389,30 @@ def push_history(logs_root: Path, ticker: str) -> bool:
     except ImportError:
         return False
 
-    logs_dir = logs_root / ticker / "TradingAgentsStrategy_logs"
-    if not logs_dir.exists():
+    # Collect logs from BOTH the main-analysis and hedgefund subdirs so a
+    # single gist round-trip carries both. Each record is tagged with `_kind`
+    # so pull can route it back to the correct subdir.
+    candidates: list = []
+    for subdir_name in _LOG_DIRS:
+        logs_dir = logs_root / ticker / subdir_name
+        if not logs_dir.exists():
+            continue
+        kind = _KIND_BY_DIR[subdir_name]
+        for p in logs_dir.glob("full_states_log_*.json"):
+            candidates.append((p, kind))
+    if not candidates:
         return False
 
-    # Collect all state logs, sort newest-first by mtime, cap at rolling limit
-    json_files = sorted(
-        logs_dir.glob("full_states_log_*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )[:_HISTORY_ROLLING_CAP]
-    if not json_files:
-        return False
+    # Sort newest-first by mtime across both kinds, cap at rolling limit
+    candidates.sort(key=lambda pk: pk[0].stat().st_mtime, reverse=True)
+    candidates = candidates[:_HISTORY_ROLLING_CAP]
 
     import json as _json
     lines = []
-    for path in reversed(json_files):  # chronological order in the file
+    for path, kind in reversed(candidates):  # chronological order in the file
         try:
             body = _json.loads(path.read_text())
-            rec = {"filename": path.name, "content": body}
+            rec = {"filename": path.name, "content": body, "_kind": kind}
             lines.append(_json.dumps(rec, default=str))
         except Exception as e:
             logger.warning(f"[GistSync] History read {path.name} failed: {e}")

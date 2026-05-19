@@ -1954,73 +1954,123 @@ async def get_job(job_id: str):
 
 @app.get("/api/history")
 async def list_tickers():
-    """List all tickers that have analysis logs."""
+    """List all tickers that have analysis logs (main OR hedgefund)."""
     if not EVAL_RESULTS_DIR.exists():
         return {"tickers": []}
 
     tickers = []
     for d in sorted(EVAL_RESULTS_DIR.iterdir()):
-        if d.is_dir():
-            logs_dir = d / "TradingAgentsStrategy_logs"
-            if logs_dir.exists():
-                json_files = list(logs_dir.glob("full_states_log_*.json"))
-                tickers.append({
-                    "ticker": d.name,
-                    "analysis_count": len(json_files),
-                    "latest_date": _extract_latest_date(json_files),
-                })
+        if not d.is_dir():
+            continue
+        main_dir = d / "TradingAgentsStrategy_logs"
+        hf_dir = d / "HedgeFundStrategy_logs"
+        all_files = []
+        if main_dir.exists():
+            all_files.extend(main_dir.glob("full_states_log_*.json"))
+        if hf_dir.exists():
+            all_files.extend(hf_dir.glob("full_states_log_*.json"))
+        if not all_files:
+            continue
+        tickers.append({
+            "ticker": d.name,
+            "analysis_count": len(all_files),
+            "latest_date": _extract_latest_date(all_files),
+        })
     return {"tickers": tickers}
 
 
 def _extract_latest_date(files) -> Optional[str]:
     dates = []
     for f in files:
-        # Match both full_states_log_YYYY-MM-DD.json and full_states_log_YYYY-MM-DDTHH.json
-        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2}(?:T\d{2})?)\.json", f.name)
-        if match:
-            dates.append(match.group(1))
+        # Match in order of specificity:
+        # 1. Hedgefund long-form: YYYY-MM-DD-HH-MM-SS-ffffff-AM/PM
+        # 2. Manual format:       YYYY-MM-DD-HH-MM-AM/PM
+        # 3. Legacy daily/hourly: YYYY-MM-DD[THH]
+        m = re.search(
+            r"full_states_log_(\d{4}-\d{2}-\d{2})-\d{2}-\d{2}-\d{2}-\d{6}-(?:AM|PM)",
+            f.name,
+        )
+        if m:
+            dates.append(m.group(1))
+            continue
+        m = re.search(
+            r"full_states_log_(\d{4}-\d{2}-\d{2})-\d{2}-\d{2}-(?:AM|PM)\.json",
+            f.name,
+        )
+        if m:
+            dates.append(m.group(1))
+            continue
+        m = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2}(?:T\d{2})?)\.json", f.name)
+        if m:
+            dates.append(m.group(1))
     return max(dates) if dates else None
 
 
 @app.get("/api/history/{ticker}")
 async def list_analyses(ticker: str):
-    """List all analysis dates for a given ticker, including intraday timestamped files."""
-    logs_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
-    if not logs_dir.exists():
+    """List all analysis dates for a given ticker.
+
+    Merges main-analysis logs (``TradingAgentsStrategy_logs/``) and
+    hedgefund logs (``HedgeFundStrategy_logs/``). The ``kind`` field on
+    each entry is derived from the source directory — never from the
+    file body — so older logs without an explicit kind stay accurate.
+    """
+    main_dir = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs"
+    hf_dir = EVAL_RESULTS_DIR / ticker / "HedgeFundStrategy_logs"
+    if not main_dir.exists() and not hf_dir.exists():
         raise HTTPException(status_code=404, detail=f"No analyses found for {ticker}")
 
-    analyses = []
-    for f in sorted(logs_dir.glob("full_states_log_*.json"), reverse=True):
-        # Match three formats:
-        # 1. Legacy daily: YYYY-MM-DD
-        # 2. Legacy hourly: YYYY-MM-DDTHH
-        # 3. New manual format: YYYY-MM-DD-HH-MM-AM/PM
-        legacy_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})(T(\d{2}))?(\.json)$", f.name)
-        new_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(AM|PM)\.json$", f.name)
+    # (path, kind) pairs sorted newest-first by filename
+    candidates: list = []
+    if main_dir.exists():
+        for p in main_dir.glob("full_states_log_*.json"):
+            candidates.append((p, "main"))
+    if hf_dir.exists():
+        for p in hf_dir.glob("full_states_log_*.json"):
+            candidates.append((p, "hedgefund"))
+    candidates.sort(key=lambda pk: pk[0].name, reverse=True)
 
-        if new_match:
-            # New format: YYYY-MM-DD-HH-MM-AM/PM
+    analyses = []
+    for f, kind in candidates:
+        # Match four formats, most specific first:
+        # 1. Hedgefund long-form: YYYY-MM-DD-HH-MM-SS-ffffff-AM/PM (with optional -N collision suffix)
+        # 2. New manual:          YYYY-MM-DD-HH-MM-AM/PM
+        # 3. Legacy hourly:       YYYY-MM-DDTHH
+        # 4. Legacy daily:        YYYY-MM-DD
+        hf_match = re.search(
+            r"full_states_log_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{6})-(AM|PM)(?:-\d+)?\.json$",
+            f.name,
+        )
+        new_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(AM|PM)\.json$", f.name)
+        legacy_match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})(T(\d{2}))?(\.json)$", f.name)
+
+        if hf_match:
+            analysis_date = hf_match.group(1)
+            hour_12 = int(hf_match.group(2))
+            minute = hf_match.group(3)
+            second = hf_match.group(4)
+            micros = hf_match.group(5)
+            am_pm = hf_match.group(6)
+            # Round-trip identifier matches the file stem after the prefix
+            candle_time = f.stem.replace("full_states_log_", "")
+            time_label = f"{hour_12}:{minute}:{second} {am_pm}"
+            local_date = analysis_date
+            _ = micros  # retained for traceability; not surfaced to the UI
+        elif new_match:
             analysis_date = new_match.group(1)
             hour_12 = int(new_match.group(2))
             minute = new_match.group(3)
             am_pm = new_match.group(4)
-            # Convert to 24-hour for internal use
-            hour_24 = hour_12 if am_pm == "AM" else (hour_12 % 12) + 12
-            if hour_12 == 12 and am_pm == "AM":
-                hour_24 = 0  # Midnight
             candle_time = f"{analysis_date}-{new_match.group(2)}-{minute}-{am_pm}"
-            # Format for display: HH:MM AM/PM
             time_label = f"{hour_12}:{minute} {am_pm}"
             local_date = analysis_date
         elif legacy_match:
-            # Legacy formats
             analysis_date = legacy_match.group(1)
-            hour_str = legacy_match.group(3)  # e.g. '16' or None
+            hour_str = legacy_match.group(3)
             candle_time = f"{analysis_date}T{hour_str}" if hour_str else analysis_date
             time_label = None
             local_date = analysis_date
             if hour_str:
-                # Emit a strict ISO 8601 UTC string to let the frontend localize it
                 time_label = f"{analysis_date}T{hour_str}:00:00Z"
                 try:
                     utc_dt = datetime.fromisoformat(time_label.replace("Z", "+00:00"))
@@ -2030,19 +2080,29 @@ async def list_analyses(ticker: str):
         else:
             continue
 
-        # Extract signal from nested date key in log file
+        # Extract signal/confidence. For hedgefund logs the schema is different:
+        # the body has `action` + `confidence_0_1` rather than final_trade_decision.
+        signal = "UNKNOWN"
+        confidence = None
+        action = None
+        quantity = None
         try:
             data = json.loads(f.read_text())
-            # Try multiple key formats: new format, candle_time, analysis_date
             date_data = data.get(candle_time) or data.get(analysis_date) or {}
-            decision_text = date_data.get("final_trade_decision", "")
-            signal = date_data.get("decision") or _extract_signal(decision_text)
-            confidence = date_data.get("confidence")
+            if kind == "hedgefund":
+                action = date_data.get("action")
+                quantity = date_data.get("quantity")
+                # Surface action as the signal so the existing SignalBadge degrades gracefully
+                signal = (action or "HOLD").upper()
+                confidence = date_data.get("confidence_0_1")
+            else:
+                decision_text = date_data.get("final_trade_decision", "")
+                signal = date_data.get("decision") or _extract_signal(decision_text)
+                confidence = date_data.get("confidence")
         except Exception:
-            signal = "UNKNOWN"
-            confidence = None
+            pass
 
-        analyses.append({
+        entry = {
             "date": analysis_date,
             "local_date": local_date,
             "candle_time": candle_time,
@@ -2050,7 +2110,12 @@ async def list_analyses(ticker: str):
             "signal": signal,
             "confidence": confidence,
             "file": f.name,
-        })
+            "kind": kind,
+        }
+        if kind == "hedgefund":
+            entry["action"] = action
+            entry["quantity"] = quantity
+        analyses.append(entry)
 
     return {"ticker": ticker, "analyses": analyses}
 
@@ -2349,13 +2414,38 @@ def _send_telegram_alert(result: dict):
 
 @app.get("/api/history/{ticker}/{analysis_date}")
 async def get_analysis(ticker: str, analysis_date: str):
-    """Return full log JSON for a specific analysis, augmented with risk parameters."""
-    log_file = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{analysis_date}.json"
-    if not log_file.exists():
+    """Return full log JSON for a specific analysis, augmented with risk parameters.
+
+    Probe order: TradingAgentsStrategy_logs/ → HedgeFundStrategy_logs/. The
+    ``kind`` of the response is derived from which directory served the file
+    (never from the file body).
+    """
+    main_path = EVAL_RESULTS_DIR / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{analysis_date}.json"
+    hf_path = EVAL_RESULTS_DIR / ticker / "HedgeFundStrategy_logs" / f"full_states_log_{analysis_date}.json"
+    if main_path.exists():
+        log_file = main_path
+        kind = "main"
+    elif hf_path.exists():
+        log_file = hf_path
+        kind = "hedgefund"
+    else:
         raise HTTPException(status_code=404, detail=f"No analysis found for {ticker} on {analysis_date}")
 
     # Disk read is blocking; offload to a worker thread.
     data = await asyncio.to_thread(lambda: json.loads(log_file.read_text()))
+
+    # Hedgefund logs use a completely different schema (action/quantity/
+    # analyst_signals) and should NOT be fed through the main-analysis
+    # ConfidenceScorer / risk-rebuild pipeline. Short-circuit early.
+    if kind == "hedgefund":
+        date_data = data.get(analysis_date) or next(iter(data.values()), {}) or {}
+        return {
+            "ticker": ticker,
+            "date": analysis_date,
+            "date_formatted": date_data.get("ts_local") or analysis_date,
+            "kind": "hedgefund",
+            "data": date_data,
+        }
 
     # Extract the base date to parse correctly via fallback hierarchy
     # Handle both legacy format (YYYY-MM-DDTHH) and new format (YYYY-MM-DD-HH-MM-AM/PM)
@@ -2467,6 +2557,7 @@ async def get_analysis(ticker: str, analysis_date: str):
         "ticker": ticker,
         "date": analysis_date,
         "date_formatted": date_formatted,
+        "kind": "main",
         "data": date_data,
     }
 
@@ -6536,6 +6627,218 @@ _hedgefund_queues: Dict[str, deque] = {}
 # Single-key writes are GIL-safe and don't need the lock.
 _hedgefund_jobs_lock = threading.Lock()
 
+# ── HedgeFund persistence ─────────────────────────────────────────────
+# Files are written into EVAL_RESULTS_DIR/<ticker>/HedgeFundStrategy_logs/
+# (a parallel directory to TradingAgentsStrategy_logs) so main-analysis
+# readers (e.g. scorecard walk-forward) are NOT affected. Each file also
+# carries `score_eligible: false` as defense-in-depth.
+_HEDGEFUND_LOG_DIR_NAME = "HedgeFundStrategy_logs"
+_HEDGEFUND_LOG_MAX_BYTES = 256 * 1024
+_TICKER_SAFE_RE = re.compile(r"^[A-Z0-9._-]{1,16}$")
+# Long-form filename for hedgefund logs: %Y-%m-%d-%I-%M-%S-%f-%p
+# e.g. full_states_log_2026-05-16-11-30-45-123456-PM.json
+_HEDGEFUND_TS_RE = re.compile(
+    r"full_states_log_"
+    r"(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{6})-(AM|PM)"
+    r"(?:-\d+)?\.json$"
+)
+
+
+def _project_analyst_signals(all_signals: dict, ticker: str) -> dict:
+    """Project a {agent: {ticker: signal}} dict down to just this ticker,
+    normalize confidence to [0, 1], and preserve the raw payload for UI.
+
+    Upstream HedgeFund agents return ``confidence`` as ``int`` on [0, 100]
+    (see ``WarrenBuffettSignal`` etc.) — we always divide by 100.
+    """
+    out: dict = {}
+    if not isinstance(all_signals, dict):
+        return out
+    for agent, per_ticker in all_signals.items():
+        if not isinstance(per_ticker, dict):
+            continue
+        entry = per_ticker.get(ticker)
+        if entry is None or not isinstance(entry, dict):
+            continue
+        sig = entry.get("signal")
+        conf_raw = entry.get("confidence")
+        try:
+            conf_norm = float(conf_raw) / 100.0 if conf_raw is not None else None
+        except (TypeError, ValueError):
+            conf_norm = None
+        out[agent] = {
+            "agent": agent,
+            "signal": sig,
+            "confidence_0_1": conf_norm,
+            "raw": entry,
+        }
+    return out
+
+
+def _capture_decision_context(ticker: str) -> dict:
+    """Best-effort yfinance last-close snapshot. Returns price=None on failure."""
+    try:
+        df = yf.Ticker(ticker).history(period="5d", interval="1d")
+        if df is not None and not df.empty:
+            close = df["Close"].iloc[-1]
+            if pd.notna(close):
+                return {
+                    "price_at_decision_usd": float(close),
+                    "price_capture_error": None,
+                }
+        return {"price_at_decision_usd": None, "price_capture_error": "no data"}
+    except Exception as e:
+        return {"price_at_decision_usd": None, "price_capture_error": str(e)}
+
+
+def _hedgefund_logs_dir(ticker: str) -> Path:
+    return EVAL_RESULTS_DIR / ticker / _HEDGEFUND_LOG_DIR_NAME
+
+
+def _persist_hedgefund_run(
+    job_id: str,
+    req: "HedgeFundRequest",
+    decisions: dict,
+    analyst_signals: dict,
+) -> dict:
+    """Persist a HedgeFund run as one JSON log per ticker.
+
+    Returns {"persisted": bool, "error": Optional[str], "files": list[str]}.
+    Never raises; the SSE `done` event must always fire even if persist fails.
+    """
+    written: list = []
+    errors: list = []
+    for ticker in (req.tickers or []):
+        if not isinstance(ticker, str) or not _TICKER_SAFE_RE.fullmatch(ticker):
+            errors.append(f"invalid ticker {ticker!r}")
+            logger.warning(f"[HedgeFund persist] rejected unsafe ticker {ticker!r}")
+            continue
+
+        # PortfolioDecision is a pydantic model when fresh from the workflow,
+        # but `decisions` may also arrive as a plain dict after JSON round-trip.
+        raw = decisions.get(ticker) if isinstance(decisions, dict) else None
+        if raw is None:
+            errors.append(f"{ticker}: no decision in workflow output")
+            continue
+        if hasattr(raw, "model_dump"):
+            d = raw.model_dump()
+        elif hasattr(raw, "dict"):
+            d = raw.dict()
+        elif isinstance(raw, dict):
+            d = raw
+        else:
+            errors.append(f"{ticker}: decision is not a dict/model ({type(raw).__name__})")
+            continue
+
+        action = str(d.get("action", "hold")).lower()
+        quantity = int(d.get("quantity") or 0)
+        conf_raw = d.get("confidence")
+        try:
+            confidence_0_1 = float(conf_raw) / 100.0 if conf_raw is not None else None
+        except (TypeError, ValueError):
+            confidence_0_1 = None
+        reasoning = d.get("reasoning") or ""
+
+        projected = _project_analyst_signals(analyst_signals, ticker)
+        ctx = _capture_decision_context(ticker)
+        price = ctx.get("price_at_decision_usd")
+        notional = (quantity * price) if (price is not None and quantity) else None
+
+        ts_utc = datetime.now(timezone.utc)
+        ts_local = ts_utc.astimezone(_USER_DISPLAY_TZ)
+        ts_key = ts_local.strftime("%Y-%m-%d-%I-%M-%S-%f-%p")
+
+        payload_body: dict = {
+            "kind": "hedgefund",
+            "ticker": ticker,
+            "run_id": job_id,
+            "action": action,
+            "quantity": quantity,
+            "confidence_0_1": confidence_0_1,
+            "reasoning": reasoning,
+            "analyst_signals": projected,
+            "analyst_signals_empty": projected == {},
+            "tickers_in_run": list(req.tickers or []),
+            "model_name": req.model_name,
+            "model_provider": req.model_provider,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "initial_cash": float(req.initial_cash or 0),
+            "ts_utc": ts_utc.isoformat(),
+            "ts_local": ts_local.isoformat(),
+            "score_eligible": False,
+            "price_at_decision_usd": price,
+            "price_capture_error": ctx.get("price_capture_error"),
+            "notional_usd": notional,
+            "truncated": False,
+        }
+        payload = {ts_key: payload_body}
+
+        try:
+            blob = json.dumps(payload, default=str, indent=2)
+        except Exception as e:
+            errors.append(f"{ticker}: json encode failed: {e}")
+            continue
+
+        # Cap: if oversize, drop raw analyst payloads + reasoning and re-encode.
+        if len(blob.encode("utf-8")) > _HEDGEFUND_LOG_MAX_BYTES:
+            original_size = len(blob.encode("utf-8"))
+            for _agent, entry in payload_body["analyst_signals"].items():
+                if isinstance(entry, dict):
+                    entry.pop("raw", None)
+            payload_body["reasoning"] = (reasoning[:1024] + "…") if len(reasoning) > 1024 else reasoning
+            payload_body["truncated"] = True
+            blob = json.dumps(payload, default=str, indent=2)
+            logger.warning(
+                f"[HedgeFund persist] {ticker}: truncated payload "
+                f"({original_size} → {len(blob.encode('utf-8'))} bytes)"
+            )
+            if len(blob.encode("utf-8")) > _HEDGEFUND_LOG_MAX_BYTES:
+                errors.append(f"{ticker}: still over {_HEDGEFUND_LOG_MAX_BYTES}B after truncation; skipped write")
+                logger.error(errors[-1])
+                continue
+
+        # Atomic write with collision suffix fallback.
+        try:
+            logs_dir = _hedgefund_logs_dir(ticker)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            base_name = f"full_states_log_{ts_key}"
+            path = logs_dir / f"{base_name}.json"
+            suffix_i = 0
+            while path.exists():
+                suffix_i += 1
+                path = logs_dir / f"{base_name}-{suffix_i}.json"
+                if suffix_i > 100:
+                    raise RuntimeError("collision suffix exhausted")
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(blob)
+            tmp.replace(path)
+            written.append(str(path))
+        except Exception as e:
+            errors.append(f"{ticker}: write failed: {e}")
+            logger.error(f"[HedgeFund persist] {ticker} write failed: {e}")
+
+    error_msg = "; ".join(errors) if errors else None
+    return {
+        "persisted": bool(written) and not errors,
+        "error": error_msg,
+        "files": written,
+    }
+
+
+def _push_hedgefund_history_async(ticker: str) -> None:
+    """Best-effort fire-and-forget gist push for hedgefund history."""
+    try:
+        from tradingagents.pulse import gist_sync
+        if gist_sync.is_history_enabled():
+            threading.Thread(
+                target=gist_sync.push_history,
+                args=(EVAL_RESULTS_DIR, ticker),
+                daemon=True,
+            ).start()
+    except Exception as _e:
+        logger.warning(f"[GistSync] Hedgefund history push dispatch failed (non-fatal): {_e}")
+
 @app.get("/api/hedgefund/agents")
 async def get_hedgefund_agents():
     try:
@@ -6696,9 +6999,28 @@ async def start_hedgefund_analysis(req: HedgeFundRequest):
                 "analyst_signals": merged_data.get("analyst_signals", {}),
             }
 
+            # Persist BEFORE emitting `done` so the UI can render an
+            # "not saved to history" banner when persistence fails.
+            try:
+                persist_result = _persist_hedgefund_run(
+                    job_id, req, decisions, merged_data.get("analyst_signals", {})
+                )
+            except Exception as _persist_exc:
+                persist_result = {"persisted": False, "error": str(_persist_exc), "files": []}
+                logger.error(f"[HedgeFund persist] unexpected exception: {_persist_exc}")
+            result["persisted"] = persist_result["persisted"]
+            result["persist_error"] = persist_result["error"]
+            _hedgefund_jobs[job_id]["persisted"] = persist_result["persisted"]
+            _hedgefund_jobs[job_id]["persist_error"] = persist_result["error"]
+
             _hedgefund_jobs[job_id]["status"] = "completed"
             _hedgefund_jobs[job_id]["result"] = result
             _hedgefund_queues[job_id].append({"event": "done", "data": result})
+
+            # Fire gist push AFTER `done` so the user doesn't wait on network IO.
+            if persist_result["persisted"]:
+                for _t in req.tickers or []:
+                    _push_hedgefund_history_async(_t)
 
         except Exception as e:
             logger.error(f"Hedgefund job failed: {e}")

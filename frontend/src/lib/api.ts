@@ -13,7 +13,42 @@ export interface AnalysisSummary {
   candle_time?: string;
   time?: string | null;
   signal: string;
+  confidence?: number | null;
   file: string;
+  // HedgeFund persistence (kind === 'hedgefund'):
+  kind?: 'main' | 'hedgefund';
+  action?: string | null;
+  quantity?: number | null;
+}
+
+export interface HedgeFundHistoryEntry {
+  kind: 'hedgefund';
+  ticker: string;
+  run_id: string;
+  action: string;
+  quantity: number;
+  confidence_0_1: number | null;
+  reasoning: string;
+  analyst_signals: Record<string, {
+    agent: string;
+    signal: string | null;
+    confidence_0_1: number | null;
+    raw?: Record<string, any>;
+  }>;
+  analyst_signals_empty: boolean;
+  tickers_in_run: string[];
+  model_name?: string;
+  model_provider?: string;
+  start_date?: string;
+  end_date?: string;
+  initial_cash?: number;
+  ts_utc: string;
+  ts_local: string;
+  score_eligible: false;
+  price_at_decision_usd: number | null;
+  price_capture_error: string | null;
+  notional_usd: number | null;
+  truncated: boolean;
 }
 
 export interface PriceRecord {
@@ -209,6 +244,22 @@ export async function fetchAnalysis(ticker: string, date: string): Promise<Analy
   const data = await res.json();
   // Merge date_formatted from top level into data object
   return { ...data.data, date_formatted: data.date_formatted };
+}
+
+export interface AnalysisDetailEnvelope {
+  ticker: string;
+  date: string;
+  date_formatted?: string;
+  kind: 'main' | 'hedgefund';
+  data: AnalysisData | HedgeFundHistoryEntry;
+}
+
+export async function fetchAnalysisEnvelope(ticker: string, date: string): Promise<AnalysisDetailEnvelope> {
+  const res = await fetch(`${API_BASE_URL}/history/${ticker}/${date}`);
+  if (!res.ok) {
+    throw new Error(`History fetch failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function fetchPrice(ticker: string, days = 90, interval = '1d'): Promise<PriceRecord[]> {
@@ -509,6 +560,10 @@ export interface HedgeFundDecision {
 export interface HedgeFundResult {
   decisions: Record<string, HedgeFundDecision>;
   analyst_signals: Record<string, any>;
+  // Persistence outcome (added when the run is saved to history).
+  // When `persisted === false`, the UI should surface `persist_error`.
+  persisted?: boolean;
+  persist_error?: string | null;
 }
 
 export async function getHedgeFundAgents(): Promise<HedgeFundAgent[]> {
